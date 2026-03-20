@@ -18,8 +18,8 @@ PolyNetAI/
 ├─ docs/                # 使用说明与策略规格
 ├─ tests/               # 单元测试与回放测试
 ├─ data/
-│  ├─ raw/              # 原始 Excel 数据
-│  └─ processed/        # 处理后 Excel 数据
+│  ├─ raw/              # 原始 Excel（本地放置，默认不提交 Git）
+│  └─ processed/        # 处理后 Excel（同上）
 ├─ notes/
 │  └─ strategy/         # 中文策略提示词与买卖规则文档
 ├─ artifacts/
@@ -102,6 +102,7 @@ python analyze_polymarket_tracker.py --input data/raw/polymarket_tracker_collect
 
 - 使用流程：`docs/experiment_workflow.md`
 - 策略规格：`docs/strategy_spec.md`
+- **数据与产物是否进 Git**：`docs/data_and_artifacts.md`
 - 中文策略原文：`notes/strategy/`
 
 ## 测试

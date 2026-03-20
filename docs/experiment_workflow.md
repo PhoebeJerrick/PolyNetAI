@@ -196,8 +196,9 @@ python scripts/run_dashboard_report.py --input-dir artifacts/live/live_outputs_b
 - `tests/`
   - 单元测试与回放测试
 - `data/`
-  - `data/raw/`：原始 Excel 数据
-  - `data/processed/`：分析脚本输出和处理后的 Excel
+  - `data/raw/`：原始 Excel（本地放置，默认不提交 Git）
+  - `data/processed/`：分析脚本输出和处理后的 Excel（同上）
+  - 详见：`docs/data_and_artifacts.md`
 - `notes/`
   - `notes/strategy/`：策略提示词、尾盘逻辑、买卖规则文档
 - `artifacts/`

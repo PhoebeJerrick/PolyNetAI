@@ -1,5 +1,73 @@
-.pytest_cache/
+# --- Python ---
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+.tox/
+.nox/
 
+# --- Virtual environments ---
+.venv/
+venv/
+ENV/
+env/
+
+# --- Build / packaging ---
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+pip-wheel-metadata/
+
+# --- IDE / Editor ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Secrets & local-only config（勿提交密钥）---
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*_secret*.yaml
+*_local*.yaml
+config.local.yaml
+
+# --- 项目运行产物（可重新生成，体积大、无版本意义）---
 artifacts/
+
+# --- 数据目录：默认不纳入版本库 ---
+# 原因：Excel/原始行情往往体积大、含隐私或版权限制、且各人数据源不同。
+# 协作时在 README / docs/data_and_artifacts.md 中说明如何放置本地数据。
+/data/raw/*
+!/data/raw/.gitkeep
+/data/processed/*
+!/data/processed/.gitkeep
+
+# 若将来在 data 下使用其它二进制格式，可取消注释或按需追加：
+# /data/**/*.parquet
+# /data/**/*.zip
+
+# --- 日志与临时文件 ---
+*.log
+*.tmp
+*.temp
