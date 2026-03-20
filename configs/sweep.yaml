@@ -1,0 +1,22 @@
+scenarios:
+  - name: baseline
+    overrides: {}
+  - name: conservative_tail
+    overrides:
+      last_minute.last_minute_min_confidence: 0.9
+      last_minute.max_tail_exposure: 25.0
+      order_sizing.base_order_size: 6.0
+  - name: aggressive_trend
+    overrides:
+      trend.min_trend_strength: 0.25
+      trend.trend_scale: 0.25
+      order_sizing.base_order_size: 10.0
+  - name: tighter_risk
+    overrides:
+      exposure.max_abs_exposure: 150.0
+      stop_loss.stop_loss_cycle_loss: 12.0
+      exposure.max_strategy_trades_per_cycle: 8
+
+grid:
+  execution.slippage_bps: [5, 10]
+  profit_taking.take_profit_fraction: [0.25, 0.35]

@@ -1,0 +1,48 @@
+trials: 16
+seed: 42
+export_top_n: 3
+
+score_weights:
+  total_net_profit: 1.0
+  max_drawdown: -0.65
+  total_fees: -0.25
+  win_rate: 120.0
+  signal_execution_rate: 15.0
+
+parameters:
+  trend.min_trend_strength:
+    type: float
+    min: 0.20
+    max: 0.50
+    step: 0.05
+    precision: 2
+  trend.trend_scale:
+    type: float
+    min: 0.10
+    max: 0.30
+    step: 0.05
+    precision: 2
+  stop_loss.stop_loss_cycle_loss:
+    type: float
+    min: 10.0
+    max: 30.0
+    step: 2.0
+    precision: 1
+  last_minute.max_tail_exposure:
+    type: float
+    min: 20.0
+    max: 50.0
+    step: 5.0
+    precision: 1
+  order_sizing.base_order_size:
+    type: float
+    min: 4.0
+    max: 12.0
+    step: 1.0
+    precision: 1
+  execution.slippage_bps:
+    type: choice
+    values: [5, 10, 15]
+  profit_taking.take_profit_fraction:
+    type: choice
+    values: [0.2, 0.25, 0.3, 0.35, 0.4]
