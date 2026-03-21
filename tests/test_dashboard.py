@@ -43,8 +43,8 @@ def build_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFra
     )
     snapshots_df = pd.DataFrame(
         [
-            {"timestamp": "2026-01-01 00:00:01", "market_id": "BTC", "cycle_id": "c1", "net_position": 3.0, "cycle_net_profit": 1.0, "account_cash": 1001.0},
-            {"timestamp": "2026-01-01 00:00:02", "market_id": "BTC", "cycle_id": "c2", "net_position": 1.0, "cycle_net_profit": 12.5, "account_cash": 1012.5},
+            {"timestamp": "2026-01-01 00:00:01", "market_id": "BTC", "cycle_id": "c1", "net_position": 3.0, "cycle_net_profit": 1.0, "account_cash": 1001.0, "up_last_price": 0.52, "down_last_price": 0.48},
+            {"timestamp": "2026-01-01 00:00:02", "market_id": "BTC", "cycle_id": "c2", "net_position": 1.0, "cycle_net_profit": 12.5, "account_cash": 1012.5, "up_last_price": 0.55, "down_last_price": 0.45},
         ]
     )
     return metrics_df, cycles_df, decisions_df, snapshots_df
@@ -63,7 +63,27 @@ def test_generate_dashboard_bundle_writes_expected_files(tmp_path: Path) -> None
     assert artifacts.html_path.exists()
     assert artifacts.markdown_path.exists()
     assert artifacts.summary_csv_path.exists()
-    assert "Demo Dashboard" in artifacts.html_path.read_text(encoding="utf-8")
+    assert artifacts.state_script_path.exists()
+    html_text = artifacts.html_path.read_text(encoding="utf-8")
+    assert "Demo Dashboard" in html_text
+    assert "dashboard_state.js" in html_text
+    assert "config-file-select" in html_text
+    assert "/api/configs" in html_text
+    assert "资金与本金" in html_text
+    assert "周期与节奏" in html_text
+    assert "Up / Down 实时价格曲线" in html_text
+    assert "运行控制台" in html_text
+    assert "launcher-profiles" in html_text
+    assert "initializeRunConsole()" in html_text
+    assert "collectLauncherOverrides" in html_text
+    assert "保存为默认值" in html_text
+    assert "参数偏好文件" in html_text
+    assert "data-launch-field" in html_text
+    assert "高风险" in html_text
+    assert "建议范围" in html_text
+    assert "type=\"range\"" in html_text
+    assert "<select class=\"config-select\"" in html_text
+    assert "window.__POLYNET_DASHBOARD_STATE__" in artifacts.state_script_path.read_text(encoding="utf-8")
     assert "核心指标" in artifacts.markdown_path.read_text(encoding="utf-8")
     summary_text = artifacts.summary_csv_path.read_text(encoding="utf-8-sig")
     assert "alert_count" in summary_text

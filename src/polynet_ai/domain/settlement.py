@@ -21,8 +21,8 @@ def _round3(value: float) -> float:
 
 
 def winner_from_state(state: CycleState) -> str | None:
-    up_last = state.up_position.last_price
-    down_last = state.down_position.last_price
+    up_last = state.up_last_price
+    down_last = state.down_last_price
     if up_last > 0 and down_last > 0:
         return "up" if up_last >= down_last else "down"
     if up_last > 0:

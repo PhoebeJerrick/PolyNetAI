@@ -148,6 +148,57 @@ python scripts/run_live_paper.py --input data/raw/polymarket_tracker_collection.
 
 其中 `snapshots.csv` 会记录每条事件后的账户现金、净持仓、周期盈亏等滚动状态，适合观察盘中行为。
 
+## 直接接入 Polymarket 实时行情
+
+如果你不想再先整理 Excel，而是直接吃 Polymarket 的真实市场成交流，可以使用 `scripts/run_polymarket_live_paper.py`。
+
+```bash
+python scripts/run_polymarket_live_paper.py --slug-prefix btc-updown-5m- --max-cycles 10 --config configs/strategy.yaml --output-dir artifacts/live/polymarket_btc_10cycles
+```
+
+关键点：
+
+- `--slug-prefix`
+  - 用于自动发现一批活动市场，例如 `btc-updown-5m-`
+- `--market-slugs`
+  - 如果你已经知道要跟踪哪些 market，可以直接显式传 slug
+- `--market-slugs-file`
+  - 也可以从文件中读取，每行一个 slug
+- `--max-cycles`
+  - 最多跟踪多少个周期；适合你这种“先跑 10 个周期看真实盈利和回撤”的需求
+- `--env-file`
+  - 默认读取项目上一级目录 `APIs/ApiConfig.env`
+  - 当前脚本只做读取校验，不会使用私钥去真实下单
+  - 若文件中包含 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` / `WS_PROXY`，会在启动时写入 `os.environ`（值可带引号），供 HTTPS 请求与 WebSocket 走代理
+
+当前实现说明：
+
+- 实时数据来自 Polymarket 公共 `market websocket`
+- 使用 `last_trade_price` 事件映射为引擎里的 `TradeEvent`
+- 订单执行仍然走本地 `paper broker`，因此手续费、滑点、持仓、盈亏、回撤统计逻辑与离线回放保持一致
+
+### HTTPS / SSL 握手失败（如 `SSLEOFError`）
+
+访问 `gamma-api.polymarket.com` 拉市场列表时若 TLS 被中断，多为网络、代理或防火墙导致。可依次尝试：
+
+1. 配置系统代理后重试（PowerShell 示例）：
+   - `$env:HTTPS_PROXY="http://127.0.0.1:7890"`（按你的代理端口改）
+2. 重新安装/更新依赖后执行：`pip install -r requirements.txt`（确保含 `requests`）
+3. **仅排查用**：跳过证书校验（不安全，勿长期使用）
+   - `$env:POLYNET_HTTP_VERIFY="false"`
+   - 若 WebSocket 也握手失败：`$env:POLYNET_WS_SSL_VERIFY="false"`
+4. 仍不行时换网络或 VPN 后再跑同一命令
+
+输出内容与现有 live runner 基本一致：
+
+- `cycles.csv`
+- `decisions.csv`
+- `metrics.csv`
+- `snapshots.csv`
+- `live_report.xlsx`
+- `dashboard.html`
+- `daily_report.md`
+
 ## 监控面板与日报表
 
 现在可以把 `snapshots + decisions + metrics + cycles` 自动生成更适合盯盘的可视化输出。

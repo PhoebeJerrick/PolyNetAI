@@ -30,6 +30,8 @@ class StateSnapshot:
     high_price: float
     low_price: float
     opening_price: float | None
+    up_last_price: float
+    down_last_price: float
     market_trades: int
     strategy_trades: int
 
@@ -59,8 +61,7 @@ class StateEngine:
     def apply_market_trade(self, trade: TradeEvent) -> CycleState:
         state = self.ensure_cycle(trade)
         self._update_price_stats(state, trade.price, trade.timestamp)
-        self._update_balances(state, trade.outcome, trade.action, trade.shares)
-        self._update_position_book(state, trade.outcome, trade.action, trade.price, trade.shares)
+        self._update_market_price(state, trade.outcome, trade.price)
         state.market_trades += 1
         state.last_event_timestamp = trade.timestamp
         self.market_tape.append(trade)
@@ -71,6 +72,7 @@ class StateEngine:
     def apply_strategy_fill(self, fill: FillEvent) -> CycleState:
         state = self.ensure_cycle(fill)
         self._update_price_stats(state, fill.price, fill.timestamp)
+        self._update_market_price(state, fill.outcome, fill.price)
         self._update_balances(state, fill.outcome, fill.action, fill.shares)
         self._update_position_book(state, fill.outcome, fill.action, fill.price, fill.shares)
         state.strategy_trades += 1
@@ -105,6 +107,8 @@ class StateEngine:
             high_price=self.state.high_price,
             low_price=self.state.low_price,
             opening_price=self.state.opening_price,
+            up_last_price=self.state.up_last_price,
+            down_last_price=self.state.down_last_price,
             market_trades=self.state.market_trades,
             strategy_trades=self.state.strategy_trades,
         )
@@ -158,6 +162,13 @@ class StateEngine:
         else:
             state.high_price = max(state.high_price, price)
             state.low_price = min(state.low_price, price)
+
+    @staticmethod
+    def _update_market_price(state: CycleState, outcome: Outcome, price: float) -> None:
+        if outcome == "up":
+            state.up_last_price = price
+        else:
+            state.down_last_price = price
 
     @staticmethod
     def _update_consecutive(state: CycleState, outcome: Outcome, action: TradeAction) -> None:

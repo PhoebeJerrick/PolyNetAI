@@ -10,6 +10,7 @@ import pandas as pd
 from polynet_ai.domain.models import TradeEvent
 from polynet_ai.engine.replay import ReplayEngine, ReplayResult
 from polynet_ai.reporting.dashboard import generate_dashboard_bundle
+from polynet_ai.reporting.excel_export import export_trade_ledger_to_excel
 
 
 @dataclass(slots=True)
@@ -31,23 +32,81 @@ class LivePaperRunner:
         sleep_fn: Callable[[float], None] | None = None,
     ) -> LiveRunnerResult:
         sleep_impl = sleep_fn or time.sleep
+        previous_event_ref: list[TradeEvent | None] = [None]
+
+        sorted_events = sorted(events, key=lambda item: (item.market_id, item.cycle_id, item.timestamp))
+        return self._consume_events(
+            sorted_events,
+            status_every=status_every,
+            before_step=(
+                lambda event: self._apply_replay_delay(
+                    event=event,
+                    previous_event=previous_event_ref[0],
+                    pace_factor=pace_factor,
+                    max_sleep_seconds=max_sleep_seconds,
+                    sleep_impl=sleep_impl,
+                )
+            ),
+            previous_event_ref=previous_event_ref,
+        )
+
+    def run_stream(
+        self,
+        events: Iterable[TradeEvent],
+        *,
+        status_every: int = 25,
+        on_progress: Callable[[LiveRunnerResult], None] | None = None,
+        progress_interval_seconds: float = 0.0,
+    ) -> LiveRunnerResult:
+        return self._consume_events(
+            events,
+            status_every=status_every,
+            on_progress=on_progress,
+            progress_interval_seconds=progress_interval_seconds,
+        )
+
+    def _apply_replay_delay(
+        self,
+        *,
+        event: TradeEvent,
+        previous_event: TradeEvent | None,
+        pace_factor: float,
+        max_sleep_seconds: float,
+        sleep_impl: Callable[[float], None],
+    ) -> None:
+        if pace_factor <= 0 or previous_event is None:
+            return
+        raw_delay = (event.timestamp - previous_event.timestamp).total_seconds()
+        if raw_delay > 0:
+            sleep_impl(min(max_sleep_seconds, raw_delay / pace_factor))
+
+    def _consume_events(
+        self,
+        events: Iterable[TradeEvent],
+        *,
+        status_every: int,
+        before_step: Callable[[TradeEvent], None] | None = None,
+        previous_event_ref: list[TradeEvent | None] | None = None,
+        on_progress: Callable[[LiveRunnerResult], None] | None = None,
+        progress_interval_seconds: float = 0.0,
+    ) -> LiveRunnerResult:
         decision_rows: list[dict[str, object]] = []
         cycle_rows: list[dict[str, object]] = []
         snapshot_rows: list[dict[str, object]] = []
-        previous_event: TradeEvent | None = None
+        previous_ref = previous_event_ref or [None]
+        last_progress_flush = time.monotonic()
 
-        sorted_events = sorted(events, key=lambda item: (item.market_id, item.cycle_id, item.timestamp))
-        for index, event in enumerate(sorted_events, start=1):
-            if pace_factor > 0 and previous_event is not None:
-                raw_delay = (event.timestamp - previous_event.timestamp).total_seconds()
-                if raw_delay > 0:
-                    sleep_impl(min(max_sleep_seconds, raw_delay / pace_factor))
-            previous_event = event
+        for index, event in enumerate(events, start=1):
+            if before_step is not None:
+                before_step(event)
+            previous_ref[0] = event
 
             step = self.engine.process_event(event)
             if step.finalized_cycle_row is not None:
                 cycle_rows.append(step.finalized_cycle_row)
-            decision_rows.append(step.decision_row)
+            decision_row = dict(step.decision_row)
+            decision_row["event_index"] = index
+            decision_rows.append(decision_row)
 
             snapshot_row = asdict(step.snapshot)
             snapshot_row["event_index"] = index
@@ -61,35 +120,65 @@ class LivePaperRunner:
                     f"cash={self.engine.account.cash:.3f}"
                 )
 
+            if (
+                on_progress is not None
+                and progress_interval_seconds > 0
+                and time.monotonic() - last_progress_flush >= progress_interval_seconds
+            ):
+                on_progress(self._build_live_result(cycle_rows, decision_rows, snapshot_rows))
+                last_progress_flush = time.monotonic()
+
         pending = self.engine.finalize_pending_cycle()
         if pending is not None:
             cycle_rows.append(pending)
 
-        replay_result = self.engine._build_result(cycle_rows, decision_rows)
+        return self._build_live_result(cycle_rows, decision_rows, snapshot_rows)
+
+    def _build_live_result(
+        self,
+        cycle_rows: list[dict[str, object]],
+        decision_rows: list[dict[str, object]],
+        snapshot_rows: list[dict[str, object]],
+    ) -> LiveRunnerResult:
+        replay_result = self.engine._build_result(list(cycle_rows), list(decision_rows))
         return LiveRunnerResult(
             replay_result=replay_result,
-            snapshot_df=pd.DataFrame(snapshot_rows),
+            snapshot_df=pd.DataFrame(list(snapshot_rows)),
         )
 
 
-def export_live_result(result: LiveRunnerResult, output_dir: str | Path) -> Path:
+def export_live_result(
+    result: LiveRunnerResult,
+    output_dir: str | Path,
+    *,
+    title: str = "Polynet AI Live Monitoring Dashboard",
+    refresh_seconds: float = 1.0,
+    write_excel: bool = True,
+) -> Path:
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
     result.replay_result.cycle_df.to_csv(directory / "cycles.csv", index=False, encoding="utf-8-sig")
     result.replay_result.decision_df.to_csv(directory / "decisions.csv", index=False, encoding="utf-8-sig")
     result.replay_result.metrics_df.to_csv(directory / "metrics.csv", index=False, encoding="utf-8-sig")
     result.snapshot_df.to_csv(directory / "snapshots.csv", index=False, encoding="utf-8-sig")
-    with pd.ExcelWriter(directory / "live_report.xlsx", engine="openpyxl") as writer:
-        result.replay_result.cycle_df.to_excel(writer, sheet_name="cycles", index=False)
-        result.replay_result.decision_df.to_excel(writer, sheet_name="decisions", index=False)
-        result.replay_result.metrics_df.to_excel(writer, sheet_name="metrics", index=False)
-        result.snapshot_df.to_excel(writer, sheet_name="snapshots", index=False)
+    export_trade_ledger_to_excel(
+        decision_df=result.replay_result.decision_df,
+        snapshot_df=result.snapshot_df,
+        output_path=directory / "trade_ledger.xlsx",
+    )
+    if write_excel:
+        with pd.ExcelWriter(directory / "live_report.xlsx", engine="openpyxl") as writer:
+            result.replay_result.cycle_df.to_excel(writer, sheet_name="cycles", index=False)
+            result.replay_result.decision_df.to_excel(writer, sheet_name="decisions", index=False)
+            result.replay_result.metrics_df.to_excel(writer, sheet_name="metrics", index=False)
+            result.snapshot_df.to_excel(writer, sheet_name="snapshots", index=False)
     generate_dashboard_bundle(
         metrics_df=result.replay_result.metrics_df,
         cycles_df=result.replay_result.cycle_df,
         decisions_df=result.replay_result.decision_df,
         snapshots_df=result.snapshot_df,
         output_dir=directory,
-        title="Polynet AI Live Monitoring Dashboard",
+        title=title,
+        refresh_seconds=refresh_seconds,
     )
     return directory

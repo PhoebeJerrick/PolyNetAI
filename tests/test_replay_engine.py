@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from polynet_ai.domain.models import TradeEvent
+from polynet_ai.domain.models import FillEvent, TradeEvent
 from polynet_ai.engine.replay import ReplayEngine
 from polynet_ai.strategy.spec import StrategyConfig
 
@@ -39,3 +39,28 @@ def test_replay_engine_runs_end_to_end() -> None:
     assert len(result.decision_df) == 4
     assert result.decision_df["executed"].any()
     assert "total_net_profit" in result.metrics_df.columns
+
+
+def test_finalize_cycle_settles_remaining_winner_shares_into_cash() -> None:
+    engine = ReplayEngine(build_config(), starting_cash=100.0)
+    t0 = datetime(2026, 3, 20, 12, 0, 0)
+
+    engine.state_engine.apply_market_trade(
+        TradeEvent("BTC", "cycle-a", t0, price=0.8, shares=10, outcome="up", action="buy")
+    )
+    engine.state_engine.apply_strategy_fill(
+        FillEvent("BTC", "cycle-a", t0 + timedelta(seconds=5), price=0.4, shares=10, outcome="up", action="buy")
+    )
+    engine.account.apply_fill(
+        FillEvent("BTC", "cycle-a", t0 + timedelta(seconds=5), price=0.4, shares=10, outcome="up", action="buy")
+    )
+    engine.state_engine.apply_market_trade(
+        TradeEvent("BTC", "cycle-a", t0 + timedelta(seconds=10), price=0.8, shares=6, outcome="up", action="buy")
+    )
+
+    cycle_row = engine.finalize_pending_cycle()
+
+    assert cycle_row is not None
+    assert cycle_row["winner"] == "up"
+    assert cycle_row["account_cash"] > 100.0
+    assert round(float(cycle_row["account_cash"]), 3) == round(100.0 + float(cycle_row["cycle_net_profit"]), 3)

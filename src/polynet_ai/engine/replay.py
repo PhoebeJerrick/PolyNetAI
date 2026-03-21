@@ -112,6 +112,7 @@ class ReplayEngine:
             "account_cash": self.account.cash,
         }
         if decision.selected is not None:
+            decision.selected.metadata["account_cash"] = self.account.cash
             row["selected_rule"] = decision.selected.category
             row["selected_action"] = decision.selected.action
             row["selected_outcome"] = decision.selected.outcome
@@ -120,6 +121,7 @@ class ReplayEngine:
             row["risk_status"] = "accepted" if risk_decision.accepted else "blocked"
             row["risk_reason"] = risk_decision.reason
             if risk_decision.accepted and risk_decision.intent is not None:
+                row["selected_shares"] = risk_decision.intent.shares
                 fill = self.broker.execute(risk_decision.intent, event.timestamp)
                 self.account.apply_fill(fill)
                 self.state_engine.apply_strategy_fill(fill)
@@ -166,6 +168,12 @@ class ReplayEngine:
             raise RuntimeError("cannot finalize empty cycle")
         state = self.state_engine.state
         summary = settlement_summary(state)
+        settlement_cash = 0.0
+        if summary.winner == "up":
+            settlement_cash = state.up_position.held
+        elif summary.winner == "down":
+            settlement_cash = state.down_position.held
+        self.account.cash += settlement_cash
         row = {
             "market_id": state.market_id,
             "cycle_id": state.cycle_id,

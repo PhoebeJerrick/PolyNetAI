@@ -1,0 +1,13 @@
+# PolyNetAI 项目依赖
+# 安装: pip install -r requirements.txt
+# 建议在项目根目录执行上述命令（与 pyproject.toml 同级）
+
+# ---- 运行时依赖（与 pyproject.toml [project.dependencies] 一致）----
+openpyxl>=3.1
+pandas>=2.2
+PyYAML>=6.0
+websocket-client>=1.8
+requests>=2.28.0
+
+# ---- 开发 / 测试（运行 pytest 时需要）----
+pytest>=8.0
