@@ -16,6 +16,25 @@ if str(SRC) not in sys.path:
 # 与 polymarket_tracker_collection_with_accumulated_shares_v5.xlsx 等工作簿一致：固定工作表名 BTC
 TRACKER_STYLE_SHEET = "BTC"
 
+# 与 write_batch_trade_process_zh 决策表列顺序一致
+TRADE_PROCESS_PREF_COLS = (
+    "timestamp",
+    "market_price",
+    "selected_rule",
+    "selected_outcome",
+    "selected_action",
+    "selected_shares",
+    "risk_status",
+    "risk_reason",
+    "executed",
+    "submitted",
+    "confirmed",
+    "fill_price",
+    "fill_fee",
+    "cycle_net_profit",
+    "account_cash",
+)
+
 from polynet_ai.reporting.excel_export import _format_elapsed
 
 
@@ -480,11 +499,52 @@ def build_performance_report_zh(
             f"- `{report_xlsx.name}`（Excel 总绩效，推荐）",
             f"- `{report_md.name}`",
             f"- `{output_path / 'batch_replay_trade_process_zh.md'}`",
+            f"- `{output_path / 'batch_replay_trade_process_zh.xlsx'}`（同上内容的 Excel）",
         ]
     )
 
     report_md.write_text("\n".join(lines), encoding="utf-8")
     return report_xlsx
+
+
+def _write_batch_trade_process_xlsx(
+    *,
+    input_dir: Path,
+    cycle_df: pd.DataFrame,
+    decision_df: pd.DataFrame,
+    output_path: Path,
+) -> Path:
+    """与 Markdown 版同内容的 Excel：元数据、周期快照、决策流水。"""
+    xlsx_path = output_path / "batch_replay_trade_process_zh.xlsx"
+    meta_df = pd.DataFrame([("数据目录", input_dir.as_posix())], columns=["项", "值"])
+    snap_df = cycle_df.copy() if not cycle_df.empty else pd.DataFrame()
+
+    dec = decision_df.copy()
+    if not dec.empty:
+        if "timestamp" in dec.columns:
+            dec["_ts"] = pd.to_datetime(dec["timestamp"], errors="coerce", utc=True)
+            dec = dec.sort_values(["cycle_slug", "_ts"], kind="mergesort").drop(columns=["_ts"])
+        elif "cycle_slug" in dec.columns:
+            dec = dec.sort_values("cycle_slug", kind="mergesort")
+        cols = [c for c in TRADE_PROCESS_PREF_COLS if c in dec.columns]
+        if cols:
+            if "cycle_slug" in dec.columns:
+                order = ["cycle_slug"] + cols
+                dec_out = dec[[c for c in order if c in dec.columns]]
+            else:
+                dec_out = dec[cols]
+        else:
+            dec_out = dec.copy()
+    else:
+        dec_out = pd.DataFrame(columns=["cycle_slug"])
+
+    xlsx_path.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+        meta_df.to_excel(writer, sheet_name="元数据", index=False)
+        snap_df.to_excel(writer, sheet_name="周期快照", index=False)
+        dec_out.to_excel(writer, sheet_name="决策流水", index=False)
+    _finalize_xlsx_workbook(xlsx_path)
+    return xlsx_path
 
 
 def write_batch_trade_process_zh(
@@ -494,7 +554,7 @@ def write_batch_trade_process_zh(
     decision_df: pd.DataFrame,
     output_path: Path,
 ) -> Path:
-    """按周期汇总决策流水，生成单一 Markdown（与绩效报告配套）。"""
+    """按周期汇总决策流水，生成 Markdown 与同内容 Excel（与绩效报告配套）。"""
     path = output_path / "batch_replay_trade_process_zh.md"
     if "cycle_slug" not in cycle_df.columns and not cycle_df.empty:
         raise ValueError("cycle_df 需要包含 cycle_slug 列")
@@ -505,23 +565,7 @@ def write_batch_trade_process_zh(
     if not slugs and not decision_df.empty:
         slugs = sorted({str(s) for s in decision_df["cycle_slug"].unique().tolist()})
 
-    pref_cols = [
-        "timestamp",
-        "market_price",
-        "selected_rule",
-        "selected_outcome",
-        "selected_action",
-        "selected_shares",
-        "risk_status",
-        "risk_reason",
-        "executed",
-        "submitted",
-        "confirmed",
-        "fill_price",
-        "fill_fee",
-        "cycle_net_profit",
-        "account_cash",
-    ]
+    pref_cols = list(TRADE_PROCESS_PREF_COLS)
 
     lines: list[str] = [
         "# 批量回放交易过程",
@@ -560,6 +604,12 @@ def write_batch_trade_process_zh(
             lines.append("")
 
     path.write_text("\n".join(lines), encoding="utf-8")
+    _write_batch_trade_process_xlsx(
+        input_dir=input_dir,
+        cycle_df=cycle_df,
+        decision_df=decision_df,
+        output_path=output_path,
+    )
     return path
 
 

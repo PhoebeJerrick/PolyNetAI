@@ -48,3 +48,5 @@ def test_write_batch_trade_process_zh_writes_markdown(tmp_path) -> None:
     assert "批量回放交易过程" in text
     assert "cycle-a" in text
     assert "winner" in text
+    xlsx = tmp_path / "batch_replay_trade_process_zh.xlsx"
+    assert xlsx.exists()

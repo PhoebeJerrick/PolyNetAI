@@ -56,12 +56,14 @@ def test_build_report_writes_xlsx_markdown_and_trade_process(tmp_path) -> None:
                 "selected_action": "buy",
                 "selected_shares": 10.0,
                 "executed": True,
+                "fill_price": 0.55,
             },
             {
                 "selected_outcome": "up",
                 "selected_action": "sell",
                 "selected_shares": 5.0,
                 "executed": True,
+                "fill_price": 0.62,
             },
         ]
     ).to_csv(cycle_dir / "decisions.csv", index=False, encoding="utf-8-sig")
@@ -95,6 +97,13 @@ def test_build_report_writes_xlsx_markdown_and_trade_process(tmp_path) -> None:
     tracker = pd.read_excel(report_path, sheet_name=TRACKER_STYLE_SHEET)
     assert "Up积累份数" in tracker.columns
     assert "周期净利润" in tracker.columns
+    marker_col = "下注时间距开盘差(分，秒)"
+    assert marker_col in tracker.columns
+    sub = tracker[tracker[marker_col].astype(str) == "【周期小计】"]
+    assert not sub.empty
+    assert pd.notna(sub["未平仓UP盈亏"].iloc[0])
+    assert pd.notna(sub["未平仓Down盈亏"].iloc[0])
+    assert pd.notna(sub["周期净利润"].iloc[0])
 
     md_path = batch_dir / "batch_replay_performance_report_zh.md"
     assert md_path.exists()
@@ -104,5 +113,10 @@ def test_build_report_writes_xlsx_markdown_and_trade_process(tmp_path) -> None:
     assert "胜率: 100.00%" in text
     assert "最大回撤: 0.000000" in text
     assert (batch_dir / "batch_replay_trade_process_zh.md").exists()
+    assert (batch_dir / "batch_replay_trade_process_zh.xlsx").exists()
+    txl = pd.ExcelFile(batch_dir / "batch_replay_trade_process_zh.xlsx")
+    assert "元数据" in txl.sheet_names
+    assert "周期快照" in txl.sheet_names
+    assert "决策流水" in txl.sheet_names
     assert not (batch_dir / "batch_replay_direction_distribution.csv").exists()
     assert not (batch_dir / "batch_replay_summary_enriched.csv").exists()

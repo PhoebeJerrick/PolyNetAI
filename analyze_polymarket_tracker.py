@@ -350,6 +350,7 @@ def append_subtotals(
     cycle_col: str,
     pnl_stats: dict[tuple[object, ...], dict[str, float]],
     marker_col: str,
+    group_cols: list[str],
 ) -> pd.DataFrame:
     if df.empty:
         return df
@@ -368,7 +369,8 @@ def append_subtotals(
         for c in INSERTED_COLUMNS:
             sub[c] = last.get(c, "")
 
-        key = (cyc_val,)
+        # 与 compute 中 pnl_s 的键一致：tuple(row[g] for g in groups)
+        key = tuple(last[c] for c in group_cols)
         stats = pnl_stats.get(key)
         if stats:
             sm = settlement_summary(stats)
@@ -491,7 +493,7 @@ def compute(df: pd.DataFrame, args: argparse.Namespace) -> tuple[pd.DataFrame, d
     res["Up已成交差价盈亏"] = up_pnl_v
     res["Down已成交差价盈亏"] = dn_pnl_v
     res = insert_columns(res, prc_c)
-    res = append_subtotals(res, cyc_c, pnl_s, marker_col)
+    res = append_subtotals(res, cyc_c, pnl_s, marker_col, groups)
     res = round_all(res)
 
     return res, {

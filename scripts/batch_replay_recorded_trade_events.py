@@ -154,9 +154,11 @@ def main() -> int:
 
     xlsx_report = output_dir / "batch_replay_performance_report_zh.xlsx"
     md_report = output_dir / "batch_replay_performance_report_zh.md"
+    trade_xlsx = output_dir / "batch_replay_trade_process_zh.xlsx"
 
     print(f"批量回放完成，共 {len(summary_df)} 个周期")
-    print(f"交易过程: {trade_doc}")
+    print(f"交易过程 (Markdown): {trade_doc}")
+    print(f"交易过程 (Excel): {trade_xlsx}")
     print(f"总绩效报告 (Excel): {xlsx_report}")
     print(f"总绩效报告 (Markdown 镜像): {md_report}")
     if not xlsx_report.exists():

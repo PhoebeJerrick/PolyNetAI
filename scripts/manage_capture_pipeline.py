@@ -249,6 +249,7 @@ def _print_status(args: argparse.Namespace) -> int:
     report_md = batch_dir / "batch_replay_performance_report_zh.md"
     report_xlsx = batch_dir / "batch_replay_performance_report_zh.xlsx"
     trade_md = batch_dir / "batch_replay_trade_process_zh.md"
+    trade_xlsx = batch_dir / "batch_replay_trade_process_zh.xlsx"
     report_ready = report_md.exists() or report_xlsx.exists()
     if summary_csv.exists():
         summary_df = pd.read_csv(summary_csv)
@@ -259,7 +260,9 @@ def _print_status(args: argparse.Namespace) -> int:
             total_profit = float(pd.to_numeric(summary_df["total_net_profit"], errors="coerce").fillna(0.0).sum())
             print(f"- 批量回放总净利润: {total_profit:.6f}")
         print(f"- 总绩效报告: {'已生成' if report_ready else '未生成'}")
-        print(f"- 交易过程文档: {'已生成' if trade_md.exists() else '未生成'}")
+        print(
+            f"- 交易过程文档: {'已生成' if (trade_md.exists() or trade_xlsx.exists()) else '未生成'}"
+        )
         print(f"- 回放目录: {batch_dir}")
     elif report_md.exists():
         text = report_md.read_text(encoding="utf-8", errors="replace")
@@ -272,7 +275,9 @@ def _print_status(args: argparse.Namespace) -> int:
         print(f"- 已回放周期数: {replay_cycles}")
         print(f"- 批量回放总净利润: {total_profit:.6f}")
         print(f"- 总绩效报告: 已生成")
-        print(f"- 交易过程文档: {'已生成' if trade_md.exists() else '未生成'}")
+        print(
+            f"- 交易过程文档: {'已生成' if (trade_md.exists() or trade_xlsx.exists()) else '未生成'}"
+        )
         print(f"- 回放目录: {batch_dir}")
     elif report_xlsx.exists():
         try:
@@ -288,7 +293,9 @@ def _print_status(args: argparse.Namespace) -> int:
         print(f"- 已回放周期数: {replay_cycles}")
         print(f"- 批量回放总净利润: {total_profit:.6f}")
         print(f"- 总绩效报告: 已生成")
-        print(f"- 交易过程文档: {'已生成' if trade_md.exists() else '未生成'}")
+        print(
+            f"- 交易过程文档: {'已生成' if (trade_md.exists() or trade_xlsx.exists()) else '未生成'}"
+        )
         print(f"- 回放目录: {batch_dir}")
 
     capture_log = output_dir / "capture.log"
