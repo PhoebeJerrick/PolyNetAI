@@ -250,7 +250,7 @@ def _print_status(args: argparse.Namespace) -> int:
     report_xlsx = batch_dir / "batch_replay_performance_report_zh.xlsx"
     trade_md = batch_dir / "batch_replay_trade_process_zh.md"
     trade_xlsx = batch_dir / "batch_replay_trade_process_zh.xlsx"
-    report_ready = report_md.exists() or report_xlsx.exists()
+    report_ready = report_xlsx.exists() or report_md.exists()
     if summary_csv.exists():
         summary_df = pd.read_csv(summary_csv)
         print("")
@@ -261,7 +261,7 @@ def _print_status(args: argparse.Namespace) -> int:
             print(f"- 批量回放总净利润: {total_profit:.6f}")
         print(f"- 总绩效报告: {'已生成' if report_ready else '未生成'}")
         print(
-            f"- 交易过程文档: {'已生成' if (trade_md.exists() or trade_xlsx.exists()) else '未生成'}"
+            f"- 交易过程文档: {'已生成' if (trade_xlsx.exists() or trade_md.exists()) else '未生成'}"
         )
         print(f"- 回放目录: {batch_dir}")
     elif report_md.exists():
@@ -276,7 +276,7 @@ def _print_status(args: argparse.Namespace) -> int:
         print(f"- 批量回放总净利润: {total_profit:.6f}")
         print(f"- 总绩效报告: 已生成")
         print(
-            f"- 交易过程文档: {'已生成' if (trade_md.exists() or trade_xlsx.exists()) else '未生成'}"
+            f"- 交易过程文档: {'已生成' if (trade_xlsx.exists() or trade_md.exists()) else '未生成'}"
         )
         print(f"- 回放目录: {batch_dir}")
     elif report_xlsx.exists():
@@ -294,7 +294,7 @@ def _print_status(args: argparse.Namespace) -> int:
         print(f"- 批量回放总净利润: {total_profit:.6f}")
         print(f"- 总绩效报告: 已生成")
         print(
-            f"- 交易过程文档: {'已生成' if (trade_md.exists() or trade_xlsx.exists()) else '未生成'}"
+            f"- 交易过程文档: {'已生成' if (trade_xlsx.exists() or trade_md.exists()) else '未生成'}"
         )
         print(f"- 回放目录: {batch_dir}")
 

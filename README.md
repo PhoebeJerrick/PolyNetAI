@@ -316,11 +316,10 @@ python scripts/replay_recorded_trade_events.py --input artifacts/live/ws_capture
 python scripts/batch_replay_recorded_trade_events.py --input-dir artifacts/live/ws_capture_btc_10cycles --config configs/strategy.yaml --overrides artifacts/optimization/optimize_btc_last_6h_100u_smallcap_v2_20260321T014000Z/trial_022/overrides.json --starting-cash 100
 ```
 
-默认只会在 `batch_replay_outputs` 下生成绩效 Excel、过程 Markdown（不在各周期子目录落盘中间件）：
+默认只会在 `batch_replay_outputs` 下生成 Excel（不在各周期子目录落盘中间件）：
 
 - `batch_replay_performance_report_zh.xlsx`（总绩效多工作表；含固定命名的 `BTC` 累计持仓与盈亏表，与 `analyze_polymarket_tracker.py` / `polymarket_tracker_collection_with_accumulated_shares_v5.xlsx` 同源格式）
-- `batch_replay_performance_report_zh.md`（同上内容的 Markdown 镜像，便于 diff）
-- `batch_replay_trade_process_zh.md`（按周期的决策与成交流水）
+- `batch_replay_trade_process_zh.xlsx`（元数据、周期快照、决策流水；与总绩效配套）
 
 ### 11. 生成批量回放总绩效报告
 
@@ -339,10 +338,9 @@ python scripts/build_batch_replay_performance_report.py --input-dir artifacts/li
 默认会输出（与批量回放脚本一致）：
 
 - `batch_replay_performance_report_zh.xlsx`
-- `batch_replay_performance_report_zh.md`
-- `batch_replay_trade_process_zh.md`
+- `batch_replay_trade_process_zh.xlsx`
 
-若目录里仍有旧的「每周期 `cycles.csv` / `decisions.csv` / `metrics.csv`」结构，本脚本也会读取并生成上述文档。
+若目录里仍有旧的「每周期 `cycles.csv` / `decisions.csv` / `metrics.csv`」结构，本脚本也会读取并生成上述 Excel。若目录里曾存在旧版 Markdown 产物，生成完成后会尝试删除 `batch_replay_performance_report_zh.md` 与 `batch_replay_trade_process_zh.md`，以保持输出目录仅保留 Excel。
 
 报告内容会集中汇总：
 
@@ -408,13 +406,13 @@ python analyze_polymarket_tracker.py --input data/raw/polymarket_tracker_collect
 ### `batch_replay_recorded_trade_events.py`
 
 - 会扫描抓取目录下所有 `<cycle_slug>/ws_trade_events.ndjson`
-- 在内存中完成回放，只在 `batch_replay_outputs` 写出：`batch_replay_performance_report_zh.xlsx`、`batch_replay_performance_report_zh.md` 与 `batch_replay_trade_process_zh.md`
+- 在内存中完成回放，只在 `batch_replay_outputs` 写出：`batch_replay_performance_report_zh.xlsx` 与 `batch_replay_trade_process_zh.xlsx`（并清理遗留的同名 `.md` 文件）
 - 适合抓完 5 个、10 个或更多周期后，直接批量评估当前代码的离线盈亏能力
 
 ### `build_batch_replay_performance_report.py`
 
 - 可直接读取仍包含「每周期 CSV 结果」的旧版 `batch_replay_outputs`，或兼容目录结构
-- 自动汇总总收益、胜率、最大回撤、方向分布等关键指标，并写出与批量回放相同的 Excel（及 Markdown 镜像）与交易过程文档
+- 自动汇总总收益、胜率、最大回撤、方向分布等关键指标，并写出与批量回放相同的总绩效与交易过程 Excel
 - 适合在需要仅从磁盘上的周期级 CSV 重新生成报告时使用
 
 ### `manage_capture_pipeline.py`

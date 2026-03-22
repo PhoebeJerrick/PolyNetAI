@@ -60,7 +60,6 @@ def _resolve_batch_replay_dir(input_dir: str | Path) -> Path:
     nested = path / "batch_replay_outputs"
     report_markers = (
         "batch_replay_summary.csv",
-        "batch_replay_performance_report_zh.md",
         "batch_replay_performance_report_zh.xlsx",
     )
     if any((path / name).exists() for name in report_markers):
@@ -412,7 +411,6 @@ def build_performance_report_zh(
     if total_cycles:
         enriched_summary["cumulative_profit"] = pd.to_numeric(enriched_summary["total_net_profit"], errors="coerce").fillna(0.0).cumsum()
 
-    report_md = output_path / "batch_replay_performance_report_zh.md"
     report_xlsx = output_path / "batch_replay_performance_report_zh.xlsx"
     shown_dir = display_batch_dir or resolved_batch_dir
 
@@ -436,74 +434,6 @@ def build_performance_report_zh(
         decision_df=decision_df,
     )
 
-    lines = [
-        "# 批量离线回放总绩效报告",
-        "",
-        f"- 回放目录: `{shown_dir.as_posix()}`",
-        f"- 周期数: {total_cycles}",
-        f"- 总净利润: {total_profit:.6f}",
-        f"- 平均单周期净利润: {avg_profit:.6f}",
-        f"- 胜率: {win_rate:.2%}",
-        f"- 最大回撤: {max_drawdown:.6f}",
-        f"- 总手续费: {total_fees:.6f}",
-        f"- 总执行成交数: {total_executed}",
-        "",
-        "## 关键结论",
-        "",
-    ]
-    if best_cycle is not None:
-        lines.append(
-            f"- 最佳周期: `{best_cycle['cycle_slug']}`，净利润 `{float(best_cycle['total_net_profit']):.6f}`"
-        )
-    if worst_cycle is not None:
-        lines.append(
-            f"- 最差周期: `{worst_cycle['cycle_slug']}`，净利润 `{float(worst_cycle['total_net_profit']):.6f}`"
-        )
-    if not winner_df.empty:
-        lines.append(
-            "- 周期赢家分布: " + "，".join(f"{row['winner']}={int(row['count'])}" for _, row in winner_df.iterrows())
-        )
-    if not net_direction_df.empty:
-        lines.append(
-            "- 周期结束净方向分布: "
-            + "，".join(f"{row['net_direction']}={int(row['count'])}" for _, row in net_direction_df.iterrows())
-        )
-    if not direction_df.empty:
-        direction_text = "，".join(
-            f"{row['selected_outcome']} {row['selected_action']}={int(row['trades'])}笔/{float(row['shares']):.6f}份"
-            for _, row in direction_df.iterrows()
-        )
-        lines.append(f"- 执行方向分布: {direction_text}")
-
-    lines.extend(
-        [
-            "",
-            "## 分周期累计盈亏",
-            "",
-            enriched_summary.to_string(index=False) if not enriched_summary.empty else "无可用数据",
-            "",
-            "## 执行方向分布",
-            "",
-            direction_df.to_string(index=False) if not direction_df.empty else "无已执行成交",
-            "",
-            "## 周期赢家分布",
-            "",
-            winner_df.to_string(index=False) if not winner_df.empty else "无可用数据",
-            "",
-            "## 周期结束净方向分布",
-            "",
-            net_direction_df.to_string(index=False) if not net_direction_df.empty else "无可用数据",
-            "",
-            "## 产物文件",
-            "",
-            f"- `{report_xlsx.name}`（Excel 总绩效，推荐）",
-            f"- `{report_md.name}`",
-            f"- `{output_path / 'batch_replay_trade_process_zh.md'}`",
-            f"- `{output_path / 'batch_replay_trade_process_zh.xlsx'}`（同上内容的 Excel）",
-        ]
-    )
-
-    report_md.write_text("\n".join(lines), encoding="utf-8")
     return report_xlsx
 
 
@@ -514,7 +444,7 @@ def _write_batch_trade_process_xlsx(
     decision_df: pd.DataFrame,
     output_path: Path,
 ) -> Path:
-    """与 Markdown 版同内容的 Excel：元数据、周期快照、决策流水。"""
+    """交易过程 Excel：元数据、周期快照、决策流水。"""
     xlsx_path = output_path / "batch_replay_trade_process_zh.xlsx"
     meta_df = pd.DataFrame([("数据目录", input_dir.as_posix())], columns=["项", "值"])
     snap_df = cycle_df.copy() if not cycle_df.empty else pd.DataFrame()
@@ -554,63 +484,29 @@ def write_batch_trade_process_zh(
     decision_df: pd.DataFrame,
     output_path: Path,
 ) -> Path:
-    """按周期汇总决策流水，生成 Markdown 与同内容 Excel（与绩效报告配套）。"""
-    path = output_path / "batch_replay_trade_process_zh.md"
+    """按周期汇总决策流水，生成 Excel（与绩效报告配套）。"""
     if "cycle_slug" not in cycle_df.columns and not cycle_df.empty:
         raise ValueError("cycle_df 需要包含 cycle_slug 列")
     if "cycle_slug" not in decision_df.columns and not decision_df.empty:
         raise ValueError("decision_df 需要包含 cycle_slug 列")
 
-    slugs = sorted({str(s) for s in cycle_df["cycle_slug"].tolist()} if not cycle_df.empty else set())
-    if not slugs and not decision_df.empty:
-        slugs = sorted({str(s) for s in decision_df["cycle_slug"].unique().tolist()})
-
-    pref_cols = list(TRADE_PROCESS_PREF_COLS)
-
-    lines: list[str] = [
-        "# 批量回放交易过程",
-        "",
-        f"- 数据目录: `{input_dir.as_posix()}`",
-        "",
-    ]
-
-    for slug in slugs:
-        lines.append(f"## `{slug}`")
-        csub = cycle_df[cycle_df["cycle_slug"].astype(str) == slug] if not cycle_df.empty else pd.DataFrame()
-        if not csub.empty:
-            row = csub.iloc[0].to_dict()
-            lines.append("")
-            lines.append("### 周期快照")
-            lines.append("")
-            for key, value in row.items():
-                if key == "cycle_slug":
-                    continue
-                lines.append(f"- **{key}**: {value}")
-            lines.append("")
-        dsub = decision_df[decision_df["cycle_slug"].astype(str) == slug] if not decision_df.empty else pd.DataFrame()
-        cols = [c for c in pref_cols if c in dsub.columns]
-        if not dsub.empty and cols:
-            lines.append("### 决策流水（按时间）")
-            lines.append("")
-            lines.append(dsub[cols].to_string(index=False))
-            lines.append("")
-        elif not dsub.empty:
-            lines.append("### 决策流水（按时间）")
-            lines.append("")
-            lines.append(dsub.to_string(index=False))
-            lines.append("")
-        else:
-            lines.append("*本周期无决策行。*")
-            lines.append("")
-
-    path.write_text("\n".join(lines), encoding="utf-8")
-    _write_batch_trade_process_xlsx(
+    return _write_batch_trade_process_xlsx(
         input_dir=input_dir,
         cycle_df=cycle_df,
         decision_df=decision_df,
         output_path=output_path,
     )
-    return path
+
+
+def _cleanup_batch_replay_markdown(output_path: Path) -> None:
+    """移除历史或并发生成的 Markdown 产物，目录中只保留 Excel。"""
+    for name in ("batch_replay_performance_report_zh.md", "batch_replay_trade_process_zh.md"):
+        p = output_path / name
+        try:
+            if p.exists():
+                p.unlink()
+        except OSError:
+            pass
 
 
 def build_report(batch_dir: str | Path, output_dir: str | Path | None = None) -> Path:
@@ -626,6 +522,7 @@ def build_report(batch_dir: str | Path, output_dir: str | Path | None = None) ->
     cycle_df, decision_df = _load_cycle_frames(cycle_dirs)
     write_batch_trade_process_zh(input_dir=resolved_batch_dir, cycle_df=cycle_df, decision_df=decision_df, output_path=output_path)
     build_performance_report_zh(resolved_batch_dir, summary_df, cycle_df, decision_df, output_path, display_batch_dir=resolved_batch_dir)
+    _cleanup_batch_replay_markdown(output_path)
     return output_path / "batch_replay_performance_report_zh.xlsx"
 
 

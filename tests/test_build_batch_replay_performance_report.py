@@ -17,7 +17,7 @@ def test_compute_max_drawdown_from_cycle_profit_series() -> None:
     assert value == 5.0
 
 
-def test_build_report_writes_xlsx_markdown_and_trade_process(tmp_path) -> None:
+def test_build_report_writes_xlsx_and_trade_process(tmp_path) -> None:
     batch_dir = tmp_path / "batch_replay_outputs"
     cycle_dir = batch_dir / "btc-updown-5m-1774147200"
     cycle_dir.mkdir(parents=True)
@@ -105,14 +105,8 @@ def test_build_report_writes_xlsx_markdown_and_trade_process(tmp_path) -> None:
     assert pd.notna(sub["未平仓Down盈亏"].iloc[0])
     assert pd.notna(sub["周期净利润"].iloc[0])
 
-    md_path = batch_dir / "batch_replay_performance_report_zh.md"
-    assert md_path.exists()
-    text = md_path.read_text(encoding="utf-8")
-    assert "批量离线回放总绩效报告" in text
-    assert "总净利润: 1.500000" in text
-    assert "胜率: 100.00%" in text
-    assert "最大回撤: 0.000000" in text
-    assert (batch_dir / "batch_replay_trade_process_zh.md").exists()
+    assert not (batch_dir / "batch_replay_performance_report_zh.md").exists()
+    assert not (batch_dir / "batch_replay_trade_process_zh.md").exists()
     assert (batch_dir / "batch_replay_trade_process_zh.xlsx").exists()
     txl = pd.ExcelFile(batch_dir / "batch_replay_trade_process_zh.xlsx")
     assert "元数据" in txl.sheet_names

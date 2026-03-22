@@ -19,7 +19,7 @@ def test_discover_cycle_event_files_reads_per_cycle_ndjson(tmp_path) -> None:
     assert [path.parent.name for path in files] == ["btc-updown-5m-1", "btc-updown-5m-2"]
 
 
-def test_write_batch_trade_process_zh_writes_markdown(tmp_path) -> None:
+def test_write_batch_trade_process_zh_writes_xlsx(tmp_path) -> None:
     cycle_df = pd.DataFrame(
         [
             {"cycle_slug": "cycle-a", "winner": "up", "account_cash": 101.0},
@@ -43,10 +43,9 @@ def test_write_batch_trade_process_zh_writes_markdown(tmp_path) -> None:
         output_path=tmp_path,
     )
 
+    assert path.suffix == ".xlsx"
     assert path.exists()
-    text = path.read_text(encoding="utf-8")
-    assert "批量回放交易过程" in text
-    assert "cycle-a" in text
-    assert "winner" in text
-    xlsx = tmp_path / "batch_replay_trade_process_zh.xlsx"
-    assert xlsx.exists()
+    assert not (tmp_path / "batch_replay_trade_process_zh.md").exists()
+    snap = pd.read_excel(path, sheet_name="周期快照")
+    assert "cycle-a" in snap["cycle_slug"].astype(str).tolist()
+    assert "winner" in snap.columns

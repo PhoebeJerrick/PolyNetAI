@@ -18,6 +18,7 @@ from polynet_ai.adapters.trade_event_store import load_recorded_trade_events  # 
 from polynet_ai.engine.replay import ReplayEngine  # noqa: E402
 from polynet_ai.strategy.spec import load_strategy_config  # noqa: E402
 from scripts.build_batch_replay_performance_report import (  # noqa: E402
+    _cleanup_batch_replay_markdown,
     build_performance_report_zh,
     write_batch_trade_process_zh,
 )
@@ -137,7 +138,7 @@ def main() -> int:
     cycle_df = pd.concat(cycle_parts, ignore_index=True) if cycle_parts else pd.DataFrame()
     decision_df = pd.concat(decision_parts, ignore_index=True) if decision_parts else pd.DataFrame()
 
-    trade_doc = write_batch_trade_process_zh(
+    trade_xlsx = write_batch_trade_process_zh(
         input_dir=input_dir,
         cycle_df=cycle_df,
         decision_df=decision_df,
@@ -151,16 +152,13 @@ def main() -> int:
         output_path=output_dir,
         display_batch_dir=input_dir,
     )
+    _cleanup_batch_replay_markdown(output_dir)
 
     xlsx_report = output_dir / "batch_replay_performance_report_zh.xlsx"
-    md_report = output_dir / "batch_replay_performance_report_zh.md"
-    trade_xlsx = output_dir / "batch_replay_trade_process_zh.xlsx"
 
     print(f"批量回放完成，共 {len(summary_df)} 个周期")
-    print(f"交易过程 (Markdown): {trade_doc}")
     print(f"交易过程 (Excel): {trade_xlsx}")
     print(f"总绩效报告 (Excel): {xlsx_report}")
-    print(f"总绩效报告 (Markdown 镜像): {md_report}")
     if not xlsx_report.exists():
         print(
             "警告: 未找到 Excel 总绩效文件。请确认已使用包含 batch_replay_performance_report_zh.xlsx 生成的最新代码。",
