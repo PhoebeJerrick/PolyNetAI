@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from scripts.batch_replay_recorded_trade_events import _discover_cycle_event_files
+import pandas as pd
+
+from scripts.batch_replay_recorded_trade_events import _discover_cycle_event_files, _write_batch_summary
 
 
 def test_discover_cycle_event_files_reads_per_cycle_ndjson(tmp_path) -> None:
@@ -15,3 +17,20 @@ def test_discover_cycle_event_files_reads_per_cycle_ndjson(tmp_path) -> None:
     files = _discover_cycle_event_files(tmp_path)
 
     assert [path.parent.name for path in files] == ["btc-updown-5m-1", "btc-updown-5m-2"]
+
+
+def test_write_batch_summary_creates_summary_files(tmp_path) -> None:
+    summary_df = pd.DataFrame(
+        [
+            {"cycle_slug": "cycle-a", "total_net_profit": 2.5},
+            {"cycle_slug": "cycle-b", "total_net_profit": -1.0},
+        ]
+    )
+
+    summary_csv, summary_md = _write_batch_summary(tmp_path, tmp_path, summary_df)
+
+    assert summary_csv.exists()
+    assert summary_md.exists()
+    text = summary_md.read_text(encoding="utf-8")
+    assert "批量回放摘要" in text
+    assert "总净利润: 1.500000" in text

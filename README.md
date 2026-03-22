@@ -210,7 +210,7 @@ python scripts/replay_recorded_trade_events.py --input artifacts/live/ws_capture
 
 ### 10. 批量回放整个抓取目录
 
-如果你已经连续抓了 10 个周期，可以一条命令把整个目录全部回放出来：
+如果你已经连续抓了 10 个周期，可以一条命令把整个目录全部回放出来；现在这条命令在批量回放结束后，会自动顺手生成总绩效中文报告：
 
 ```bash
 python scripts/batch_replay_recorded_trade_events.py --input-dir artifacts/live/ws_capture_btc_10cycles --config configs/strategy.yaml --overrides artifacts/optimization/optimize_btc_last_6h_100u_smallcap_v2_20260321T014000Z/trial_022/overrides.json --starting-cash 100
@@ -221,6 +221,11 @@ python scripts/batch_replay_recorded_trade_events.py --input-dir artifacts/live/
 - `artifacts/live/ws_capture_btc_10cycles/batch_replay_outputs/<cycle_slug>/...`
 - `artifacts/live/ws_capture_btc_10cycles/batch_replay_outputs/batch_replay_summary.csv`
 - `artifacts/live/ws_capture_btc_10cycles/batch_replay_outputs/batch_replay_summary.md`
+- `artifacts/live/ws_capture_btc_10cycles/batch_replay_outputs/batch_replay_performance_report_zh.md`
+- `artifacts/live/ws_capture_btc_10cycles/batch_replay_outputs/batch_replay_summary_enriched.csv`
+- `artifacts/live/ws_capture_btc_10cycles/batch_replay_outputs/batch_replay_direction_distribution.csv`
+- `artifacts/live/ws_capture_btc_10cycles/batch_replay_outputs/batch_replay_winner_distribution.csv`
+- `artifacts/live/ws_capture_btc_10cycles/batch_replay_outputs/batch_replay_net_direction_distribution.csv`
 
 ### 11. 生成批量回放总绩效报告
 
@@ -308,7 +313,10 @@ python analyze_polymarket_tracker.py --input data/raw/polymarket_tracker_collect
 
 - 会扫描抓取目录下所有 `<cycle_slug>/ws_trade_events.ndjson`
 - 每个周期单独输出 Excel、`cycles.csv`、`decisions.csv`、`metrics.csv`
-- 最后汇总出一份 `batch_replay_summary.csv` / `batch_replay_summary.md`
+- 最后会自动同时输出：
+  - `batch_replay_summary.csv` / `batch_replay_summary.md`
+  - `batch_replay_performance_report_zh.md`
+  - 方向分布、赢家分布、净方向分布等聚合 CSV
 - 适合抓完 5 个、10 个或更多周期后，直接批量评估当前代码的离线盈亏能力
 
 ### `build_batch_replay_performance_report.py`

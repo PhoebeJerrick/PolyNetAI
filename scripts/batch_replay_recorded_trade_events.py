@@ -16,6 +16,7 @@ from polynet_ai.adapters.trade_event_store import load_recorded_trade_events  # 
 from polynet_ai.engine.replay import ReplayEngine  # noqa: E402
 from polynet_ai.reporting.excel_export import export_replay_to_excel  # noqa: E402
 from polynet_ai.strategy.spec import load_strategy_config  # noqa: E402
+from scripts.build_batch_replay_performance_report import build_report  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,6 +48,33 @@ def _discover_cycle_event_files(input_dir: Path) -> list[Path]:
         if path.is_file()
     )
     return files
+
+
+def _write_batch_summary(input_dir: Path, output_dir: Path, summary_df: pd.DataFrame) -> tuple[Path, Path]:
+    summary_csv = output_dir / "batch_replay_summary.csv"
+    summary_md = output_dir / "batch_replay_summary.md"
+    summary_df.to_csv(summary_csv, index=False, encoding="utf-8-sig")
+
+    total_cycles = len(summary_df)
+    total_profit = float(summary_df["total_net_profit"].sum()) if total_cycles else 0.0
+    avg_profit = float(summary_df["total_net_profit"].mean()) if total_cycles else 0.0
+    win_rate = float((summary_df["total_net_profit"] > 0).mean()) if total_cycles else 0.0
+    lines = [
+        "# 批量回放摘要",
+        "",
+        f"- 输入目录: `{input_dir.as_posix()}`",
+        f"- 输出目录: `{output_dir.as_posix()}`",
+        f"- 回放周期数: {total_cycles}",
+        f"- 总净利润: {total_profit:.6f}",
+        f"- 平均单周期净利润: {avg_profit:.6f}",
+        f"- 盈利周期占比: {win_rate:.2%}",
+        "",
+        "## 分周期结果",
+        "",
+        summary_df.to_string(index=False) if total_cycles else "无可用周期",
+    ]
+    summary_md.write_text("\n".join(lines), encoding="utf-8")
+    return summary_csv, summary_md
 
 
 def main() -> int:
@@ -108,33 +136,13 @@ def main() -> int:
     summary_df = pd.DataFrame(summary_rows)
     if not summary_df.empty:
         summary_df = summary_df.sort_values("cycle_slug").reset_index(drop=True)
-    summary_csv = output_dir / "batch_replay_summary.csv"
-    summary_md = output_dir / "batch_replay_summary.md"
-    summary_df.to_csv(summary_csv, index=False, encoding="utf-8-sig")
+    summary_csv, summary_md = _write_batch_summary(input_dir, output_dir, summary_df)
+    report_path = build_report(output_dir)
 
-    total_cycles = len(summary_df)
-    total_profit = float(summary_df["total_net_profit"].sum()) if total_cycles else 0.0
-    avg_profit = float(summary_df["total_net_profit"].mean()) if total_cycles else 0.0
-    win_rate = float((summary_df["total_net_profit"] > 0).mean()) if total_cycles else 0.0
-    lines = [
-        "# 批量回放摘要",
-        "",
-        f"- 输入目录: `{input_dir.as_posix()}`",
-        f"- 输出目录: `{output_dir.as_posix()}`",
-        f"- 回放周期数: {total_cycles}",
-        f"- 总净利润: {total_profit:.6f}",
-        f"- 平均单周期净利润: {avg_profit:.6f}",
-        f"- 盈利周期占比: {win_rate:.2%}",
-        "",
-        "## 分周期结果",
-        "",
-        summary_df.to_string(index=False) if total_cycles else "无可用周期",
-    ]
-    summary_md.write_text("\n".join(lines), encoding="utf-8")
-
-    print(f"批量回放完成，共 {total_cycles} 个周期")
+    print(f"批量回放完成，共 {len(summary_df)} 个周期")
     print(f"摘要 CSV: {summary_csv}")
     print(f"摘要 MD: {summary_md}")
+    print(f"总绩效报告: {report_path}")
     return 0
 
 
