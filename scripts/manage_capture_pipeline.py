@@ -247,7 +247,9 @@ def _print_status(args: argparse.Namespace) -> int:
     batch_dir = output_dir / "batch_replay_outputs"
     summary_csv = batch_dir / "batch_replay_summary.csv"
     report_md = batch_dir / "batch_replay_performance_report_zh.md"
+    report_xlsx = batch_dir / "batch_replay_performance_report_zh.xlsx"
     trade_md = batch_dir / "batch_replay_trade_process_zh.md"
+    report_ready = report_md.exists() or report_xlsx.exists()
     if summary_csv.exists():
         summary_df = pd.read_csv(summary_csv)
         print("")
@@ -256,7 +258,7 @@ def _print_status(args: argparse.Namespace) -> int:
         if not summary_df.empty and "total_net_profit" in summary_df.columns:
             total_profit = float(pd.to_numeric(summary_df["total_net_profit"], errors="coerce").fillna(0.0).sum())
             print(f"- 批量回放总净利润: {total_profit:.6f}")
-        print(f"- 总绩效报告: {'已生成' if report_md.exists() else '未生成'}")
+        print(f"- 总绩效报告: {'已生成' if report_ready else '未生成'}")
         print(f"- 交易过程文档: {'已生成' if trade_md.exists() else '未生成'}")
         print(f"- 回放目录: {batch_dir}")
     elif report_md.exists():
@@ -265,6 +267,22 @@ def _print_status(args: argparse.Namespace) -> int:
         replay_cycles = int(m_cycles.group(1)) if m_cycles else 0
         m_profit = re.search(r"总净利润:\s*([+-]?[0-9.]+)", text)
         total_profit = float(m_profit.group(1)) if m_profit else 0.0
+        print("")
+        print("## 回放与报告")
+        print(f"- 已回放周期数: {replay_cycles}")
+        print(f"- 批量回放总净利润: {total_profit:.6f}")
+        print(f"- 总绩效报告: 已生成")
+        print(f"- 交易过程文档: {'已生成' if trade_md.exists() else '未生成'}")
+        print(f"- 回放目录: {batch_dir}")
+    elif report_xlsx.exists():
+        try:
+            overview = pd.read_excel(report_xlsx, sheet_name="概览")
+            lookup = {str(row["项目"]): row["值"] for _, row in overview.iterrows()}
+            replay_cycles = int(float(lookup.get("周期数", 0)))
+            total_profit = float(lookup.get("总净利润", 0.0))
+        except Exception:
+            replay_cycles = 0
+            total_profit = 0.0
         print("")
         print("## 回放与报告")
         print(f"- 已回放周期数: {replay_cycles}")

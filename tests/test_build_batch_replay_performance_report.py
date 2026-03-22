@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pandas as pd
 
-from scripts.build_batch_replay_performance_report import build_report, _compute_max_drawdown
+from scripts.build_batch_replay_performance_report import (
+    TRACKER_STYLE_SHEET,
+    build_report,
+    _compute_max_drawdown,
+)
 
 
 def test_compute_max_drawdown_from_cycle_profit_series() -> None:
@@ -13,7 +17,7 @@ def test_compute_max_drawdown_from_cycle_profit_series() -> None:
     assert value == 5.0
 
 
-def test_build_report_writes_markdown_and_distribution_files(tmp_path) -> None:
+def test_build_report_writes_xlsx_markdown_and_trade_process(tmp_path) -> None:
     batch_dir = tmp_path / "batch_replay_outputs"
     cycle_dir = batch_dir / "btc-updown-5m-1774147200"
     cycle_dir.mkdir(parents=True)
@@ -76,8 +80,25 @@ def test_build_report_writes_markdown_and_distribution_files(tmp_path) -> None:
 
     report_path = build_report(batch_dir)
 
+    assert report_path.suffix == ".xlsx"
     assert report_path.exists()
-    text = report_path.read_text(encoding="utf-8")
+    xl = pd.ExcelFile(report_path)
+    assert "概览" in xl.sheet_names
+    overview = pd.read_excel(report_path, sheet_name="概览")
+    lookup = {str(k): v for k, v in zip(overview["项目"], overview["值"])}
+    assert int(float(lookup["周期数"])) == 1
+    assert abs(float(lookup["总净利润"]) - 1.5) < 1e-9
+    assert abs(float(lookup["胜率"]) - 1.0) < 1e-9
+    assert abs(float(lookup["最大回撤"]) - 0.0) < 1e-9
+
+    assert TRACKER_STYLE_SHEET in xl.sheet_names
+    tracker = pd.read_excel(report_path, sheet_name=TRACKER_STYLE_SHEET)
+    assert "Up积累份数" in tracker.columns
+    assert "周期净利润" in tracker.columns
+
+    md_path = batch_dir / "batch_replay_performance_report_zh.md"
+    assert md_path.exists()
+    text = md_path.read_text(encoding="utf-8")
     assert "批量离线回放总绩效报告" in text
     assert "总净利润: 1.500000" in text
     assert "胜率: 100.00%" in text
