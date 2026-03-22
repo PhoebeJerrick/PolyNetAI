@@ -7,6 +7,7 @@ from polynet_ai.adapters.trade_event_store import load_recorded_trade_events
 from scripts.capture_polymarket_ws_events import (
     CycleCaptureWriter,
     _build_daemon_child_argv,
+    _extend_reserved_specs,
     _resolve_future_specs,
 )
 from polynet_ai.adapters.polymarket_live import PolymarketMarketSpec
@@ -110,3 +111,34 @@ def test_build_daemon_child_argv_strips_background_only_flags() -> None:
     assert not any(str(item).startswith("--pid-file") for item in command)
     assert "--output-dir" in command
     assert "--max-cycles" in command
+
+
+def test_extend_reserved_specs_keeps_multiple_future_cycles_reserved() -> None:
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    future_a = PolymarketMarketSpec(
+        slug="btc-updown-5m-future-a",
+        series_slug="btc-up-or-down-5m",
+        condition_id="future-a",
+        yes_token_id="yes-a",
+        no_token_id="no-a",
+        start_time=now + timedelta(minutes=5),
+        end_time=now + timedelta(minutes=10),
+        raw={},
+    )
+    future_b = PolymarketMarketSpec(
+        slug="btc-updown-5m-future-b",
+        series_slug="btc-up-or-down-5m",
+        condition_id="future-b",
+        yes_token_id="yes-b",
+        no_token_id="no-b",
+        start_time=now + timedelta(minutes=10),
+        end_time=now + timedelta(minutes=15),
+        raw={},
+    )
+
+    queue = _extend_reserved_specs([], [future_b, future_a], seen_slugs=set(), now=now)
+
+    assert [spec.slug for spec in queue] == [
+        "btc-updown-5m-future-a",
+        "btc-updown-5m-future-b",
+    ]

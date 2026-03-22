@@ -334,7 +334,7 @@ def build_parser() -> argparse.ArgumentParser:
         target.add_argument("--poll-interval-seconds", type=float, default=3.0)
         target.add_argument("--ping-interval-seconds", type=float, default=10.0)
         target.add_argument("--receive-timeout-seconds", type=float, default=1.0)
-        target.add_argument("--cycle-grace-seconds", type=float, default=20.0)
+        target.add_argument("--cycle-grace-seconds", type=float, default=0.0)
         target.add_argument("--start-buffer-seconds", type=float, default=2.0)
         target.add_argument("--market-slugs", nargs="*", default=None)
         target.add_argument("--market-slugs-file", default=None)

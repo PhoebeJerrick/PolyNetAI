@@ -166,7 +166,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--poll-interval-seconds", type=float, default=3.0, help="自动发现新窗口的轮询间隔")
     parser.add_argument("--ping-interval-seconds", type=float, default=10.0)
     parser.add_argument("--receive-timeout-seconds", type=float, default=1.0)
-    parser.add_argument("--cycle-grace-seconds", type=float, default=20.0)
+    parser.add_argument(
+        "--cycle-grace-seconds",
+        type=float,
+        default=0.0,
+        help="抓连续未来周期时默认建议为 0，避免错过紧接着开始的下一个 5m 窗口。",
+    )
     parser.add_argument(
         "--start-buffer-seconds",
         type=float,
@@ -316,6 +321,28 @@ def _sort_specs_by_start(specs: list[PolymarketMarketSpec]) -> list[PolymarketMa
     return sorted(specs, key=lambda item: (item.start_time or datetime.max, item.slug))
 
 
+def _extend_reserved_specs(
+    reserved_specs: list[PolymarketMarketSpec],
+    discovered_specs: list[PolymarketMarketSpec],
+    *,
+    seen_slugs: set[str],
+    now: datetime,
+) -> list[PolymarketMarketSpec]:
+    queue = list(reserved_specs)
+    for spec in _sort_specs_by_start(discovered_specs):
+        if spec.slug in seen_slugs:
+            continue
+        if spec.start_time is None:
+            continue
+        if spec.end_time is not None and spec.end_time <= now:
+            continue
+        if spec.start_time <= now:
+            continue
+        seen_slugs.add(spec.slug)
+        queue.append(spec)
+    return _sort_specs_by_start(queue)
+
+
 def _resolve_future_specs(
     specs: list[PolymarketMarketSpec],
     *,
@@ -383,20 +410,21 @@ def _iter_future_cycle_events(
     seen_slugs: set[str] = set()
     handled_cycles = 0
     no_new_rounds = 0
+    reserved_specs: list[PolymarketMarketSpec] = []
 
     while max_cycles <= 0 or handled_cycles < max_cycles:
         now = _utc_now_naive()
         remaining = max_cycles - handled_cycles if max_cycles > 0 else discover_limit
         fetch_limit = max(discover_limit, remaining + 2 if max_cycles > 0 else discover_limit)
-        specs = discover_active_markets(slug_prefix=slug_prefix, limit=fetch_limit)
-        queued = [
-            spec
-            for spec in specs
-            if spec.slug not in seen_slugs and spec.start_time is not None and spec.start_time > now
-        ]
-        queued = _sort_specs_by_start(queued)
+        discovered_specs = discover_active_markets(slug_prefix=slug_prefix, limit=fetch_limit)
+        reserved_specs = _extend_reserved_specs(
+            reserved_specs,
+            discovered_specs,
+            seen_slugs=seen_slugs,
+            now=now,
+        )
 
-        if not queued:
+        if not reserved_specs:
             no_new_rounds += 1
             if log_fn is not None and no_new_rounds % 10 == 1:
                 log_fn(
@@ -407,8 +435,7 @@ def _iter_future_cycle_events(
             continue
 
         no_new_rounds = 0
-        next_spec = queued[0]
-        seen_slugs.add(next_spec.slug)
+        next_spec = reserved_specs.pop(0)
         handled_cycles += 1
         if log_fn is not None:
             log_fn(

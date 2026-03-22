@@ -193,6 +193,7 @@ chmod +x record.sh
 - 默认输出目录是 `artifacts/live/record_job`
 - 默认抓 `btc-updown-5m-`
 - 默认回放参数是当前 README 里这套 `trial_022` overrides
+- 默认按“连续完整未来窗口”抓取，避免 `s3` 只抓到不连续周期
 - 如果你反复执行 `./record.sh s ...` 或 `./record.sh rb ...`，会继续使用同一个默认输出目录
 
 如果你想改输出目录：
@@ -240,6 +241,7 @@ python scripts/capture_polymarket_ws_events.py --daemonize --slug-prefix btc-upd
 - 会跳过已经开始的当前窗口
 - 只锁定未来的新窗口
 - 会在窗口开始前提前连上 websocket，但只从周期开始时刻起正式写盘
+- 默认 `cycle_grace_seconds=0`，优先保证连续多个 5 分钟窗口不丢开头
 
 如果你想调节“提前连线但不提前写盘”的缓冲时间：
 
