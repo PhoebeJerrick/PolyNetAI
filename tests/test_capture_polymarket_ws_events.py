@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from polynet_ai.adapters.trade_event_store import load_recorded_trade_events
-from scripts.capture_polymarket_ws_events import CycleCaptureWriter
+from scripts.capture_polymarket_ws_events import CycleCaptureWriter, _resolve_future_specs
+from polynet_ai.adapters.polymarket_live import PolymarketMarketSpec
 from polynet_ai.domain.models import TradeEvent
 
 
@@ -55,3 +56,31 @@ def test_cycle_capture_writer_splits_cycles_and_exports_manifest(tmp_path) -> No
     assert len(second_events) == 1
     assert first_events[0].cycle_id == "btc-updown-5m-1"
     assert second_events[0].cycle_id == "btc-updown-5m-2"
+
+
+def test_resolve_future_specs_filters_started_cycles() -> None:
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    started = PolymarketMarketSpec(
+        slug="btc-updown-5m-started",
+        series_slug="btc-up-or-down-5m",
+        condition_id="started",
+        yes_token_id="yes-a",
+        no_token_id="no-a",
+        start_time=now - timedelta(seconds=30),
+        end_time=now + timedelta(minutes=4),
+        raw={},
+    )
+    future = PolymarketMarketSpec(
+        slug="btc-updown-5m-future",
+        series_slug="btc-up-or-down-5m",
+        condition_id="future",
+        yes_token_id="yes-b",
+        no_token_id="no-b",
+        start_time=now + timedelta(minutes=5),
+        end_time=now + timedelta(minutes=10),
+        raw={},
+    )
+
+    resolved = _resolve_future_specs([started, future], require_future_start=True)
+
+    assert [spec.slug for spec in resolved] == ["btc-updown-5m-future"]

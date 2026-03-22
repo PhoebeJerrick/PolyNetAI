@@ -74,11 +74,15 @@ PolyNetAI/
 - `scripts/run_polymarket_live_paper.py`
   - 接 Polymarket 公开实时 websocket 做 paper trading
 - `scripts/capture_polymarket_ws_events.py`
-  - 只抓公开 websocket `TradeEvent` 事件流，按周期单独落盘，供后续离线复盘
+  - 只抓公开 websocket `TradeEvent` 事件流，从新周期开始写盘，按周期单独落盘
 - `scripts/run_polymarket_cycle_review.py`
   - 跑一个完整 5 分钟周期，可选真实下单，并自动抓取成交与市场数据复盘
 - `scripts/replay_recorded_trade_events.py`
   - 回放实盘过程中真实消费到的 websocket 事件流
+- `scripts/batch_replay_recorded_trade_events.py`
+  - 批量回放整个抓取目录下的多个周期事件流
+- `scripts/build_batch_replay_performance_report.py`
+  - 基于批量回放结果生成更适合阅读的中文总绩效报告
 
 ### 可视化与补报表
 
@@ -162,10 +166,22 @@ python scripts/run_polymarket_live_paper.py --market-slugs btc-updown-5m-1773826
 python scripts/capture_polymarket_ws_events.py --slug-prefix btc-updown-5m- --max-cycles 3 --output-dir artifacts/live/ws_capture_btc_3cycles
 ```
 
+默认行为：
+
+- 会跳过已经开始的当前窗口
+- 只锁定未来的新窗口
+- 会在窗口开始前提前连上 websocket，但只从周期开始时刻起正式写盘
+
+如果你想调节“提前连线但不提前写盘”的缓冲时间：
+
+```bash
+python scripts/capture_polymarket_ws_events.py --slug-prefix btc-updown-5m- --max-cycles 3 --start-buffer-seconds 2 --output-dir artifacts/live/ws_capture_btc_3cycles
+```
+
 显式指定要抓的 market slug：
 
 ```bash
-python scripts/capture_polymarket_ws_events.py --market-slugs btc-updown-5m-1774147200 btc-updown-5m-1774147500 --max-cycles 2 --output-dir artifacts/live/ws_capture_selected
+python scripts/capture_polymarket_ws_events.py --market-slugs btc-updown-5m-1774147500 btc-updown-5m-1774147800 --max-cycles 2 --output-dir artifacts/live/ws_capture_selected
 ```
 
 脚本会输出：
@@ -178,7 +194,7 @@ python scripts/capture_polymarket_ws_events.py --market-slugs btc-updown-5m-1774
 
 这些 `ndjson` 文件可以直接拿去做离线回放。
 
-### 9. 回放实盘 websocket 事件流
+### 9. 单周期离线回放 websocket 事件流
 
 当你已经拿到某轮 live/real 运行时实际消费到的 `ws_trade_events.ndjson`，优先用它做复盘：
 
@@ -192,7 +208,55 @@ python scripts/replay_recorded_trade_events.py --input artifacts/live/polymarket
 python scripts/replay_recorded_trade_events.py --input artifacts/live/ws_capture_btc_3cycles/<cycle_slug>/ws_trade_events.ndjson --config configs/strategy.yaml --overrides artifacts/optimization/optimize_btc_last_6h_100u_smallcap_v2_20260321T014000Z/trial_022/overrides.json --starting-cash 100 --output artifacts/replays/<cycle_slug>_trial022_replay.xlsx
 ```
 
-### 10. Dashboard 控制台
+### 10. 批量回放整个抓取目录
+
+如果你已经连续抓了 10 个周期，可以一条命令把整个目录全部回放出来：
+
+```bash
+python scripts/batch_replay_recorded_trade_events.py --input-dir artifacts/live/ws_capture_btc_10cycles --config configs/strategy.yaml --overrides artifacts/optimization/optimize_btc_last_6h_100u_smallcap_v2_20260321T014000Z/trial_022/overrides.json --starting-cash 100
+```
+
+默认会输出到：
+
+- `artifacts/live/ws_capture_btc_10cycles/batch_replay_outputs/<cycle_slug>/...`
+- `artifacts/live/ws_capture_btc_10cycles/batch_replay_outputs/batch_replay_summary.csv`
+- `artifacts/live/ws_capture_btc_10cycles/batch_replay_outputs/batch_replay_summary.md`
+
+### 11. 生成批量回放总绩效报告
+
+在批量回放完成后，再运行下面这条命令，可以自动生成一份更适合阅读的中文总报告：
+
+```bash
+python scripts/build_batch_replay_performance_report.py --input-dir artifacts/live/ws_capture_btc_10cycles
+```
+
+也可以直接把输入目录指向 `batch_replay_outputs`：
+
+```bash
+python scripts/build_batch_replay_performance_report.py --input-dir artifacts/live/ws_capture_btc_10cycles/batch_replay_outputs
+```
+
+默认会输出：
+
+- `batch_replay_performance_report_zh.md`
+- `batch_replay_summary_enriched.csv`
+- `batch_replay_direction_distribution.csv`
+- `batch_replay_winner_distribution.csv`
+- `batch_replay_net_direction_distribution.csv`
+
+报告内容会集中汇总：
+
+- 总净利润
+- 平均单周期净利润
+- 胜率
+- 最大回撤
+- 总手续费
+- 总执行成交数
+- 执行方向分布
+- 周期赢家分布
+- 周期结束净方向分布
+
+### 12. Dashboard 控制台
 
 ```bash
 python scripts/run_dashboard_console.py --dashboard-dir artifacts/live/polymarket_btc_10cycles
@@ -204,13 +268,13 @@ python scripts/run_dashboard_console.py --dashboard-dir artifacts/live/polymarke
 http://127.0.0.1:8765/dashboard.html
 ```
 
-### 11. 补生成 dashboard
+### 13. 补生成 dashboard
 
 ```bash
 python scripts/run_dashboard_report.py --input-dir artifacts/live/live_outputs_btc --title "BTC Live Dashboard"
 ```
 
-### 12. 原始 Excel 分析
+### 14. 原始 Excel 分析
 
 ```bash
 python analyze_polymarket_tracker.py --input data/raw/polymarket_tracker_collection.xlsx
@@ -233,11 +297,26 @@ python analyze_polymarket_tracker.py --input data/raw/polymarket_tracker_collect
 ### `capture_polymarket_ws_events.py`
 
 - 只订阅并保存公开 websocket `last_trade_price` 事件，不跑策略、不做 paper、不真实下单
-- 默认按 `btc-updown-5m-` 自动发现并连续抓取指定数量的 5 分钟窗口
+- 默认按 `btc-updown-5m-` 自动发现未来的新 5 分钟窗口，并跳过已经开始的当前窗口
+- 会在窗口开始前按 `--start-buffer-seconds` 提前建立连接，但真正写盘从周期开始时刻算起
 - 每个周期会单独生成一份 `ws_trade_events.ndjson` / `ws_trade_events.csv`
 - 根目录还会额外生成一份跨周期合并文件 `ws_trade_events_all.ndjson`
 - `capture_manifest.json` / `capture_manifest.csv` 会列出每个周期抓到了多少事件、起止时间、首尾价格
 - 这些文件可直接交给 `scripts/replay_recorded_trade_events.py` 做离线复盘
+
+### `batch_replay_recorded_trade_events.py`
+
+- 会扫描抓取目录下所有 `<cycle_slug>/ws_trade_events.ndjson`
+- 每个周期单独输出 Excel、`cycles.csv`、`decisions.csv`、`metrics.csv`
+- 最后汇总出一份 `batch_replay_summary.csv` / `batch_replay_summary.md`
+- 适合抓完 5 个、10 个或更多周期后，直接批量评估当前代码的离线盈亏能力
+
+### `build_batch_replay_performance_report.py`
+
+- 可直接读取抓取目录或 `batch_replay_outputs` 目录
+- 自动汇总总收益、胜率、最大回撤、方向分布等关键指标
+- 会额外输出几份聚合 CSV，方便你继续做二次分析或画图
+- 适合在 10 个周期批量回放结束后，一次性做总体验收
 
 ### `run_polymarket_cycle_review.py`
 

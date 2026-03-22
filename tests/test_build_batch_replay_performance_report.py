@@ -1,0 +1,86 @@
+from __future__ import annotations
+
+import pandas as pd
+
+from scripts.build_batch_replay_performance_report import build_report, _compute_max_drawdown
+
+
+def test_compute_max_drawdown_from_cycle_profit_series() -> None:
+    profits = [3.0, -5.0, 2.0, -1.0]
+
+    value = _compute_max_drawdown(profits)
+
+    assert value == 5.0
+
+
+def test_build_report_writes_markdown_and_distribution_files(tmp_path) -> None:
+    batch_dir = tmp_path / "batch_replay_outputs"
+    cycle_dir = batch_dir / "btc-updown-5m-1774147200"
+    cycle_dir.mkdir(parents=True)
+
+    pd.DataFrame(
+        [
+            {
+                "cycle_slug": "btc-updown-5m-1774147200",
+                "executed_trades": 2,
+                "accepted_signals": 2,
+                "blocked_signals": 0,
+                "total_net_profit": 1.5,
+                "total_fees": 0.1,
+                "winner": "up",
+                "account_cash": 101.5,
+            }
+        ]
+    ).to_csv(batch_dir / "batch_replay_summary.csv", index=False, encoding="utf-8-sig")
+
+    pd.DataFrame(
+        [
+            {
+                "market_id": "btc-up-or-down-5m",
+                "cycle_id": "btc-updown-5m-1774147200",
+                "net_direction": "Up",
+                "winner": "up",
+                "account_cash": 101.5,
+            }
+        ]
+    ).to_csv(cycle_dir / "cycles.csv", index=False, encoding="utf-8-sig")
+
+    pd.DataFrame(
+        [
+            {
+                "selected_outcome": "up",
+                "selected_action": "buy",
+                "selected_shares": 10.0,
+                "executed": True,
+            },
+            {
+                "selected_outcome": "up",
+                "selected_action": "sell",
+                "selected_shares": 5.0,
+                "executed": True,
+            },
+        ]
+    ).to_csv(cycle_dir / "decisions.csv", index=False, encoding="utf-8-sig")
+
+    pd.DataFrame(
+        [
+            {
+                "total_net_profit": 1.5,
+                "total_fees": 0.1,
+                "executed_trades": 2,
+                "accepted_signals": 2,
+                "blocked_signals": 0,
+            }
+        ]
+    ).to_csv(cycle_dir / "metrics.csv", index=False, encoding="utf-8-sig")
+
+    report_path = build_report(batch_dir)
+
+    assert report_path.exists()
+    text = report_path.read_text(encoding="utf-8")
+    assert "批量离线回放总绩效报告" in text
+    assert "总净利润: 1.500000" in text
+    assert "胜率: 100.00%" in text
+    assert "最大回撤: 0.000000" in text
+    assert (batch_dir / "batch_replay_direction_distribution.csv").exists()
+    assert (batch_dir / "batch_replay_summary_enriched.csv").exists()

@@ -3,8 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -15,11 +16,12 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from polynet_ai.adapters.polymarket_live import (  # noqa: E402
+    PolymarketMarketSpec,
     apply_proxy_env_from_dict,
     build_market_specs,
+    discover_active_markets,
     get_account_env_value,
     iter_polymarket_trade_events,
-    iter_polymarket_trade_events_robot,
     load_api_env,
     select_account_env,
 )
@@ -159,6 +161,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ping-interval-seconds", type=float, default=10.0)
     parser.add_argument("--receive-timeout-seconds", type=float, default=1.0)
     parser.add_argument("--cycle-grace-seconds", type=float, default=20.0)
+    parser.add_argument(
+        "--start-buffer-seconds",
+        type=float,
+        default=2.0,
+        help="在新周期开始前提前建立连接的秒数；真正写盘仍从周期开始时刻算起。",
+    )
     parser.add_argument("--market-slugs", nargs="*", default=None, help="显式指定要抓取的 market slug 列表")
     parser.add_argument("--market-slugs-file", default=None, help="每行一个 market slug")
     parser.add_argument(
@@ -196,37 +204,160 @@ def _apply_env_file(path: str | Path, account_index: int) -> None:
         print(f"已从配置文件应用代理环境变量: {', '.join(applied)}")
 
 
+def _utc_now_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _sort_specs_by_start(specs: list[PolymarketMarketSpec]) -> list[PolymarketMarketSpec]:
+    return sorted(specs, key=lambda item: (item.start_time or datetime.max, item.slug))
+
+
+def _resolve_future_specs(
+    specs: list[PolymarketMarketSpec],
+    *,
+    require_future_start: bool,
+) -> list[PolymarketMarketSpec]:
+    if not require_future_start:
+        return _sort_specs_by_start(specs)
+    now = _utc_now_naive()
+    future_specs = [spec for spec in specs if spec.start_time is not None and spec.start_time > now]
+    return _sort_specs_by_start(future_specs)
+
+
+def _wait_until_subscription_time(spec: PolymarketMarketSpec, *, start_buffer_seconds: float, log_fn=print) -> None:
+    if spec.start_time is None:
+        return
+    subscribe_at = spec.start_time - timedelta(seconds=max(0.0, start_buffer_seconds))
+    while True:
+        now = _utc_now_naive()
+        remaining = (subscribe_at - now).total_seconds()
+        if remaining <= 0:
+            break
+        if log_fn is not None:
+            log_fn(f"[capture] 等待新周期开始: {spec.slug}，约 {remaining:.1f}s 后建立订阅")
+        time.sleep(min(max(remaining, 0.2), 10.0))
+
+
+def _iter_events_for_spec_from_cycle_start(
+    spec: PolymarketMarketSpec,
+    *,
+    ping_interval_seconds: float,
+    receive_timeout_seconds: float,
+    cycle_grace_seconds: float,
+    start_buffer_seconds: float,
+    log_fn=print,
+):
+    _wait_until_subscription_time(spec, start_buffer_seconds=start_buffer_seconds, log_fn=log_fn)
+    cycle_start = spec.start_time
+    if log_fn is not None:
+        start_text = cycle_start.isoformat() if cycle_start is not None else "unknown"
+        log_fn(f"[capture] 开始抓取新周期 {spec.slug} (cycle_start={start_text})")
+    for event in iter_polymarket_trade_events(
+        [spec],
+        ping_interval_seconds=ping_interval_seconds,
+        receive_timeout_seconds=receive_timeout_seconds,
+        cycle_grace_seconds=cycle_grace_seconds,
+        log_fn=log_fn,
+    ):
+        if cycle_start is not None and event.timestamp < cycle_start:
+            continue
+        yield event
+
+
+def _iter_future_cycle_events(
+    *,
+    slug_prefix: str,
+    max_cycles: int,
+    poll_interval_seconds: float,
+    ping_interval_seconds: float,
+    receive_timeout_seconds: float,
+    cycle_grace_seconds: float,
+    start_buffer_seconds: float,
+    discover_limit: int = 16,
+    log_fn=print,
+):
+    seen_slugs: set[str] = set()
+    handled_cycles = 0
+    no_new_rounds = 0
+
+    while max_cycles <= 0 or handled_cycles < max_cycles:
+        now = _utc_now_naive()
+        remaining = max_cycles - handled_cycles if max_cycles > 0 else discover_limit
+        fetch_limit = max(discover_limit, remaining + 2 if max_cycles > 0 else discover_limit)
+        specs = discover_active_markets(slug_prefix=slug_prefix, limit=fetch_limit)
+        queued = [
+            spec
+            for spec in specs
+            if spec.slug not in seen_slugs and spec.start_time is not None and spec.start_time > now
+        ]
+        queued = _sort_specs_by_start(queued)
+
+        if not queued:
+            no_new_rounds += 1
+            if log_fn is not None and no_new_rounds % 10 == 1:
+                log_fn(
+                    f"[capture] 当前没有尚未开始的新窗口（prefix={slug_prefix}），"
+                    f"等待 {poll_interval_seconds:.1f}s 后继续查找..."
+                )
+            time.sleep(max(0.2, poll_interval_seconds))
+            continue
+
+        no_new_rounds = 0
+        next_spec = queued[0]
+        seen_slugs.add(next_spec.slug)
+        handled_cycles += 1
+        if log_fn is not None:
+            log_fn(
+                f"[capture] 已锁定未来窗口 {next_spec.slug} "
+                f"({handled_cycles}/{max_cycles if max_cycles > 0 else 'inf'})"
+            )
+        yield from _iter_events_for_spec_from_cycle_start(
+            next_spec,
+            ping_interval_seconds=ping_interval_seconds,
+            receive_timeout_seconds=receive_timeout_seconds,
+            cycle_grace_seconds=cycle_grace_seconds,
+            start_buffer_seconds=start_buffer_seconds,
+            log_fn=log_fn,
+        )
+
+
 def _build_event_stream(args: argparse.Namespace):
     market_slugs = _load_market_slugs(args)
     if market_slugs:
-        specs = build_market_specs(
+        raw_specs = build_market_specs(
             market_slugs=market_slugs,
             slug_prefix=args.slug_prefix,
             max_cycles=args.max_cycles,
         )
+        specs = _resolve_future_specs(raw_specs, require_future_start=True)
         if not specs:
-            raise RuntimeError("没有可用的市场可供订阅。")
-        print("本次将显式抓取以下周期:")
+            raise RuntimeError("显式指定的 market slug 都已经开始或缺少 start_time，无法保证从新周期开始抓取。")
+        print("本次将从周期开始抓取以下 future market slug:")
         for spec in specs:
             print(f"  - {spec.slug}")
-        return iter_polymarket_trade_events(
-            specs,
-            ping_interval_seconds=args.ping_interval_seconds,
-            receive_timeout_seconds=args.receive_timeout_seconds,
-            cycle_grace_seconds=args.cycle_grace_seconds,
-            log_fn=print,
-        )
+        def _stream():
+            for spec in specs:
+                yield from _iter_events_for_spec_from_cycle_start(
+                    spec,
+                    ping_interval_seconds=args.ping_interval_seconds,
+                    receive_timeout_seconds=args.receive_timeout_seconds,
+                    cycle_grace_seconds=args.cycle_grace_seconds,
+                    start_buffer_seconds=args.start_buffer_seconds,
+                    log_fn=print,
+                )
+        return _stream()
     print(
-        f"将按前缀 `{args.slug_prefix}` 自动发现并抓取 {args.max_cycles} 个 5 分钟周期；"
-        "每个周期都会单独落盘，且会额外生成一个合并事件流文件。"
+        f"将按前缀 `{args.slug_prefix}` 自动发现未来的 {args.max_cycles} 个 5 分钟周期；"
+        "会跳过已开始的当前窗口，并从新周期开始时刻起正式写盘。"
     )
-    return iter_polymarket_trade_events_robot(
+    return _iter_future_cycle_events(
         slug_prefix=args.slug_prefix,
         max_cycles=args.max_cycles,
         poll_interval_seconds=args.poll_interval_seconds,
         ping_interval_seconds=args.ping_interval_seconds,
         receive_timeout_seconds=args.receive_timeout_seconds,
         cycle_grace_seconds=args.cycle_grace_seconds,
+        start_buffer_seconds=args.start_buffer_seconds,
         log_fn=print,
     )
 
