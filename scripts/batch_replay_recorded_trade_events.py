@@ -23,6 +23,27 @@ from scripts.build_batch_replay_performance_report import (  # noqa: E402
 )
 
 
+def _resolve_existing_path(label: str, path: str | Path) -> Path:
+    """相对路径优先相对 cwd；不存在时再尝试项目根目录。"""
+    p = Path(path)
+    if p.is_absolute():
+        if p.exists():
+            return p.resolve()
+        raise FileNotFoundError(f"未找到{label}（绝对路径）: {p}")
+
+    cwd_path = (Path.cwd() / p).resolve()
+    if cwd_path.exists():
+        return cwd_path
+    root_path = (ROOT / p).resolve()
+    if root_path.exists():
+        return root_path
+    raise FileNotFoundError(
+        f"未找到{label}: {p}\n"
+        f"  已尝试: {cwd_path}\n"
+        f"  已尝试: {root_path}"
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="批量回放抓取目录下的 websocket 事件流")
     parser.add_argument("--input-dir", required=True, help="抓取目录，例如 artifacts/live/ws_capture_btc_10cycles")
@@ -34,9 +55,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def _load_config(config_path: str | Path, overrides_path: str | Path | None):
-    config = load_strategy_config(config_path)
+    cfg_resolved = _resolve_existing_path("配置文件", config_path)
+    config = load_strategy_config(cfg_resolved)
     if overrides_path:
-        path = Path(overrides_path)
+        path = _resolve_existing_path("overrides 文件", overrides_path)
         with path.open("r", encoding="utf-8") as fh:
             overrides = json.load(fh)
         if not isinstance(overrides, dict):
@@ -56,9 +78,7 @@ def _discover_cycle_event_files(input_dir: Path) -> list[Path]:
 
 def main() -> int:
     args = parse_args()
-    input_dir = Path(args.input_dir)
-    if not input_dir.exists():
-        raise FileNotFoundError(f"未找到输入目录: {input_dir}")
+    input_dir = _resolve_existing_path("输入目录", args.input_dir)
 
     output_dir = Path(args.output_dir) if args.output_dir else input_dir / "batch_replay_outputs"
     output_dir.mkdir(parents=True, exist_ok=True)
