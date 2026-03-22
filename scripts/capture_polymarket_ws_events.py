@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shlex
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -154,6 +157,9 @@ class CycleCaptureWriter:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="独立抓取 Polymarket BTC 5m websocket 事件流")
     parser.add_argument("--output-dir", default="artifacts/live/ws_capture_btc_5m")
+    parser.add_argument("--daemonize", action="store_true", help="以后台方式启动抓取任务，适合 Linux 云服务器长期运行")
+    parser.add_argument("--log-file", default=None, help="后台运行时日志文件路径，默认 <output-dir>/capture.log")
+    parser.add_argument("--pid-file", default=None, help="后台运行时 PID 文件路径，默认 <output-dir>/capture.pid")
     parser.add_argument("--slug-prefix", default="btc-updown-5m-", help="默认抓 BTC 5 分钟窗口")
     parser.add_argument("--max-cycles", type=int, default=1, help="要抓取的 5 分钟周期数")
     parser.add_argument("--status-every", type=int, default=100, help="每处理多少条事件输出一次进度")
@@ -202,6 +208,104 @@ def _apply_env_file(path: str | Path, account_index: int) -> None:
     print(f"默认账号: {account_index}" + (f" (PURSE_ADDRESS={purse})" if purse else ""))
     if applied:
         print(f"已从配置文件应用代理环境变量: {', '.join(applied)}")
+
+
+def _is_process_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _build_daemon_child_argv(script_path: Path, argv: list[str]) -> list[str]:
+    child_args: list[str] = []
+    skip_next = False
+    value_flags = {"--log-file", "--pid-file"}
+    for index, token in enumerate(argv):
+        if skip_next:
+            skip_next = False
+            continue
+        if token == "--daemonize":
+            continue
+        if any(token.startswith(flag + "=") for flag in value_flags):
+            continue
+        if token in value_flags:
+            if index + 1 < len(argv):
+                skip_next = True
+            continue
+        child_args.append(token)
+    return [sys.executable, "-u", str(script_path)] + child_args
+
+
+def _launch_in_background(args: argparse.Namespace, raw_argv: list[str]) -> int:
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    log_path = Path(args.log_file) if args.log_file else output_dir / "capture.log"
+    pid_path = Path(args.pid_file) if args.pid_file else output_dir / "capture.pid"
+    meta_path = output_dir / "capture_background_meta.json"
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if pid_path.exists():
+        try:
+            existing_pid = int(pid_path.read_text(encoding="utf-8").strip())
+        except ValueError:
+            existing_pid = 0
+        if _is_process_running(existing_pid):
+            raise RuntimeError(
+                f"检测到已有后台抓取任务仍在运行，pid={existing_pid}。"
+                f"如需停止，请先在 Linux 上执行 `kill {existing_pid}`。"
+            )
+        pid_path.unlink(missing_ok=True)
+
+    command = _build_daemon_child_argv(Path(__file__).resolve(), raw_argv)
+    quoted_command = " ".join(shlex.quote(part) for part in command)
+    with log_path.open("a", encoding="utf-8") as log_fh:
+        log_fh.write(f"\n[{datetime.now().isoformat(timespec='seconds')}] launch: {quoted_command}\n")
+        log_fh.flush()
+        process = subprocess.Popen(
+            command,
+            cwd=str(ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+
+    pid_path.write_text(str(process.pid), encoding="utf-8")
+    meta_path.write_text(
+        json.dumps(
+            {
+                "pid": process.pid,
+                "log_file": str(log_path),
+                "pid_file": str(pid_path),
+                "output_dir": str(output_dir),
+                "slug_prefix": args.slug_prefix,
+                "max_cycles": args.max_cycles,
+                "start_buffer_seconds": args.start_buffer_seconds,
+                "status_every": args.status_every,
+                "poll_interval_seconds": args.poll_interval_seconds,
+                "env_file": args.env_file,
+                "account_index": args.account_index,
+                "command": command,
+                "launched_at": datetime.now().isoformat(timespec="seconds"),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print("后台抓取任务已启动。")
+    print(f"PID: {process.pid}")
+    print(f"日志: {log_path}")
+    print(f"PID 文件: {pid_path}")
+    print(f"查看日志: tail -f {log_path}")
+    print(f"停止任务: kill {process.pid}")
+    return 0
 
 
 def _utc_now_naive() -> datetime:
@@ -364,6 +468,8 @@ def _build_event_stream(args: argparse.Namespace):
 
 def main() -> int:
     args = parse_args()
+    if args.daemonize:
+        return _launch_in_background(args, sys.argv[1:])
     _apply_env_file(args.env_file, args.account_index)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

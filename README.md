@@ -83,6 +83,8 @@ PolyNetAI/
   - 批量回放整个抓取目录下的多个周期事件流
 - `scripts/build_batch_replay_performance_report.py`
   - 基于批量回放结果生成更适合阅读的中文总绩效报告
+- `scripts/manage_capture_pipeline.py`
+  - 统一管理抓取任务、后台状态、一键抓取到报告、一键停止
 
 ### 可视化与补报表
 
@@ -160,10 +162,77 @@ python scripts/run_polymarket_live_paper.py --market-slugs btc-updown-5m-1773826
 
 如果你只想抓 BTC 5 分钟窗口的实时 websocket 价格事件，不跑策略、不下单，只做后续离线复盘输入：
 
+如果你嫌下面这些 Python 指令太长，Linux 云服务器上直接优先用仓库根目录的 `record.sh`。
+
+最短常用命令：
+
+```bash
+chmod +x record.sh
+./record.sh s3
+./record.sh p
+./record.sh r10
+./record.sh rb300
+./record.sh x
+```
+
+含义分别是：
+
+- `./record.sh s3`
+  - 后台开始抓未来 3 个完整的 5 分钟周期数据流
+- `./record.sh p`
+  - 查看后台运行状态和当前进度
+- `./record.sh r10`
+  - 前台一键抓 10 个周期，并在结束后自动批量回放和生成总绩效报告
+- `./record.sh rb300`
+  - 后台一键抓 300 个周期，并在结束后自动批量回放和生成总绩效报告
+- `./record.sh x`
+  - 一键停止后台任务
+
+默认行为：
+
+- 默认输出目录是 `artifacts/live/record_job`
+- 默认抓 `btc-updown-5m-`
+- 默认回放参数是当前 README 里这套 `trial_022` overrides
+- 如果你反复执行 `./record.sh s ...` 或 `./record.sh rb ...`，会继续使用同一个默认输出目录
+
+如果你想改输出目录：
+
+```bash
+./record.sh s300 -o artifacts/live/record_job_300
+./record.sh p -o artifacts/live/record_job_300
+./record.sh x -o artifacts/live/record_job_300
+```
+
 抓接下来的 3 个 5 分钟周期：
 
 ```bash
 python scripts/capture_polymarket_ws_events.py --slug-prefix btc-updown-5m- --max-cycles 3 --output-dir artifacts/live/ws_capture_btc_3cycles
+```
+
+如果你要在 Linux 云服务器后台长时间抓取几百个周期，可以直接在同一条命令上加 `--daemonize`：
+
+```bash
+python scripts/capture_polymarket_ws_events.py --daemonize --slug-prefix btc-updown-5m- --max-cycles 300 --start-buffer-seconds 2 --output-dir artifacts/live/ws_capture_btc_300cycles
+```
+
+后台模式默认会额外生成：
+
+- `artifacts/live/ws_capture_btc_300cycles/capture.log`
+- `artifacts/live/ws_capture_btc_300cycles/capture.pid`
+- `artifacts/live/ws_capture_btc_300cycles/capture_background_meta.json`
+
+常用运维命令：
+
+```bash
+tail -f artifacts/live/ws_capture_btc_300cycles/capture.log
+cat artifacts/live/ws_capture_btc_300cycles/capture.pid
+kill $(cat artifacts/live/ws_capture_btc_300cycles/capture.pid)
+```
+
+如果你想自定义日志和 PID 文件位置：
+
+```bash
+python scripts/capture_polymarket_ws_events.py --daemonize --slug-prefix btc-updown-5m- --max-cycles 300 --output-dir artifacts/live/ws_capture_btc_300cycles --log-file logs/btc_300cycles.log --pid-file logs/btc_300cycles.pid
 ```
 
 默认行为：
@@ -193,6 +262,38 @@ python scripts/capture_polymarket_ws_events.py --market-slugs btc-updown-5m-1774
 - `artifacts/live/ws_capture_.../<cycle_slug>/ws_trade_events.csv`
 
 这些 `ndjson` 文件可以直接拿去做离线回放。
+
+如果你更希望用一个统一的小工具脚本来管理整个流程，可以直接用下面这几个子命令。
+
+后台开始抓数据：
+
+```bash
+python scripts/manage_capture_pipeline.py start --output-dir artifacts/live/ws_capture_btc_300cycles --slug-prefix btc-updown-5m- --max-cycles 300 --start-buffer-seconds 2
+```
+
+查看后台运行状态和进度：
+
+```bash
+python scripts/manage_capture_pipeline.py status --output-dir artifacts/live/ws_capture_btc_300cycles
+```
+
+一键抓取并直到生成业绩报告：
+
+```bash
+python scripts/manage_capture_pipeline.py run-full --output-dir artifacts/live/ws_capture_btc_10cycles --slug-prefix btc-updown-5m- --max-cycles 10 --config configs/strategy.yaml --overrides artifacts/optimization/optimize_btc_last_6h_100u_smallcap_v2_20260321T014000Z/trial_022/overrides.json --starting-cash 100
+```
+
+如果想把整条流水线也放到后台：
+
+```bash
+python scripts/manage_capture_pipeline.py run-full --daemonize --output-dir artifacts/live/ws_capture_btc_300cycles --slug-prefix btc-updown-5m- --max-cycles 300 --config configs/strategy.yaml --overrides artifacts/optimization/optimize_btc_last_6h_100u_smallcap_v2_20260321T014000Z/trial_022/overrides.json --starting-cash 100
+```
+
+一键停止进程：
+
+```bash
+python scripts/manage_capture_pipeline.py stop --output-dir artifacts/live/ws_capture_btc_300cycles
+```
 
 ### 9. 单周期离线回放 websocket 事件流
 
@@ -304,6 +405,8 @@ python analyze_polymarket_tracker.py --input data/raw/polymarket_tracker_collect
 - 只订阅并保存公开 websocket `last_trade_price` 事件，不跑策略、不做 paper、不真实下单
 - 默认按 `btc-updown-5m-` 自动发现未来的新 5 分钟窗口，并跳过已经开始的当前窗口
 - 会在窗口开始前按 `--start-buffer-seconds` 提前建立连接，但真正写盘从周期开始时刻算起
+- 支持 `--daemonize` 后台启动，适合 Linux 云服务器长时间抓几百个周期
+- 后台模式会自动写 `capture.log`、`capture.pid`、`capture_background_meta.json`
 - 每个周期会单独生成一份 `ws_trade_events.ndjson` / `ws_trade_events.csv`
 - 根目录还会额外生成一份跨周期合并文件 `ws_trade_events_all.ndjson`
 - `capture_manifest.json` / `capture_manifest.csv` 会列出每个周期抓到了多少事件、起止时间、首尾价格
@@ -325,6 +428,24 @@ python analyze_polymarket_tracker.py --input data/raw/polymarket_tracker_collect
 - 自动汇总总收益、胜率、最大回撤、方向分布等关键指标
 - 会额外输出几份聚合 CSV，方便你继续做二次分析或画图
 - 适合在 10 个周期批量回放结束后，一次性做总体验收
+
+### `manage_capture_pipeline.py`
+
+- `start`: 后台开始抓数据
+- `status`: 查看后台运行状态、已完成周期数、已记录事件数、最近完成周期、是否已生成总报告
+- `run-full`: 一键抓取，结束后自动批量回放并生成总绩效报告
+- `run-full --daemonize`: 将整条抓取到报告的流水线放到后台
+- `stop`: 一键停止抓取进程或整条后台流水线
+
+### `record.sh`
+
+- Linux 下的超短包装命令，优先给日常操作用
+- `./record.sh s -3`: 后台抓未来 3 个完整周期
+- `./record.sh p`: 查看状态和进度
+- `./record.sh r -10`: 前台抓取并直到生成报告
+- `./record.sh rb -300`: 后台抓取并直到生成报告
+- `./record.sh x`: 一键停止
+- `-o` 可切换输出目录，适合并行开不同任务
 
 ### `run_polymarket_cycle_review.py`
 

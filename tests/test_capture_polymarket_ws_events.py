@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from polynet_ai.adapters.trade_event_store import load_recorded_trade_events
-from scripts.capture_polymarket_ws_events import CycleCaptureWriter, _resolve_future_specs
+from scripts.capture_polymarket_ws_events import (
+    CycleCaptureWriter,
+    _build_daemon_child_argv,
+    _resolve_future_specs,
+)
 from polynet_ai.adapters.polymarket_live import PolymarketMarketSpec
 from polynet_ai.domain.models import TradeEvent
 
@@ -84,3 +89,24 @@ def test_resolve_future_specs_filters_started_cycles() -> None:
     resolved = _resolve_future_specs([started, future], require_future_start=True)
 
     assert [spec.slug for spec in resolved] == ["btc-updown-5m-future"]
+
+
+def test_build_daemon_child_argv_strips_background_only_flags() -> None:
+    argv = [
+        "--daemonize",
+        "--output-dir",
+        "artifacts/live/ws_capture_btc_10cycles",
+        "--log-file",
+        "logs/capture.log",
+        "--pid-file=logs/capture.pid",
+        "--max-cycles",
+        "10",
+    ]
+
+    command = _build_daemon_child_argv(Path("scripts/capture_polymarket_ws_events.py"), argv)
+
+    assert "--daemonize" not in command
+    assert "--log-file" not in command
+    assert not any(str(item).startswith("--pid-file") for item in command)
+    assert "--output-dir" in command
+    assert "--max-cycles" in command
