@@ -5,20 +5,20 @@ order_sizing:
   base_order_size: 5.0
   min_order_size: 5.0
   max_order_size: 45.0
-  volatility_order_scale: 3
+  volatility_order_scale: 5
 capital:
-  max_cash_utilization: 0.9
-  min_cash_buffer: 10
+  max_cash_utilization: 0.85
+  min_cash_buffer: 12.0
 exposure:
-  max_abs_exposure: 30
-  hedge_trigger_value: 12
-  hedge_scale: 0.1
+  max_abs_exposure: 40.0
+  hedge_trigger_value: 12.0
+  hedge_scale: 0.05
   max_grid_net_position: 10
   max_strategy_trades_per_cycle: 20
 trend:
-  min_trend_strength: 0.4
+  min_trend_strength: 0.5
   trend_price_edge: 0.03
-  trend_scale: 0.1
+  trend_scale: 0.05
 grid:
   grid_low_percentile: 0.25
   grid_high_percentile: 0.75
@@ -31,15 +31,15 @@ mean_reversion:
 profit_taking:
   take_profit_up_deviation: 0.2
   take_profit_down_deviation: 0.2
-  take_profit_fraction: 0.25
+  take_profit_fraction: 0.3
 stop_loss:
   stop_loss_cycle_loss: 18.0
   stop_loss_fraction: 0.5
 last_minute:
-  last_minute_min_confidence: 0.85
+  last_minute_min_confidence: 0.9
   tail_profit_scale: 0.35
-  tail_volatility_scale: 10
-  max_tail_exposure: 20.0
+  tail_volatility_scale: 14
+  max_tail_exposure: 25.0
 execution:
   fee_rate: 0.002
   slippage_bps: 5
