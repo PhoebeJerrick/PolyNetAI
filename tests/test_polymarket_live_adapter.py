@@ -9,9 +9,11 @@ from polynet_ai.adapters.polymarket_live import (
     _discover_time_bucket_markets,
     apply_proxy_env_from_dict,
     discover_active_markets,
+    get_account_env_value,
     iter_polymarket_trade_events,
     iter_polymarket_trade_events_robot,
     load_api_env,
+    select_account_env,
     ws_message_to_trade_event,
 )
 from polynet_ai.domain.models import TradeEvent
@@ -104,6 +106,34 @@ def test_apply_proxy_env_from_dict_strips_quotes_and_sets_lowercase(monkeypatch)
     assert os.environ["HTTPS_PROXY"] == "http://127.0.0.1:7890"
     assert os.environ["https_proxy"] == "http://127.0.0.1:7890"
     assert os.environ["WS_PROXY"] == "http://127.0.0.1:7890"
+
+
+def test_select_account_env_promotes_selected_suffix_to_base_keys() -> None:
+    values = {
+        "PURSE_ADDRESS_1": "0x111",
+        "PURSE_ADDRESS_2": "0x222",
+        "POLY_DERIVE_API_KEY_2": "key-2",
+        "HTTPS_PROXY": "http://127.0.0.1:7890",
+    }
+
+    selected = select_account_env(values, account_index=2)
+
+    assert selected["PURSE_ADDRESS"] == "0x222"
+    assert selected["POLY_DERIVE_API_KEY"] == "key-2"
+    assert selected["HTTPS_PROXY"] == "http://127.0.0.1:7890"
+    assert selected["PURSE_ADDRESS_1"] == "0x111"
+
+
+def test_get_account_env_value_prefers_selected_suffix_then_base() -> None:
+    values = {
+        "PURSE_ADDRESS_1": "0x111",
+        "PURSE_ADDRESS_2": "0x222",
+        "CHAIN_ID": "137",
+    }
+
+    assert get_account_env_value(values, "PURSE_ADDRESS", account_index=2) == "0x222"
+    assert get_account_env_value(values, "CHAIN_ID", account_index=2) == "137"
+    assert get_account_env_value(values, "MISSING", account_index=2, default="fallback") == "fallback"
 
 
 def test_discover_active_markets_filters_by_slug_prefix(monkeypatch) -> None:

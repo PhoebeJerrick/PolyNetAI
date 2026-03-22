@@ -48,10 +48,29 @@ class FillEvent:
     fee: float = 0.0
     slippage: float = 0.0
     reason: str = ""
+    reserved_cash: float = 0.0
 
     @property
     def signed_shares(self) -> float:
         return self.shares if self.action == "buy" else -self.shares
+
+
+BrokerExecutionStatus = Literal[
+    "filled",
+    "submitted",
+    "rejected",
+    "no_liquidity",
+    "invalid_amount",
+]
+
+
+@dataclass(slots=True)
+class ExecutionResult:
+    status: BrokerExecutionStatus
+    fill: FillEvent | None = None
+    order_id: str = ""
+    reason: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

@@ -12,9 +12,15 @@ if str(SRC) not in sys.path:
 from polynet_ai.adapters.polymarket_live import (  # noqa: E402
     apply_proxy_env_from_dict,
     build_market_specs,
+    get_account_env_value,
     iter_polymarket_trade_events_robot,
     iter_polymarket_trade_events,
     load_api_env,
+    select_account_env,
+)
+from polynet_ai.adapters.trade_event_store import (  # noqa: E402
+    TradeEventRecorder,
+    export_recorded_trade_events_csv,
 )
 from polynet_ai.execution.paper_broker import PaperBroker  # noqa: E402
 from polynet_ai.engine.live import LivePaperRunner, LiveRunnerResult, export_live_result  # noqa: E402
@@ -41,6 +47,7 @@ def parse_args() -> argparse.Namespace:
         default=str(ROOT.parent / "APIs" / "ApiConfig.env"),
         help="API 配置文件路径。当前实时仿真只做读取校验，不使用私钥下真实单。",
     )
+    parser.add_argument("--account-index", type=int, default=2, help="账号编号（默认 2）；会优先读取 PURSE_ADDRESS_2 等后缀键。")
     return parser.parse_args()
 
 
@@ -89,14 +96,19 @@ def main() -> int:
 
     if Path(args.env_file).exists():
         env_values = load_api_env(args.env_file)
-        applied = apply_proxy_env_from_dict(env_values)
+        selected_env = select_account_env(env_values, account_index=args.account_index)
+        applied = apply_proxy_env_from_dict(selected_env)
+        purse = get_account_env_value(env_values, "PURSE_ADDRESS", account_index=args.account_index)
         print(f"检测到 API 配置文件: {Path(args.env_file)}")
         print(f"已读取 {len(env_values)} 个键；当前仿真仅使用公开行情，不会真实下单。")
+        print(f"默认账号: {args.account_index}" + (f" (PURSE_ADDRESS={purse})" if purse else ""))
         if applied:
             print(f"已从配置文件应用代理环境变量: {', '.join(applied)}")
 
     engine = ReplayEngine.from_yaml(args.config, starting_cash=args.starting_cash)
     runner = LivePaperRunner(engine)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     event_stream = None
     if args.robot_mode:
         if market_slugs:
@@ -159,12 +171,17 @@ def main() -> int:
 
         progress_callback = _flush_progress
 
-    result = runner.run_stream(
-        event_stream,
-        status_every=args.status_every,
-        on_progress=progress_callback,
-        progress_interval_seconds=max(0.0, args.dashboard_refresh_seconds),
-    )
+    recorded_events_path = output_dir / "ws_trade_events.ndjson"
+    recorded_events_csv_path = output_dir / "ws_trade_events.csv"
+    with TradeEventRecorder(recorded_events_path) as event_recorder:
+        result = runner.run_stream(
+            event_stream,
+            status_every=args.status_every,
+            on_event=event_recorder.record,
+            on_progress=progress_callback,
+            progress_interval_seconds=max(0.0, args.dashboard_refresh_seconds),
+        )
+    export_recorded_trade_events_csv(recorded_events_path, recorded_events_csv_path)
     export_live_result(
         result,
         args.output_dir,

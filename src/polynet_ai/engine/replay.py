@@ -43,12 +43,13 @@ class ReplayEngine:
         self,
         config: StrategyConfig,
         starting_cash: float = 1000.0,
+        broker: object | None = None,
     ) -> None:
         self.config = config
         self.state_engine = StateEngine()
         self.router = StrategyRouter(config)
         self.account = Account(starting_cash=starting_cash)
-        self.broker = PaperBroker(
+        self.broker = broker or PaperBroker(
             fee_rate=float(config.get("execution.fee_rate", 0.002)),
             slippage_bps=float(config.get("execution.slippage_bps", 10)),
         )
@@ -80,6 +81,8 @@ class ReplayEngine:
 
     def process_event(self, event: TradeEvent) -> ReplayStepResult:
         finalized_cycle_row: dict[str, object] | None = None
+        self._apply_confirmed_fills(event.timestamp, active_cycle_key=(event.market_id, event.cycle_id))
+        self._sync_account_reservations()
         current_state = self.state_engine.state
         if current_state is not None:
             current_cycle_key = (current_state.market_id, current_state.cycle_id)
@@ -106,13 +109,23 @@ class ReplayEngine:
             "risk_status": "no_signal",
             "risk_reason": "",
             "executed": False,
+            "submitted": False,
+            "confirmed": False,
+            "broker_status": "",
+            "broker_order_id": "",
             "fill_price": 0.0,
             "fill_fee": 0.0,
             "cycle_net_profit": features.cycle_net_profit,
             "account_cash": self.account.cash,
+            "available_cash": self.account.available_cash,
         }
         if decision.selected is not None:
+            pending_context = self._pending_context()
             decision.selected.metadata["account_cash"] = self.account.cash
+            decision.selected.metadata["account_available_cash"] = self.account.available_cash
+            decision.selected.metadata["market_price"] = event.price
+            decision.selected.metadata.update(event.metadata)
+            decision.selected.metadata.update(pending_context)
             row["selected_rule"] = decision.selected.category
             row["selected_action"] = decision.selected.action
             row["selected_outcome"] = decision.selected.outcome
@@ -122,13 +135,32 @@ class ReplayEngine:
             row["risk_reason"] = risk_decision.reason
             if risk_decision.accepted and risk_decision.intent is not None:
                 row["selected_shares"] = risk_decision.intent.shares
-                fill = self.broker.execute(risk_decision.intent, event.timestamp)
-                self.account.apply_fill(fill)
-                self.state_engine.apply_strategy_fill(fill)
-                row["executed"] = True
-                row["fill_price"] = fill.price
-                row["fill_fee"] = fill.fee
-                row["account_cash"] = self.account.cash
+                try:
+                    execution = self.broker.execute(risk_decision.intent, event.timestamp)
+                except Exception as exc:
+                    row["risk_status"] = "broker_error"
+                    row["risk_reason"] = str(exc)
+                else:
+                    row["broker_status"] = execution.status
+                    row["broker_order_id"] = execution.order_id
+                    if execution.status == "submitted":
+                        row["submitted"] = True
+                        self._sync_account_reservations()
+                        row["risk_status"] = "submitted"
+                        row["available_cash"] = self.account.available_cash
+                    elif execution.fill is not None:
+                        self._apply_fill(execution.fill)
+                        self._sync_account_reservations()
+                        row["executed"] = True
+                        row["confirmed"] = True
+                        row["fill_price"] = execution.fill.price
+                        row["fill_fee"] = execution.fill.fee
+                        row["account_cash"] = self.account.cash
+                        row["available_cash"] = self.account.available_cash
+                    elif execution.status != "filled":
+                        self._sync_account_reservations()
+                        row["risk_status"] = execution.status
+                        row["risk_reason"] = execution.reason
         snapshot = self.state_engine.snapshot()
         return ReplayStepResult(
             decision_row=row,
@@ -139,7 +171,50 @@ class ReplayEngine:
     def finalize_pending_cycle(self) -> dict[str, object] | None:
         if self.state_engine.state is None:
             return None
+        if self.state_engine.state.last_event_timestamp is not None:
+            self._apply_confirmed_fills(
+                self.state_engine.state.last_event_timestamp,
+                active_cycle_key=(self.state_engine.state.market_id, self.state_engine.state.cycle_id),
+            )
+            self._sync_account_reservations()
         return self._finalize_cycle()
+
+    def _apply_confirmed_fills(
+        self,
+        timestamp: datetime,
+        *,
+        active_cycle_key: tuple[str, str] | None = None,
+    ) -> None:
+        if not hasattr(self.broker, "poll"):
+            return
+        fills = self.broker.poll(timestamp)
+        for fill in fills:
+            state = self.state_engine.state
+            fill_cycle_key = (fill.market_id, fill.cycle_id)
+            if active_cycle_key is not None and fill_cycle_key != active_cycle_key:
+                self.account.apply_fill(fill)
+                continue
+            if state is not None and fill_cycle_key != (state.market_id, state.cycle_id):
+                self.account.apply_fill(fill)
+                continue
+            self._apply_fill(fill)
+
+    def _apply_fill(self, fill) -> None:
+        self.account.apply_fill(fill)
+        self.state_engine.apply_strategy_fill(fill)
+
+    def _pending_context(self) -> dict[str, object]:
+        if not hasattr(self.broker, "pending_context"):
+            return {}
+        context = dict(self.broker.pending_context())
+        context["pending_buy_reserved_cash"] = float(context.get("pending_buy_reserved_cash", 0.0))
+        context["pending_up_sell_shares"] = float(context.get("pending_up_sell_shares", 0.0))
+        context["pending_down_sell_shares"] = float(context.get("pending_down_sell_shares", 0.0))
+        return context
+
+    def _sync_account_reservations(self) -> None:
+        pending_context = self._pending_context()
+        self.account.reserved_cash = float(pending_context.get("pending_buy_reserved_cash", 0.0))
 
     def _build_result(
         self,

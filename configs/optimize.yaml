@@ -1,4 +1,4 @@
-trials: 16
+trials: 24
 seed: 42
 export_top_n: 3
 
@@ -10,36 +10,63 @@ score_weights:
   signal_execution_rate: 15.0
 
 parameters:
+  order_sizing.base_order_size:
+    type: float
+    min: 5.0
+    max: 7.0
+    step: 1.0
+    precision: 1
+  order_sizing.max_order_size:
+    type: choice
+    values: [20.0, 30.0, 45.0]
+  order_sizing.volatility_order_scale:
+    type: choice
+    values: [1, 3, 5]
+  capital.max_cash_utilization:
+    type: choice
+    values: [0.85, 0.9, 0.95]
+  capital.min_cash_buffer:
+    type: choice
+    values: [8.0, 10.0, 12.0]
+  exposure.max_abs_exposure:
+    type: choice
+    values: [20.0, 30.0, 40.0]
+  exposure.hedge_trigger_value:
+    type: choice
+    values: [8.0, 10.0, 12.0, 15.0]
+  exposure.max_strategy_trades_per_cycle:
+    type: choice
+    values: [12, 16, 20]
+  exposure.hedge_scale:
+    type: choice
+    values: [0.05, 0.1, 0.15]
   trend.min_trend_strength:
     type: float
-    min: 0.20
+    min: 0.30
     max: 0.50
     step: 0.05
     precision: 2
   trend.trend_scale:
-    type: float
-    min: 0.10
-    max: 0.30
-    step: 0.05
-    precision: 2
+    type: choice
+    values: [0.05, 0.1, 0.15]
   stop_loss.stop_loss_cycle_loss:
     type: float
     min: 10.0
-    max: 30.0
+    max: 20.0
     step: 2.0
-    precision: 1
+    precision: 2
   last_minute.max_tail_exposure:
     type: float
-    min: 20.0
-    max: 50.0
+    min: 10.0
+    max: 25.0
     step: 5.0
     precision: 1
-  order_sizing.base_order_size:
-    type: float
-    min: 4.0
-    max: 12.0
-    step: 1.0
-    precision: 1
+  last_minute.tail_volatility_scale:
+    type: choice
+    values: [6, 10, 14]
+  last_minute.last_minute_min_confidence:
+    type: choice
+    values: [0.8, 0.85, 0.9]
   execution.slippage_bps:
     type: choice
     values: [5, 10, 15]

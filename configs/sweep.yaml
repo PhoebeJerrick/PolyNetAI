@@ -1,22 +1,30 @@
 scenarios:
   - name: baseline
     overrides: {}
-  - name: conservative_tail
+  - name: tighter_cash
     overrides:
-      last_minute.last_minute_min_confidence: 0.9
-      last_minute.max_tail_exposure: 25.0
-      order_sizing.base_order_size: 6.0
-  - name: aggressive_trend
-    overrides:
-      trend.min_trend_strength: 0.25
-      trend.trend_scale: 0.25
-      order_sizing.base_order_size: 10.0
+      capital.max_cash_utilization: 0.85
+      capital.min_cash_buffer: 12
+      exposure.max_strategy_trades_per_cycle: 12
   - name: tighter_risk
     overrides:
-      exposure.max_abs_exposure: 150.0
+      exposure.max_abs_exposure: 20
+      exposure.hedge_trigger_value: 8
       stop_loss.stop_loss_cycle_loss: 12.0
       exposure.max_strategy_trades_per_cycle: 8
+  - name: lighter_tail
+    overrides:
+      last_minute.last_minute_min_confidence: 0.9
+      last_minute.tail_volatility_scale: 6
+      last_minute.max_tail_exposure: 15.0
+  - name: faster_profit_lock
+    overrides:
+      profit_taking.take_profit_fraction: 0.35
+      stop_loss.stop_loss_cycle_loss: 14.0
+      exposure.max_strategy_trades_per_cycle: 12
 
 grid:
-  execution.slippage_bps: [5, 10]
-  profit_taking.take_profit_fraction: [0.25, 0.35]
+  order_sizing.base_order_size: [5.0, 6.0]
+  stop_loss.stop_loss_cycle_loss: [12.0, 18.0]
+  exposure.max_strategy_trades_per_cycle: [8, 12]
+  last_minute.max_tail_exposure: [15.0, 20.0]

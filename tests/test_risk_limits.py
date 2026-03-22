@@ -143,8 +143,76 @@ def test_apply_risk_limits_allows_small_sells_below_buy_minimum() -> None:
         metadata={"account_cash": 100.0},
     )
 
-    decision = apply_risk_limits(build_features(), intent, config)
+    features = build_features()
+    features.up_held = 2.5
+    decision = apply_risk_limits(features, intent, config)
 
     assert decision.accepted
     assert decision.intent is not None
     assert decision.intent.shares == 2.5
+
+
+def test_apply_risk_limits_uses_available_cash_over_total_cash() -> None:
+    intent = OrderIntent(
+        market_id="BTC",
+        cycle_id="cycle-a",
+        outcome="up",
+        action="buy",
+        shares=20.0,
+        reference_price=0.5,
+        category="grid",
+        reason="test",
+        priority=10,
+        metadata={"account_cash": 100.0, "account_available_cash": 10.0},
+    )
+
+    decision = apply_risk_limits(build_features(), intent, build_config())
+
+    assert not decision.accepted
+    assert decision.reason == "可用现金不足，无法满足最小下单量"
+
+
+def test_apply_risk_limits_blocks_sell_when_pending_sell_already_reserves_position() -> None:
+    features = build_features()
+    features.up_held = 3.0
+    intent = OrderIntent(
+        market_id="BTC",
+        cycle_id="cycle-a",
+        outcome="up",
+        action="sell",
+        shares=2.0,
+        reference_price=0.5,
+        category="take_profit",
+        reason="test",
+        priority=10,
+        metadata={"pending_up_sell_shares": 3.0},
+    )
+
+    decision = apply_risk_limits(features, intent, build_config())
+
+    assert not decision.accepted
+    assert decision.reason == "可卖仓位不足，存在待确认卖单"
+
+
+def test_apply_risk_limits_clips_sell_to_unreserved_position() -> None:
+    features = build_features()
+    features.up_held = 5.0
+    intent = OrderIntent(
+        market_id="BTC",
+        cycle_id="cycle-a",
+        outcome="up",
+        action="sell",
+        shares=4.0,
+        reference_price=0.5,
+        category="take_profit",
+        reason="test",
+        priority=10,
+        metadata={"pending_up_sell_shares": 2.0},
+    )
+
+    decision = apply_risk_limits(features, intent, build_config())
+
+    assert decision.accepted
+    assert decision.intent is not None
+    assert decision.intent.shares == 3.0
+    assert decision.intent.metadata["pending_sell_limited"] is True

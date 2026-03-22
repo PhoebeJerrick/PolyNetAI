@@ -47,7 +47,7 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
         return RiskDecision(False, None, "下单后净敞口超过风控阈值")
 
     if clipped.action == "buy":
-        account_cash = float(clipped.metadata.get("account_cash", 0.0))
+        account_cash = float(clipped.metadata.get("account_available_cash", clipped.metadata.get("account_cash", 0.0)))
         reserved_cash = max(0.0, min_cash_buffer)
         spendable_cash = max(0.0, account_cash * max(0.0, min(max_cash_utilization, 1.0)) - reserved_cash)
         unit_price = clipped.reference_price * (1.0 + slippage_bps / 10_000.0)
@@ -60,5 +60,21 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
         if affordable_shares < clipped.shares:
             clipped = replace(clipped, shares=affordable_shares)
             clipped.metadata["cash_limited"] = True
+    else:
+        held_shares = features.up_held if clipped.outcome == "up" else features.down_held
+        pending_sell_shares = float(
+            clipped.metadata.get(
+                f"pending_{clipped.outcome}_sell_shares",
+                clipped.metadata.get("pending_sell_shares", 0.0),
+            )
+        )
+        available_shares = max(0.0, held_shares - pending_sell_shares)
+
+        if available_shares <= 0:
+            return RiskDecision(False, None, "可卖仓位不足，存在待确认卖单")
+
+        if available_shares < clipped.shares:
+            clipped = replace(clipped, shares=available_shares)
+            clipped.metadata["pending_sell_limited"] = True
 
     return RiskDecision(True, clipped, "")

@@ -71,6 +71,29 @@ def test_live_runner_stream_accepts_iterators() -> None:
     assert result.replay_result.cycle_df.iloc[1]["cycle_id"] == "cycle-b"
 
 
+def test_live_runner_stream_emits_events_in_consumed_order() -> None:
+    t0 = datetime(2026, 3, 20, 12, 0, 0)
+    events = iter(
+        [
+            TradeEvent("btc-up-or-down-5m", "cycle-a", t0, price=0.45, shares=10, outcome="up", action="buy"),
+            TradeEvent("btc-up-or-down-5m", "cycle-a", t0 + timedelta(seconds=1), price=0.46, shares=6, outcome="down", action="sell"),
+        ]
+    )
+    seen: list[tuple[str, float, str, str]] = []
+    runner = LivePaperRunner(ReplayEngine(build_config()))
+
+    runner.run_stream(
+        events,
+        status_every=0,
+        on_event=lambda event: seen.append((event.cycle_id, event.price, event.outcome, event.action)),
+    )
+
+    assert seen == [
+        ("cycle-a", 0.45, "up", "buy"),
+        ("cycle-a", 0.46, "down", "sell"),
+    ]
+
+
 def test_export_live_result_writes_trade_ledger_excel(tmp_path) -> None:
     engine = ReplayEngine(build_config())
     t0 = datetime(2026, 3, 20, 12, 0, 0)

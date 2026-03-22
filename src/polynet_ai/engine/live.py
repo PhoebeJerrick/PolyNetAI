@@ -30,6 +30,7 @@ class LivePaperRunner:
         max_sleep_seconds: float = 0.5,
         status_every: int = 25,
         sleep_fn: Callable[[float], None] | None = None,
+        on_event: Callable[[TradeEvent], None] | None = None,
     ) -> LiveRunnerResult:
         sleep_impl = sleep_fn or time.sleep
         previous_event_ref: list[TradeEvent | None] = [None]
@@ -38,6 +39,7 @@ class LivePaperRunner:
         return self._consume_events(
             sorted_events,
             status_every=status_every,
+            on_event=on_event,
             before_step=(
                 lambda event: self._apply_replay_delay(
                     event=event,
@@ -55,12 +57,14 @@ class LivePaperRunner:
         events: Iterable[TradeEvent],
         *,
         status_every: int = 25,
+        on_event: Callable[[TradeEvent], None] | None = None,
         on_progress: Callable[[LiveRunnerResult], None] | None = None,
         progress_interval_seconds: float = 0.0,
     ) -> LiveRunnerResult:
         return self._consume_events(
             events,
             status_every=status_every,
+            on_event=on_event,
             on_progress=on_progress,
             progress_interval_seconds=progress_interval_seconds,
         )
@@ -85,6 +89,7 @@ class LivePaperRunner:
         events: Iterable[TradeEvent],
         *,
         status_every: int,
+        on_event: Callable[[TradeEvent], None] | None = None,
         before_step: Callable[[TradeEvent], None] | None = None,
         previous_event_ref: list[TradeEvent | None] | None = None,
         on_progress: Callable[[LiveRunnerResult], None] | None = None,
@@ -99,6 +104,8 @@ class LivePaperRunner:
         for index, event in enumerate(events, start=1):
             if before_step is not None:
                 before_step(event)
+            if on_event is not None:
+                on_event(event)
             previous_ref[0] = event
 
             step = self.engine.process_event(event)
@@ -111,6 +118,7 @@ class LivePaperRunner:
             snapshot_row = asdict(step.snapshot)
             snapshot_row["event_index"] = index
             snapshot_row["account_cash"] = self.engine.account.cash
+            snapshot_row["available_cash"] = self.engine.account.available_cash
             snapshot_rows.append(snapshot_row)
 
             if status_every > 0 and index % status_every == 0:

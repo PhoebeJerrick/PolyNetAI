@@ -1,5 +1,47 @@
 # 参数扫描与实验流程
 
+## 批量下载 BTC 5 分钟市场历史成交（Gamma + data-api）
+
+将过去约 N 天、每个 `btc-updown-5m-<unix_ts>` 窗口的公开成交拉到 `data/raw/`，生成与 `excel_loader` 兼容的 `csv/xlsx`：
+
+```bash
+python scripts/download_polymarket_btc_trades_range.py --days 30 --output-prefix polymarket_btc_5m_last30d --resume
+```
+
+说明：
+
+- 默认会尝试读取上一级目录 `APIs/ApiConfig.env` 中的代理（与 `run_polymarket_live_paper.py` 一致）。
+- **加速（默认）**：先枚举全部 `btc-updown-5m-*` slug，再用 Gamma `/markets` **多 `slug` 批量**拉元数据（`--slug-batch-size`，默认 40）；再用 data-api `/trades` **`--page-limit` 默认 10000**（官方上限）；最后用 **`--workers` 默认 12** 并发拉各市场成交。
+- 单月约 `30 * 24 * 12 = 8640` 个槽位；中断后加 `--resume` 续跑（进度里为 `done_slugs`，也可从已生成 CSV 的 `market_slug` 推断）。
+- 若行数超过 Excel 单表上限（`1048576`），脚本会**只保留 CSV 作为正式产物**，并在 summary/progress 中标记 `xlsx_written=false`，不再在最后一步因 `to_excel()` 失败而把成功下载误报成失败。
+- `--max-pages`（默认 12）限制单市场分页；极端流动性下可能截断尾部成交。
+- 串行拉成交时用 `--workers 1`；元数据最慢模式：`--discover slug`（逐条 `markets/slug/...`）。
+- 并发时加 `--quiet` 可少刷屏。若出现 **连接被重置**（Windows 常见 `WinError 10054` / `ConnectionResetError`），多为并发过高或远端限流：请 **`--workers` 降到 6～10**、加 **`--resume`** 续跑未完成的 slug；脚本已内置 **urllib3 重试 + 单页/单市场退避重试**（`--market-retries`）。仍不稳定时可设环境变量 `POLYNET_DOWNLOAD_CLOSE=1` 禁用 keep-alive（略慢但更稳）。
+- **`WinError 10053`（本机软件中止连接）** 常见于 **代理/防火墙** 在 TLS 阶段断开；发现阶段已带 **批量/单条退避重试**。仍频繁时可 **`--slug-batch-size 15`**、暂时去掉代理或缩小 `HTTPS_PROXY` 使用范围。
+
+## Baseline 与 trial overrides 并排对比
+
+在同一批事件上对比 `configs/strategy.yaml` 与某次寻优的 `overrides.json`（如 `trial_022`）：
+
+```bash
+python scripts/compare_baseline_vs_overrides.py ^
+  --input data/raw/<你的数据>.xlsx ^
+  --overrides artifacts/optimization/<run>/trial_022/overrides.json ^
+  --starting-cash 100 ^
+  --output artifacts/replays/compare_baseline_vs_trial022.csv
+```
+
+`--input` 支持 **csv**；当输入为大 CSV 时，脚本会：
+
+- **流式分块读取**（不再一次性把全部事件装进内存）
+- 用同一条事件流同时驱动 `baseline` 与 `trial overrides`
+- 若同名 `*.progress.json` 含 `done_slugs`，会把**无成交 5 分钟窗口补成 0 收益周期**
+
+因此输出里的 `total_cycles` 表示完整周期数；新增：
+
+- `observed_cycles_with_trades`：实际有成交的周期数
+- `empty_cycles`：无成交但被补齐的周期数
+
 ## 单次回放
 
 使用基础策略配置执行一次回放：
@@ -258,6 +300,31 @@ python scripts/run_dashboard_report.py --input-dir artifacts/live/live_outputs_b
   - `artifacts/live/`：准实时模拟与 dashboard
   - `artifacts/sweeps/`：批量参数扫描
   - `artifacts/optimization/`：自动参数寻优
+
+### 实盘事件落盘与回放
+
+为避免使用 Data API 事后成交表重建输入流时产生偏差，实时脚本现在会把**实际消费到的 websocket `TradeEvent`** 原样落盘：
+
+- 单周期实盘脚本 `scripts/run_polymarket_cycle_review.py`
+  - 输出 `ws_trade_events.ndjson`
+  - 输出 `ws_trade_events.csv`
+- 实时仿真脚本 `scripts/run_polymarket_live_paper.py`
+  - 输出 `ws_trade_events.ndjson`
+  - 输出 `ws_trade_events.csv`
+
+推荐优先使用 `ws_trade_events.ndjson` 做离线复盘，因为它保存了引擎真实消费顺序、时间戳、方向与 metadata。
+
+回放命令示例：
+
+```bash
+python scripts/replay_recorded_trade_events.py \
+  --input artifacts/live/polymarket_cycle_review/account_2/<cycle_slug>/ws_trade_events.ndjson \
+  --config configs/strategy.yaml \
+  --starting-cash 100 \
+  --output artifacts/replays/<cycle_slug>_recorded_event_replay.xlsx
+```
+
+这样得到的回放输入会和当时实盘更接近，不再依赖 `market_trades_raw.csv` 这类事后查询结果去反推事件流。
 
 ### 面板内容
 

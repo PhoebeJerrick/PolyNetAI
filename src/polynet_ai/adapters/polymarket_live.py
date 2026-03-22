@@ -140,6 +140,38 @@ def load_api_env(path: str | Path) -> dict[str, str]:
     return values
 
 
+def select_account_env(values: dict[str, str], account_index: int = 2) -> dict[str, str]:
+    """
+    从 `ApiConfig.env` 中挑选指定账号的配置，并将 `FOO_2` 形式映射为无后缀键 `FOO`。
+
+    规则：
+    - 保留原始所有键，兼容旧逻辑；
+    - 若存在 `<KEY>_<account_index>`，则额外写入 `<KEY>`；
+    - 默认账号 2，便于双账号场景直接切换。
+    """
+    selected = dict(values)
+    suffix = f"_{int(account_index)}"
+    for key, value in values.items():
+        if key.endswith(suffix) and len(key) > len(suffix):
+            selected[key[: -len(suffix)]] = value
+    return selected
+
+
+def get_account_env_value(
+    values: dict[str, str],
+    key: str,
+    *,
+    account_index: int = 2,
+    default: str | None = None,
+) -> str | None:
+    suffix_key = f"{key}_{int(account_index)}"
+    if suffix_key in values:
+        return values[suffix_key]
+    if key in values:
+        return values[key]
+    return default
+
+
 def _strip_env_value(raw: str) -> str:
     s = raw.strip()
     if len(s) >= 2 and s[0] == s[-1] and s[0] in {'"', "'"}:
@@ -415,6 +447,10 @@ def ws_message_to_trade_event(message: dict[str, Any], spec: PolymarketMarketSpe
             "market_slug": spec.slug,
             "condition_id": spec.condition_id,
             "asset_id": asset_id,
+            "up_token_id": spec.yes_token_id,
+            "down_token_id": spec.no_token_id,
+            "yes_token_id": spec.yes_token_id,
+            "no_token_id": spec.no_token_id,
             "event_type": "last_trade_price",
         },
     )

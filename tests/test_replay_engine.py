@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from polynet_ai.domain.models import FillEvent, TradeEvent
+from polynet_ai.domain.models import DecisionOutcome, ExecutionResult, FillEvent, OrderIntent, TradeEvent
 from polynet_ai.engine.replay import ReplayEngine
 from polynet_ai.strategy.spec import StrategyConfig
 
@@ -34,7 +34,27 @@ def test_replay_engine_runs_end_to_end() -> None:
         TradeEvent("BTC", "cycle-a", t0 + timedelta(seconds=260), price=0.62, shares=5, outcome="up", action="buy"),
     ]
 
-    result = ReplayEngine(build_config()).run(events)
+    engine = ReplayEngine(build_config())
+
+    class StubRouter:
+        def route(self, features, strategy_trades):
+            return DecisionOutcome(
+                selected=OrderIntent(
+                    market_id=features.market_id,
+                    cycle_id=features.cycle_id,
+                    outcome="up",
+                    action="buy",
+                    shares=5.0,
+                    reference_price=features.price,
+                    category="grid",
+                    reason="test immediate fill",
+                    priority=10,
+                ),
+                candidates=[],
+            )
+
+    engine.router = StubRouter()
+    result = engine.run(events)
     assert len(result.cycle_df) == 1
     assert len(result.decision_df) == 4
     assert result.decision_df["executed"].any()
@@ -64,3 +84,89 @@ def test_finalize_cycle_settles_remaining_winner_shares_into_cash() -> None:
     assert cycle_row["winner"] == "up"
     assert cycle_row["account_cash"] > 100.0
     assert round(float(cycle_row["account_cash"]), 3) == round(100.0 + float(cycle_row["cycle_net_profit"]), 3)
+
+
+class PendingConfirmBroker:
+    def __init__(self) -> None:
+        self.poll_calls = 0
+        self.pending_fill: FillEvent | None = None
+
+    def execute(self, intent: OrderIntent, timestamp: datetime) -> ExecutionResult:
+        self.pending_fill = FillEvent(
+            market_id=intent.market_id,
+            cycle_id=intent.cycle_id,
+            timestamp=timestamp + timedelta(seconds=1),
+            price=intent.reference_price,
+            shares=intent.shares,
+            outcome=intent.outcome,
+            action=intent.action,
+            fee=intent.reference_price * intent.shares * 0.002,
+            reason=intent.reason,
+            reserved_cash=intent.reference_price * intent.shares * 1.002,
+        )
+        return ExecutionResult(
+            status="submitted",
+            order_id="order-1",
+            metadata={"reserved_cash": self.pending_fill.reserved_cash},
+        )
+
+    def poll(self, timestamp: datetime) -> list[FillEvent]:
+        self.poll_calls += 1
+        if self.pending_fill is None or self.poll_calls < 2:
+            return []
+        fill = self.pending_fill
+        self.pending_fill = None
+        return [fill]
+
+    def pending_context(self) -> dict[str, float | int]:
+        return {
+            "pending_order_count": 1 if self.pending_fill is not None else 0,
+            "pending_buy_reserved_cash": self.pending_fill.reserved_cash if self.pending_fill is not None else 0.0,
+            "pending_up_sell_shares": 0.0,
+            "pending_down_sell_shares": 0.0,
+        }
+
+
+def test_replay_engine_confirms_submitted_order_without_blocking_loop() -> None:
+    broker = PendingConfirmBroker()
+    engine = ReplayEngine(build_config(), starting_cash=100.0, broker=broker)
+
+    class StubRouter:
+        def route(self, features, strategy_trades):
+            return DecisionOutcome(
+                selected=OrderIntent(
+                    market_id=features.market_id,
+                    cycle_id=features.cycle_id,
+                    outcome="up",
+                    action="buy",
+                    shares=5.0,
+                    reference_price=features.price,
+                    category="grid",
+                    reason="test pending confirm",
+                    priority=10,
+                ),
+                candidates=[],
+            )
+
+    engine.router = StubRouter()
+    t0 = datetime(2026, 3, 20, 12, 0, 0)
+    events = [
+        TradeEvent("BTC", "cycle-a", t0, price=0.45, shares=10, outcome="up", action="buy"),
+        TradeEvent("BTC", "cycle-a", t0 + timedelta(seconds=30), price=0.46, shares=8, outcome="up", action="buy"),
+        TradeEvent("BTC", "cycle-a", t0 + timedelta(seconds=60), price=0.47, shares=8, outcome="up", action="buy"),
+    ]
+
+    first = engine.process_event(events[0])
+    assert first.decision_row["submitted"] is True
+    assert first.decision_row["executed"] is False
+    assert engine.account.available_cash < engine.account.cash
+
+    second = engine.process_event(events[1])
+    assert engine.state_engine.state is not None
+    assert engine.state_engine.state.strategy_trades == 1
+    assert engine.account.available_cash <= engine.account.cash
+
+    third = engine.process_event(events[2])
+    assert third.decision_row["executed"] is False
+    assert engine.state_engine.state is not None
+    assert engine.state_engine.state.strategy_trades >= 1
