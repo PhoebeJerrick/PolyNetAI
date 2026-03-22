@@ -143,7 +143,7 @@ def main() -> int:
         decision_df=decision_df,
         output_path=output_dir,
     )
-    report_path = build_performance_report_zh(
+    build_performance_report_zh(
         resolved_batch_dir=output_dir,
         summary_df=summary_df,
         cycle_df=cycle_df,
@@ -152,9 +152,18 @@ def main() -> int:
         display_batch_dir=input_dir,
     )
 
+    xlsx_report = output_dir / "batch_replay_performance_report_zh.xlsx"
+    md_report = output_dir / "batch_replay_performance_report_zh.md"
+
     print(f"批量回放完成，共 {len(summary_df)} 个周期")
     print(f"交易过程: {trade_doc}")
-    print(f"总绩效报告: {report_path}")
+    print(f"总绩效报告 (Excel): {xlsx_report}")
+    print(f"总绩效报告 (Markdown 镜像): {md_report}")
+    if not xlsx_report.exists():
+        print(
+            "警告: 未找到 Excel 总绩效文件。请确认已使用包含 batch_replay_performance_report_zh.xlsx 生成的最新代码。",
+            file=sys.stderr,
+        )
     return 0
 
 
