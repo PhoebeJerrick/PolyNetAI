@@ -14,7 +14,7 @@ from polynet_ai.adapters.polymarket_live import PolymarketMarketSpec
 from polynet_ai.domain.models import TradeEvent
 
 
-def test_cycle_capture_writer_splits_cycles_and_exports_manifest(tmp_path) -> None:
+def test_cycle_capture_writer_splits_cycles_and_writes_ndjson_manifest(tmp_path) -> None:
     writer = CycleCaptureWriter(tmp_path)
     writer.record(
         TradeEvent(
@@ -44,17 +44,15 @@ def test_cycle_capture_writer_splits_cycles_and_exports_manifest(tmp_path) -> No
     rows = writer.finalize()
 
     assert len(rows) == 2
-    assert (tmp_path / "ws_trade_events_all.ndjson").exists()
-    assert (tmp_path / "ws_trade_events_all.csv").exists()
     assert (tmp_path / "capture_manifest.json").exists()
-    assert (tmp_path / "capture_manifest.csv").exists()
+    assert not (tmp_path / "ws_trade_events_all.ndjson").exists()
 
     first_cycle_path = tmp_path / "btc-updown-5m-1" / "ws_trade_events.ndjson"
     second_cycle_path = tmp_path / "btc-updown-5m-2" / "ws_trade_events.ndjson"
     assert first_cycle_path.exists()
     assert second_cycle_path.exists()
-    assert (first_cycle_path.with_suffix(".csv")).exists()
-    assert (second_cycle_path.with_suffix(".csv")).exists()
+    assert not (first_cycle_path.with_suffix(".csv")).exists()
+    assert not (second_cycle_path.with_suffix(".csv")).exists()
 
     first_events = load_recorded_trade_events(first_cycle_path)
     second_events = load_recorded_trade_events(second_cycle_path)

@@ -11,8 +11,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import pandas as pd
-
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
@@ -28,10 +26,7 @@ from polynet_ai.adapters.polymarket_live import (  # noqa: E402
     load_api_env,
     select_account_env,
 )
-from polynet_ai.adapters.trade_event_store import (  # noqa: E402
-    TradeEventRecorder,
-    export_recorded_trade_events_csv,
-)
+from polynet_ai.adapters.trade_event_store import TradeEventRecorder  # noqa: E402
 from polynet_ai.domain.models import TradeEvent  # noqa: E402
 
 
@@ -83,11 +78,11 @@ class CaptureStats:
 
 
 class CycleCaptureWriter:
-    def __init__(self, output_dir: str | Path, *, combined_filename: str = "ws_trade_events_all.ndjson") -> None:
+    """按周期写入 `ws_trade_events.ndjson`，并生成 `capture_manifest.json`（供进度与回放扫描）。"""
+
+    def __init__(self, output_dir: str | Path) -> None:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.combined_path = self.output_dir / combined_filename
-        self._combined_recorder = TradeEventRecorder(self.combined_path)
         self._cycle_recorders: dict[str, TradeEventRecorder] = {}
         self._cycle_paths: dict[str, Path] = {}
         self._stats: dict[str, CaptureStats] = {}
@@ -110,7 +105,6 @@ class CycleCaptureWriter:
         return recorder
 
     def record(self, event: TradeEvent) -> None:
-        self._combined_recorder.record(event)
         cycle_recorder = self._get_cycle_recorder(event)
         cycle_recorder.record(event)
         stats = self._stats.get(event.cycle_id)
@@ -122,25 +116,17 @@ class CycleCaptureWriter:
     def finalize(self) -> list[dict[str, object]]:
         if self._finalized_rows is not None:
             return self._finalized_rows
-        self._combined_recorder.close()
-        export_recorded_trade_events_csv(self.combined_path, self.combined_path.with_suffix(".csv"))
 
         summary_rows: list[dict[str, object]] = []
         for cycle_id, recorder in self._cycle_recorders.items():
             recorder.close()
-            cycle_path = self._cycle_paths[cycle_id]
-            export_recorded_trade_events_csv(cycle_path, cycle_path.with_suffix(".csv"))
             stats = self._stats[cycle_id]
             row = stats.to_row()
             summary_rows.append(row)
-            summary_path = self._cycle_dir(cycle_id) / "capture_summary.json"
-            summary_path.write_text(json.dumps(row, ensure_ascii=False, indent=2), encoding="utf-8")
 
         summary_rows.sort(key=lambda item: str(item["cycle_id"]))
         manifest_json = self.output_dir / "capture_manifest.json"
-        manifest_csv = self.output_dir / "capture_manifest.csv"
         manifest_json.write_text(json.dumps(summary_rows, ensure_ascii=False, indent=2), encoding="utf-8")
-        pd.DataFrame(summary_rows).to_csv(manifest_csv, index=False, encoding="utf-8-sig")
         self._finalized_rows = summary_rows
         return summary_rows
 

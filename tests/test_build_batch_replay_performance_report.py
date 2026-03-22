@@ -82,5 +82,6 @@ def test_build_report_writes_markdown_and_distribution_files(tmp_path) -> None:
     assert "总净利润: 1.500000" in text
     assert "胜率: 100.00%" in text
     assert "最大回撤: 0.000000" in text
-    assert (batch_dir / "batch_replay_direction_distribution.csv").exists()
-    assert (batch_dir / "batch_replay_summary_enriched.csv").exists()
+    assert (batch_dir / "batch_replay_trade_process_zh.md").exists()
+    assert not (batch_dir / "batch_replay_direction_distribution.csv").exists()
+    assert not (batch_dir / "batch_replay_summary_enriched.csv").exists()

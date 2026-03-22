@@ -255,13 +255,10 @@ python scripts/capture_polymarket_ws_events.py --slug-prefix btc-updown-5m- --ma
 python scripts/capture_polymarket_ws_events.py --market-slugs btc-updown-5m-1774147500 btc-updown-5m-1774147800 --max-cycles 2 --output-dir artifacts/live/ws_capture_selected
 ```
 
-脚本会输出：
+脚本会输出（仅保留事件流与清单，避免重复导出）：
 
-- `artifacts/live/ws_capture_.../ws_trade_events_all.ndjson`
-- `artifacts/live/ws_capture_.../ws_trade_events_all.csv`
-- `artifacts/live/ws_capture_.../capture_manifest.json`
+- `artifacts/live/ws_capture_.../capture_manifest.json`（各周期事件数、时间范围等）
 - `artifacts/live/ws_capture_.../<cycle_slug>/ws_trade_events.ndjson`
-- `artifacts/live/ws_capture_.../<cycle_slug>/ws_trade_events.csv`
 
 这些 `ndjson` 文件可以直接拿去做离线回放。
 
@@ -319,16 +316,10 @@ python scripts/replay_recorded_trade_events.py --input artifacts/live/ws_capture
 python scripts/batch_replay_recorded_trade_events.py --input-dir artifacts/live/ws_capture_btc_10cycles --config configs/strategy.yaml --overrides artifacts/optimization/optimize_btc_last_6h_100u_smallcap_v2_20260321T014000Z/trial_022/overrides.json --starting-cash 100
 ```
 
-默认会输出到：
+默认只会在 `batch_replay_outputs` 下生成两份 Markdown（不在各周期子目录落盘 Excel/CSV 中间件）：
 
-- `artifacts/live/ws_capture_btc_10cycles/batch_replay_outputs/<cycle_slug>/...`
-- `artifacts/live/ws_capture_btc_10cycles/batch_replay_outputs/batch_replay_summary.csv`
-- `artifacts/live/ws_capture_btc_10cycles/batch_replay_outputs/batch_replay_summary.md`
-- `artifacts/live/ws_capture_btc_10cycles/batch_replay_outputs/batch_replay_performance_report_zh.md`
-- `artifacts/live/ws_capture_btc_10cycles/batch_replay_outputs/batch_replay_summary_enriched.csv`
-- `artifacts/live/ws_capture_btc_10cycles/batch_replay_outputs/batch_replay_direction_distribution.csv`
-- `artifacts/live/ws_capture_btc_10cycles/batch_replay_outputs/batch_replay_winner_distribution.csv`
-- `artifacts/live/ws_capture_btc_10cycles/batch_replay_outputs/batch_replay_net_direction_distribution.csv`
+- `batch_replay_performance_report_zh.md`（总绩效与汇总表）
+- `batch_replay_trade_process_zh.md`（按周期的决策与成交流水）
 
 ### 11. 生成批量回放总绩效报告
 
@@ -344,13 +335,12 @@ python scripts/build_batch_replay_performance_report.py --input-dir artifacts/li
 python scripts/build_batch_replay_performance_report.py --input-dir artifacts/live/ws_capture_btc_10cycles/batch_replay_outputs
 ```
 
-默认会输出：
+默认会输出（与批量回放脚本一致，仅 Markdown）：
 
+- `batch_replay_trade_process_zh.md`
 - `batch_replay_performance_report_zh.md`
-- `batch_replay_summary_enriched.csv`
-- `batch_replay_direction_distribution.csv`
-- `batch_replay_winner_distribution.csv`
-- `batch_replay_net_direction_distribution.csv`
+
+若目录里仍有旧的「每周期 `cycles.csv` / `decisions.csv` / `metrics.csv`」结构，本脚本也会读取并生成上述两份文档。
 
 报告内容会集中汇总：
 
@@ -409,27 +399,21 @@ python analyze_polymarket_tracker.py --input data/raw/polymarket_tracker_collect
 - 会在窗口开始前按 `--start-buffer-seconds` 提前建立连接，但真正写盘从周期开始时刻算起
 - 支持 `--daemonize` 后台启动，适合 Linux 云服务器长时间抓几百个周期
 - 后台模式会自动写 `capture.log`、`capture.pid`、`capture_background_meta.json`
-- 每个周期会单独生成一份 `ws_trade_events.ndjson` / `ws_trade_events.csv`
-- 根目录还会额外生成一份跨周期合并文件 `ws_trade_events_all.ndjson`
-- `capture_manifest.json` / `capture_manifest.csv` 会列出每个周期抓到了多少事件、起止时间、首尾价格
+- 每个周期只生成 `ws_trade_events.ndjson`（不再写合并文件与 CSV 镜像）
+- `capture_manifest.json` 会列出每个周期抓到了多少事件、起止时间、首尾价格
 - 这些文件可直接交给 `scripts/replay_recorded_trade_events.py` 做离线复盘
 
 ### `batch_replay_recorded_trade_events.py`
 
 - 会扫描抓取目录下所有 `<cycle_slug>/ws_trade_events.ndjson`
-- 每个周期单独输出 Excel、`cycles.csv`、`decisions.csv`、`metrics.csv`
-- 最后会自动同时输出：
-  - `batch_replay_summary.csv` / `batch_replay_summary.md`
-  - `batch_replay_performance_report_zh.md`
-  - 方向分布、赢家分布、净方向分布等聚合 CSV
+- 在内存中完成回放，只在 `batch_replay_outputs` 写出两份文档：`batch_replay_performance_report_zh.md` 与 `batch_replay_trade_process_zh.md`
 - 适合抓完 5 个、10 个或更多周期后，直接批量评估当前代码的离线盈亏能力
 
 ### `build_batch_replay_performance_report.py`
 
-- 可直接读取抓取目录或 `batch_replay_outputs` 目录
-- 自动汇总总收益、胜率、最大回撤、方向分布等关键指标
-- 会额外输出几份聚合 CSV，方便你继续做二次分析或画图
-- 适合在 10 个周期批量回放结束后，一次性做总体验收
+- 可直接读取仍包含「每周期 CSV 结果」的旧版 `batch_replay_outputs`，或兼容目录结构
+- 自动汇总总收益、胜率、最大回撤、方向分布等关键指标，并写出与批量回放相同的两份 Markdown
+- 适合在需要仅从磁盘上的周期级 CSV 重新生成报告时使用
 
 ### `manage_capture_pipeline.py`
 

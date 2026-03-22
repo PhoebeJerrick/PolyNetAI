@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pandas as pd
 
-from scripts.batch_replay_recorded_trade_events import _discover_cycle_event_files, _write_batch_summary
+from scripts.batch_replay_recorded_trade_events import _discover_cycle_event_files
+from scripts.build_batch_replay_performance_report import write_batch_trade_process_zh
 
 
 def test_discover_cycle_event_files_reads_per_cycle_ndjson(tmp_path) -> None:
@@ -12,25 +13,38 @@ def test_discover_cycle_event_files_reads_per_cycle_ndjson(tmp_path) -> None:
     cycle_b.mkdir()
     (cycle_a / "ws_trade_events.ndjson").write_text("", encoding="utf-8")
     (cycle_b / "ws_trade_events.ndjson").write_text("", encoding="utf-8")
-    (tmp_path / "ws_trade_events_all.ndjson").write_text("", encoding="utf-8")
 
     files = _discover_cycle_event_files(tmp_path)
 
     assert [path.parent.name for path in files] == ["btc-updown-5m-1", "btc-updown-5m-2"]
 
 
-def test_write_batch_summary_creates_summary_files(tmp_path) -> None:
-    summary_df = pd.DataFrame(
+def test_write_batch_trade_process_zh_writes_markdown(tmp_path) -> None:
+    cycle_df = pd.DataFrame(
         [
-            {"cycle_slug": "cycle-a", "total_net_profit": 2.5},
-            {"cycle_slug": "cycle-b", "total_net_profit": -1.0},
+            {"cycle_slug": "cycle-a", "winner": "up", "account_cash": 101.0},
+        ]
+    )
+    decision_df = pd.DataFrame(
+        [
+            {
+                "cycle_slug": "cycle-a",
+                "selected_outcome": "up",
+                "selected_action": "buy",
+                "executed": True,
+            },
         ]
     )
 
-    summary_csv, summary_md = _write_batch_summary(tmp_path, tmp_path, summary_df)
+    path = write_batch_trade_process_zh(
+        input_dir=tmp_path,
+        cycle_df=cycle_df,
+        decision_df=decision_df,
+        output_path=tmp_path,
+    )
 
-    assert summary_csv.exists()
-    assert summary_md.exists()
-    text = summary_md.read_text(encoding="utf-8")
-    assert "批量回放摘要" in text
-    assert "总净利润: 1.500000" in text
+    assert path.exists()
+    text = path.read_text(encoding="utf-8")
+    assert "批量回放交易过程" in text
+    assert "cycle-a" in text
+    assert "winner" in text

@@ -95,4 +95,4 @@ def test_print_status_shows_progress_and_report(tmp_path, capsys) -> None:
     assert result == 0
     assert "已完成周期数: 1" in captured
     assert "批量回放总净利润: 1.250000" in captured
-    assert "总报告: 已生成" in captured
+    assert "总绩效报告: 已生成" in captured

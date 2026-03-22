@@ -31,10 +31,10 @@ def _resolve_batch_replay_dir(input_dir: str | Path) -> Path:
     path = Path(input_dir)
     if not path.exists():
         raise FileNotFoundError(f"未找到输入目录: {path}")
-    if (path / "batch_replay_summary.csv").exists():
-        return path
     nested = path / "batch_replay_outputs"
-    if (nested / "batch_replay_summary.csv").exists():
+    if (path / "batch_replay_summary.csv").exists() or (path / "batch_replay_performance_report_zh.md").exists():
+        return path
+    if (nested / "batch_replay_summary.csv").exists() or (nested / "batch_replay_performance_report_zh.md").exists():
         return nested
     if nested.exists():
         return nested
@@ -143,17 +143,15 @@ def _value_counts_frame(series: pd.Series, name: str) -> pd.DataFrame:
     return counts
 
 
-def build_report(batch_dir: str | Path, output_dir: str | Path | None = None) -> Path:
-    resolved_batch_dir = _resolve_batch_replay_dir(batch_dir)
-    cycle_dirs = _discover_cycle_result_dirs(resolved_batch_dir)
-    if not cycle_dirs:
-        raise RuntimeError(f"未在目录下找到任何周期回放结果: {resolved_batch_dir}")
-
-    output_path = Path(output_dir) if output_dir else resolved_batch_dir
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    summary_df = _load_summary(resolved_batch_dir, cycle_dirs)
-    cycle_df, decision_df = _load_cycle_frames(cycle_dirs)
+def build_performance_report_zh(
+    resolved_batch_dir: Path,
+    summary_df: pd.DataFrame,
+    cycle_df: pd.DataFrame,
+    decision_df: pd.DataFrame,
+    output_path: Path,
+    *,
+    display_batch_dir: Path | None = None,
+) -> Path:
     direction_df = _summarize_direction_distribution(decision_df)
     winner_df = _value_counts_frame(cycle_df.get("winner", pd.Series(dtype=object)), "winner")
     net_direction_df = _value_counts_frame(cycle_df.get("net_direction", pd.Series(dtype=object)), "net_direction")
@@ -175,21 +173,13 @@ def build_report(batch_dir: str | Path, output_dir: str | Path | None = None) ->
     if total_cycles:
         enriched_summary["cumulative_profit"] = pd.to_numeric(enriched_summary["total_net_profit"], errors="coerce").fillna(0.0).cumsum()
 
-    direction_csv = output_path / "batch_replay_direction_distribution.csv"
-    winner_csv = output_path / "batch_replay_winner_distribution.csv"
-    net_direction_csv = output_path / "batch_replay_net_direction_distribution.csv"
-    enriched_summary_csv = output_path / "batch_replay_summary_enriched.csv"
     report_md = output_path / "batch_replay_performance_report_zh.md"
-
-    direction_df.to_csv(direction_csv, index=False, encoding="utf-8-sig")
-    winner_df.to_csv(winner_csv, index=False, encoding="utf-8-sig")
-    net_direction_df.to_csv(net_direction_csv, index=False, encoding="utf-8-sig")
-    enriched_summary.to_csv(enriched_summary_csv, index=False, encoding="utf-8-sig")
+    shown_dir = display_batch_dir or resolved_batch_dir
 
     lines = [
         "# 批量离线回放总绩效报告",
         "",
-        f"- 回放目录: `{resolved_batch_dir.as_posix()}`",
+        f"- 回放目录: `{shown_dir.as_posix()}`",
         f"- 周期数: {total_cycles}",
         f"- 总净利润: {total_profit:.6f}",
         f"- 平均单周期净利润: {avg_profit:.6f}",
@@ -247,15 +237,104 @@ def build_report(batch_dir: str | Path, output_dir: str | Path | None = None) ->
             "## 产物文件",
             "",
             f"- `{report_md.name}`",
-            f"- `{enriched_summary_csv.name}`",
-            f"- `{direction_csv.name}`",
-            f"- `{winner_csv.name}`",
-            f"- `{net_direction_csv.name}`",
+            f"- `{output_path / 'batch_replay_trade_process_zh.md'}`",
         ]
     )
 
     report_md.write_text("\n".join(lines), encoding="utf-8")
     return report_md
+
+
+def write_batch_trade_process_zh(
+    *,
+    input_dir: Path,
+    cycle_df: pd.DataFrame,
+    decision_df: pd.DataFrame,
+    output_path: Path,
+) -> Path:
+    """按周期汇总决策流水，生成单一 Markdown（与绩效报告配套）。"""
+    path = output_path / "batch_replay_trade_process_zh.md"
+    if "cycle_slug" not in cycle_df.columns and not cycle_df.empty:
+        raise ValueError("cycle_df 需要包含 cycle_slug 列")
+    if "cycle_slug" not in decision_df.columns and not decision_df.empty:
+        raise ValueError("decision_df 需要包含 cycle_slug 列")
+
+    slugs = sorted({str(s) for s in cycle_df["cycle_slug"].tolist()} if not cycle_df.empty else set())
+    if not slugs and not decision_df.empty:
+        slugs = sorted({str(s) for s in decision_df["cycle_slug"].unique().tolist()})
+
+    pref_cols = [
+        "timestamp",
+        "market_price",
+        "selected_rule",
+        "selected_outcome",
+        "selected_action",
+        "selected_shares",
+        "risk_status",
+        "risk_reason",
+        "executed",
+        "submitted",
+        "confirmed",
+        "fill_price",
+        "fill_fee",
+        "cycle_net_profit",
+        "account_cash",
+    ]
+
+    lines: list[str] = [
+        "# 批量回放交易过程",
+        "",
+        f"- 数据目录: `{input_dir.as_posix()}`",
+        "",
+    ]
+
+    for slug in slugs:
+        lines.append(f"## `{slug}`")
+        csub = cycle_df[cycle_df["cycle_slug"].astype(str) == slug] if not cycle_df.empty else pd.DataFrame()
+        if not csub.empty:
+            row = csub.iloc[0].to_dict()
+            lines.append("")
+            lines.append("### 周期快照")
+            lines.append("")
+            for key, value in row.items():
+                if key == "cycle_slug":
+                    continue
+                lines.append(f"- **{key}**: {value}")
+            lines.append("")
+        dsub = decision_df[decision_df["cycle_slug"].astype(str) == slug] if not decision_df.empty else pd.DataFrame()
+        cols = [c for c in pref_cols if c in dsub.columns]
+        if not dsub.empty and cols:
+            lines.append("### 决策流水（按时间）")
+            lines.append("")
+            lines.append(dsub[cols].to_string(index=False))
+            lines.append("")
+        elif not dsub.empty:
+            lines.append("### 决策流水（按时间）")
+            lines.append("")
+            lines.append(dsub.to_string(index=False))
+            lines.append("")
+        else:
+            lines.append("*本周期无决策行。*")
+            lines.append("")
+
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def build_report(batch_dir: str | Path, output_dir: str | Path | None = None) -> Path:
+    resolved_batch_dir = _resolve_batch_replay_dir(batch_dir)
+    cycle_dirs = _discover_cycle_result_dirs(resolved_batch_dir)
+    if not cycle_dirs:
+        raise RuntimeError(f"未在目录下找到任何周期回放结果: {resolved_batch_dir}")
+
+    output_path = Path(output_dir) if output_dir else resolved_batch_dir
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    summary_df = _load_summary(resolved_batch_dir, cycle_dirs)
+    cycle_df, decision_df = _load_cycle_frames(cycle_dirs)
+    write_batch_trade_process_zh(input_dir=resolved_batch_dir, cycle_df=cycle_df, decision_df=decision_df, output_path=output_path)
+    build_performance_report_zh(resolved_batch_dir, summary_df, cycle_df, decision_df, output_path, display_batch_dir=resolved_batch_dir)
+    return output_path / "batch_replay_performance_report_zh.md"
 
 
 def main() -> int:
