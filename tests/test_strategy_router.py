@@ -6,6 +6,21 @@ from polynet_ai.domain.models import FeatureSnapshot
 from polynet_ai.strategy.router import StrategyRouter
 from polynet_ai.strategy.spec import StrategyConfig
 
+_FEATURE_SNAPSHOT_DEFAULTS = dict(
+    strategy_trades=0,
+    market_trades=0,
+    up_last_price=0.0,
+    down_last_price=0.0,
+    up_market_vwap=0.0,
+    down_market_vwap=0.0,
+    up_market_n=0,
+    down_market_n=0,
+    up_market_high=0.0,
+    up_market_low=0.0,
+    down_market_high=0.0,
+    down_market_low=0.0,
+)
+
 
 def build_config() -> StrategyConfig:
     return StrategyConfig(
@@ -16,6 +31,7 @@ def build_config() -> StrategyConfig:
                 "stop_loss": 30,
                 "hedge": 40,
                 "take_profit": 50,
+                "opening": 52,
                 "grid": 60,
                 "mean_reversion": 70,
                 "trend": 80,
@@ -62,6 +78,7 @@ def test_last_minute_has_higher_priority_than_take_profit() -> None:
         opening_vs_last_move=0.2,
         confidence_proxy=0.9,
         market_regime="trend",
+        **_FEATURE_SNAPSHOT_DEFAULTS,
     )
     decision = router.route(features)
     assert decision.selected is not None
@@ -100,6 +117,7 @@ def test_stop_loss_beats_entry_signal() -> None:
         opening_vs_last_move=-0.2,
         confidence_proxy=0.4,
         market_regime="range",
+        **_FEATURE_SNAPSHOT_DEFAULTS,
     )
     decision = router.route(features)
     assert decision.selected is not None

@@ -11,6 +11,7 @@ RuleCategory = Literal[
     "hedge",
     "grid",
     "mean_reversion",
+    "opening",
     "take_profit",
     "stop_loss",
     "last_minute",
@@ -151,6 +152,14 @@ class CycleState:
     low_price: float = 0.0
     up_last_price: float = 0.0
     down_last_price: float = 0.0
+    up_market_sum: float = 0.0
+    up_market_n: int = 0
+    up_market_high: float = 0.0
+    up_market_low: float = 0.0
+    down_market_sum: float = 0.0
+    down_market_n: int = 0
+    down_market_high: float = 0.0
+    down_market_low: float = 0.0
     market_trades: int = 0
     strategy_trades: int = 0
     consecutive_outcome: Outcome | None = None
@@ -219,6 +228,18 @@ class FeatureSnapshot:
     opening_vs_last_move: float
     confidence_proxy: float
     market_regime: Literal["trend", "range"]
+    strategy_trades: int
+    market_trades: int
+    up_last_price: float
+    down_last_price: float
+    up_market_vwap: float
+    down_market_vwap: float
+    up_market_n: int
+    down_market_n: int
+    up_market_high: float
+    up_market_low: float
+    down_market_high: float
+    down_market_low: float
 
 
 @dataclass(slots=True)

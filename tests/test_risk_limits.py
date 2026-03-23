@@ -6,6 +6,21 @@ from polynet_ai.domain.models import FeatureSnapshot, OrderIntent
 from polynet_ai.risk.limits import apply_risk_limits
 from polynet_ai.strategy.spec import StrategyConfig
 
+_FEATURE_SNAPSHOT_DEFAULTS = dict(
+    strategy_trades=0,
+    market_trades=0,
+    up_last_price=0.0,
+    down_last_price=0.0,
+    up_market_vwap=0.0,
+    down_market_vwap=0.0,
+    up_market_n=0,
+    down_market_n=0,
+    up_market_high=0.0,
+    up_market_low=0.0,
+    down_market_high=0.0,
+    down_market_low=0.0,
+)
+
 
 def build_config() -> StrategyConfig:
     return StrategyConfig(
@@ -47,6 +62,7 @@ def build_features() -> FeatureSnapshot:
         opening_vs_last_move=0.0,
         confidence_proxy=0.5,
         market_regime="range",
+        **_FEATURE_SNAPSHOT_DEFAULTS,
     )
 
 

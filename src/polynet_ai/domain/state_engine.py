@@ -62,6 +62,7 @@ class StateEngine:
         state = self.ensure_cycle(trade)
         self._update_price_stats(state, trade.price, trade.timestamp)
         self._update_market_price(state, trade.outcome, trade.price)
+        self._bump_outcome_market_stats(state, trade.outcome, trade.price)
         state.market_trades += 1
         state.last_event_timestamp = trade.timestamp
         self.market_tape.append(trade)
@@ -169,6 +170,27 @@ class StateEngine:
             state.up_last_price = price
         else:
             state.down_last_price = price
+
+    @staticmethod
+    def _bump_outcome_market_stats(state: CycleState, outcome: Outcome, price: float) -> None:
+        if outcome == "up":
+            state.up_market_sum += price
+            state.up_market_n += 1
+            if state.up_market_n == 1:
+                state.up_market_high = price
+                state.up_market_low = price
+            else:
+                state.up_market_high = max(state.up_market_high, price)
+                state.up_market_low = min(state.up_market_low, price)
+        else:
+            state.down_market_sum += price
+            state.down_market_n += 1
+            if state.down_market_n == 1:
+                state.down_market_high = price
+                state.down_market_low = price
+            else:
+                state.down_market_high = max(state.down_market_high, price)
+                state.down_market_low = min(state.down_market_low, price)
 
     @staticmethod
     def _update_consecutive(state: CycleState, outcome: Outcome, action: TradeAction) -> None:

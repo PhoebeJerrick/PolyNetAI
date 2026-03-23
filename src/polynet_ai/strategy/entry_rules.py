@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from polynet_ai.domain.models import FeatureSnapshot, OrderIntent
+from polynet_ai.domain.models import FeatureSnapshot, OrderIntent, Outcome
 from polynet_ai.strategy.spec import StrategyConfig
 
 
@@ -8,6 +8,99 @@ def _base_size(config: StrategyConfig, features: FeatureSnapshot) -> float:
     return float(config.get("order_sizing.base_order_size", 5.0)) + (
         features.volatility_ratio * float(config.get("order_sizing.volatility_order_scale", 10.0))
     )
+
+
+def _clamp_binary_price(p: float) -> float:
+    return max(0.01, min(0.99, p))
+
+
+def _opening_weak_outcome(features: FeatureSnapshot, use_comp: bool) -> Outcome | None:
+    eps = 1e-9
+    pu, pd = features.up_last_price, features.down_last_price
+    nu, nd = features.up_market_n, features.down_market_n
+    if pu > eps and pd > eps:
+        if abs(pu - pd) < 1e-12:
+            return None
+        return "up" if pu < pd else "down"
+    if not use_comp:
+        return None
+    if nu >= 1 and nd == 0:
+        pim = _clamp_binary_price(1.0 - pu)
+        if abs(pu - pim) < 1e-12:
+            return None
+        return "down" if pim < pu else "up"
+    if nd >= 1 and nu == 0:
+        pim = _clamp_binary_price(1.0 - pd)
+        if abs(pd - pim) < 1e-12:
+            return None
+        return "up" if pim < pd else "down"
+    return None
+
+
+def _opening_price_timing_ok(
+    weak: Outcome,
+    features: FeatureSnapshot,
+    vwap_eps: float,
+    range_frac: float,
+    min_range: float,
+) -> bool:
+    if weak == "up":
+        n = features.up_market_n
+        p = features.up_last_price
+        vwap = features.up_market_vwap
+        lo, hi = features.up_market_low, features.up_market_high
+    else:
+        n = features.down_market_n
+        p = features.down_last_price
+        vwap = features.down_market_vwap
+        lo, hi = features.down_market_low, features.down_market_high
+    if n < 1 or p <= 1e-9:
+        return False
+    if n == 1:
+        return True
+    if p <= vwap + vwap_eps:
+        return True
+    span = hi - lo
+    if span >= min_range and p <= lo + range_frac * span + vwap_eps:
+        return True
+    return False
+
+
+def opening_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
+    if not config.get("opening_entry.enabled", True):
+        return []
+    if features.is_last_minute or features.strategy_trades != 0:
+        return []
+    window = float(config.get("opening_entry.window_seconds", 30.0))
+    if features.cycle_elapsed_seconds > window:
+        return []
+    use_comp = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
+    weak = _opening_weak_outcome(features, use_comp)
+    if weak is None:
+        return []
+    if not _opening_price_timing_ok(
+        weak,
+        features,
+        float(config.get("opening_entry.vwap_epsilon", 0.01)),
+        float(config.get("opening_entry.range_low_fraction", 0.35)),
+        float(config.get("opening_entry.min_range_width", 0.02)),
+    ):
+        return []
+    size = _base_size(config, features)
+    ref = features.up_last_price if weak == "up" else features.down_last_price
+    return [
+        OrderIntent(
+            market_id=features.market_id,
+            cycle_id=features.cycle_id,
+            outcome=weak,
+            action="buy",
+            shares=size,
+            reference_price=ref,
+            category="opening",
+            reason="周期开盘试探建仓：买入相对低价（弱势）一侧，并在不高于该侧市场加权价或区间相对低位时介入",
+            priority=int(config.priorities.get("opening", 52)),
+        )
+    ]
 
 
 def trend_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
@@ -142,6 +235,7 @@ def mean_reversion_entries(features: FeatureSnapshot, config: StrategyConfig) ->
 
 def build_entry_candidates(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
     candidates: list[OrderIntent] = []
+    candidates.extend(opening_entries(features, config))
     candidates.extend(hedge_entries(features, config))
     candidates.extend(grid_entries(features, config))
     candidates.extend(mean_reversion_entries(features, config))

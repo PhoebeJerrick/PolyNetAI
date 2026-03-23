@@ -1,6 +1,13 @@
 cycle:
   cycle_seconds: 300
   last_minute_seconds: 30
+opening_entry:
+  enabled: true
+  window_seconds: 30
+  vwap_epsilon: 0.01
+  range_low_fraction: 0.35
+  min_range_width: 0.02
+  infer_missing_with_binary_complement: true
 order_sizing:
   base_order_size: 5.0
   min_order_size: 5.0
@@ -49,6 +56,7 @@ priorities:
   stop_loss: 30
   hedge: 40
   take_profit: 50
+  opening: 52
   grid: 60
   mean_reversion: 70
   trend: 80

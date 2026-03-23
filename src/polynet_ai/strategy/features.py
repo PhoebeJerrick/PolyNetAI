@@ -49,6 +49,8 @@ def build_feature_snapshot(
     trend_strength = state.consecutive_outcome_count / max(1, state.market_trades + state.strategy_trades)
     net_position_value = state.net_position_value()
     market_regime = "trend" if trend_strength >= 0.35 or abs(price_move) > volatility * 0.5 else "range"
+    up_vwap = state.up_market_sum / state.up_market_n if state.up_market_n else 0.0
+    down_vwap = state.down_market_sum / state.down_market_n if state.down_market_n else 0.0
     return FeatureSnapshot(
         market_id=state.market_id,
         cycle_id=state.cycle_id,
@@ -77,4 +79,16 @@ def build_feature_snapshot(
         opening_vs_last_move=price_move,
         confidence_proxy=_confidence_proxy(summary.cycle_net_profit, price_move, volatility),
         market_regime=market_regime,
+        strategy_trades=state.strategy_trades,
+        market_trades=state.market_trades,
+        up_last_price=state.up_last_price,
+        down_last_price=state.down_last_price,
+        up_market_vwap=up_vwap,
+        down_market_vwap=down_vwap,
+        up_market_n=state.up_market_n,
+        down_market_n=state.down_market_n,
+        up_market_high=state.up_market_high,
+        up_market_low=state.up_market_low,
+        down_market_high=state.down_market_high,
+        down_market_low=state.down_market_low,
     )
