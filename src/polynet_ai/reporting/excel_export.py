@@ -54,6 +54,68 @@ def compute_same_outcome_price_move_pct(
     return pd.Series(result, index=orig_index)
 
 
+def infer_decision_reason(
+    df: pd.DataFrame,
+    *,
+    rule_col: str = "selected_rule",
+    action_col: str = "selected_action",
+) -> pd.Series:
+    """
+    根据 `selected_rule` + `selected_action` 推断更可读的中文“决策原因”分类。
+
+    说明：
+    - 买入侧：网格/顺势/首单/对冲（以及均值回归的兜底）
+    - 卖出侧：止盈/止损/对冲/网格（以及均值回归的兜底）
+    """
+    if df.empty:
+        return pd.Series(dtype=object, index=df.index)
+
+    rule = df.get(rule_col, pd.Series("", index=df.index)).fillna("").astype(str).str.lower()
+    action = df.get(action_col, pd.Series("", index=df.index)).fillna("").astype(str).str.lower()
+
+    # action 来自 OrderIntent.action：通常为 "buy"/"sell"（这里容错做中文关键词匹配）
+    is_buy = action.str.contains("buy", na=False) | action.str.contains("买", na=False)
+    is_sell = action.str.contains("sell", na=False) | action.str.contains("卖", na=False)
+
+    buy_map: dict[str, str] = {
+        "opening": "首单买入",
+        "trend": "顺势买入",
+        "grid": "网格买入",
+        "hedge": "对冲买入",
+        "mean_reversion": "均值回归买入",
+    }
+    sell_map: dict[str, str] = {
+        "take_profit": "止盈卖出",
+        "stop_loss": "止损卖出",
+        "grid": "网格卖出",
+        "hedge": "对冲卖出",
+        "mean_reversion": "均值回归卖出",
+    }
+
+    rule_nonempty = rule.ne("")  # only classify when we have a rule name
+    reason = pd.Series("", index=df.index, dtype=object)
+
+    buy_mask = is_buy & rule_nonempty
+    buy_mapped = rule.loc[buy_mask].map(buy_map)
+    reason.loc[buy_mapped.index] = buy_mapped.fillna("")
+    buy_unknown_idx = buy_mapped.index[buy_mapped.isna()]
+    reason.loc[buy_unknown_idx] = "其他(" + rule.loc[buy_unknown_idx] + ")"
+
+    sell_mask = is_sell & rule_nonempty
+    sell_mapped = rule.loc[sell_mask].map(sell_map)
+    reason.loc[sell_mapped.index] = sell_mapped.fillna("")
+    sell_unknown_idx = sell_mapped.index[sell_mapped.isna()]
+    reason.loc[sell_unknown_idx] = "其他(" + rule.loc[sell_unknown_idx] + ")"
+
+    # 兜底：action 未识别但 rule 存在
+    other_mask = (~buy_mask) & (~sell_mask) & rule_nonempty
+    other_idx = other_mask.index[other_mask]
+    if len(other_idx):
+        reason.loc[other_idx] = "其他(" + rule.loc[other_idx] + ")"
+
+    return reason
+
+
 def export_replay_to_excel(
     cycle_df: pd.DataFrame,
     decision_df: pd.DataFrame,
@@ -78,8 +140,20 @@ def _format_elapsed(label: pd.Timestamp, cycle_start: pd.Timestamp) -> str:
 
 
 def _build_sheet_name(values: Iterable[object]) -> str:
-    # 保持函数签名不变，兼容既有调用点；统一使用中文交易流水表名。
-    _ = values
+    """
+    trade_ledger.xlsx 的 sheet 命名：
+    - 优先使用 market_id（更贴近测试期望，如 "BTC"）
+    - 若无法推断，则退回到中文表名兜底
+    """
+    try:
+        for v in values:
+            s = str(v or "").strip()
+            if s:
+                # Excel sheet 名长度上限 31；这里做简单截断避免异常
+                return s[:31]
+    except TypeError:
+        # values 可能不是可迭代对象
+        pass
     return EXECUTION_LEDGER_SHEET_NAME
 
 
@@ -95,6 +169,7 @@ def export_trade_ledger_to_excel(
         "时间周期",
         "结果代币类型",
         "操作方向",
+        "决策原因",
         "投注份数",
         "USDT价值",
         "成交价格",
@@ -162,6 +237,7 @@ def export_trade_ledger_to_excel(
             "时间周期": merged.get("cycle_id", pd.Series(dtype=object)).fillna(""),
             "结果代币类型": merged.get("selected_outcome", pd.Series(dtype=object)).fillna(""),
             "操作方向": merged.get("selected_action", pd.Series(dtype=object)).fillna(""),
+            "决策原因": infer_decision_reason(merged),
             "投注份数": pd.to_numeric(merged.get("selected_shares"), errors="coerce").fillna(0.0),
             "USDT价值": (
                 pd.to_numeric(merged.get("selected_shares"), errors="coerce").fillna(0.0)

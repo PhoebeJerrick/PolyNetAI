@@ -6,7 +6,7 @@ Polymarket 交易明细 Excel 持仓分析 + 盈亏汇总。
   同向成交价波动幅度(%) — 相对本周期内上一次同结果代币成交价的涨跌幅百分比，首笔为空；
   其后为 Up积累份数 / Up的加权均价 / Down积累份数 / Down加权均价 /
   当前总持仓份数 / 净持仓份数 / 净持仓价值 / 净持仓方向 /
-  Up已成交差价盈亏 / Down已成交差价盈亏
+  Up已成交差价盈亏 / Down已成交差价盈亏 / 浮动盈亏
 
 净持仓价值 = 净持仓份数 × 净持仓方向对应方向的加权均价（空仓/平衡为 0）。
 
@@ -78,10 +78,11 @@ INSERTED_COLUMNS = (
     "净持仓方向",
     "Up已成交差价盈亏",
     "Down已成交差价盈亏",
+    "浮动盈亏",
 )
 SETTLEMENT_COLUMNS = ("未平仓UP盈亏", "未平仓Down盈亏", "周期净利润")
 SETTLEMENT_META_COLUMNS = ("最终Winner方向",)
-ALL_PNL_COLUMNS = ("Up已成交差价盈亏", "Down已成交差价盈亏") + SETTLEMENT_COLUMNS
+ALL_PNL_COLUMNS = ("Up已成交差价盈亏", "Down已成交差价盈亏", "浮动盈亏") + SETTLEMENT_COLUMNS
 
 # ── styles ───────────────────────────────────────────────────────────
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="1F4E78")
@@ -130,6 +131,7 @@ COL_FILLS = {
     "净持仓方向": DIRECTION_FILL,
     "Up已成交差价盈亏": UP_PNL_FILL,
     "Down已成交差价盈亏": DN_PNL_FILL,
+    "浮动盈亏": PatternFill(fill_type="solid", fgColor="E7E9FF"),
 }
 
 
@@ -430,6 +432,7 @@ def compute(df: pd.DataFrame, args: argparse.Namespace) -> tuple[pd.DataFrame, d
     dir_v: list[str] = []
     up_pnl_v: list[object] = []
     dn_pnl_v: list[object] = []
+    float_pnl_v: list[object] = []
 
     for i, row in df.iterrows():
         rn = i + 2
@@ -490,6 +493,17 @@ def compute(df: pd.DataFrame, args: argparse.Namespace) -> tuple[pd.DataFrame, d
         up_pnl_v.append(trade_pnl_up)
         dn_pnl_v.append(trade_pnl_dn)
 
+        # 浮动盈亏：基于“当前行的成交价格”推导另一侧价格（二元合约：Up + Down = 1），
+        # 并对当前已持仓部分做市价估值 (held * (px - avg_cost))。
+        if outcome == "up":
+            up_px = price
+            dn_px = 1.0 - price
+        else:
+            dn_px = price
+            up_px = 1.0 - price
+        float_pnl = b["up_held"] * (up_px - b["up_avg"]) + b["dn_held"] * (dn_px - b["dn_avg"])
+        float_pnl_v.append(f3(float_pnl))
+
         up_avg_v.append(f3(b["up_avg"]) if b["up_held"] > 1e-10 else 0)
         dn_avg_v.append(f3(b["dn_avg"]) if b["dn_held"] > 1e-10 else 0)
         net_val_v.append(
@@ -507,6 +521,7 @@ def compute(df: pd.DataFrame, args: argparse.Namespace) -> tuple[pd.DataFrame, d
     res["净持仓方向"] = dir_v
     res["Up已成交差价盈亏"] = up_pnl_v
     res["Down已成交差价盈亏"] = dn_pnl_v
+    res["浮动盈亏"] = float_pnl_v
     res = insert_columns(res, prc_c)
     res = append_subtotals(res, cyc_c, pnl_s, marker_col, groups)
     res = round_all(res)
@@ -609,7 +624,7 @@ def format_ws(ws, marker_col: str | None = None) -> None:
             if df_:
                 dc.fill = df_
 
-        for pc in ("Up已成交差价盈亏", "Down已成交差价盈亏"):
+        for pc in ("Up已成交差价盈亏", "Down已成交差价盈亏", "浮动盈亏"):
             ci = cm.get(pc)
             if not ci:
                 continue

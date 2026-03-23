@@ -8,6 +8,10 @@ from polynet_ai.domain.settlement import settlement_summary
 from polynet_ai.domain.state_engine import StateEngine
 
 
+def _clamp_binary_price(price: float) -> float:
+    return max(0.01, min(0.99, float(price)))
+
+
 def _deviation(price: float, avg_price: float) -> float:
     if avg_price <= 1e-10:
         return 0.0
@@ -27,6 +31,59 @@ def _confidence_proxy(net_profit: float, price_move: float, volatility: float) -
     return max(0.0, min(1.0, signal / (signal + volatility)))
 
 
+def _resolve_outcome_prices(
+    up_last_price: float,
+    down_last_price: float,
+    fallback_price: float,
+    *,
+    infer_missing_with_binary_complement: bool = True,
+    eps: float = 1e-9,
+) -> tuple[float, float]:
+    up_px = float(up_last_price or 0.0)
+    down_px = float(down_last_price or 0.0)
+    fallback = float(fallback_price or 0.0)
+
+    if up_px <= eps and infer_missing_with_binary_complement and down_px > eps:
+        up_px = _clamp_binary_price(1.0 - down_px)
+    if down_px <= eps and infer_missing_with_binary_complement and up_px > eps:
+        down_px = _clamp_binary_price(1.0 - up_px)
+
+    if up_px <= eps and fallback > eps:
+        up_px = _clamp_binary_price(fallback)
+    if down_px <= eps and fallback > eps:
+        down_px = _clamp_binary_price(fallback)
+    return up_px, down_px
+
+
+def _implied_up_price_bounds(
+    *,
+    up_low: float,
+    up_high: float,
+    up_n: int,
+    down_low: float,
+    down_high: float,
+    down_n: int,
+    eps: float = 1e-9,
+) -> tuple[float, float]:
+    lows: list[float] = []
+    highs: list[float] = []
+
+    if up_n > 0 and up_low > eps and up_high > eps:
+        lows.append(float(up_low))
+        highs.append(float(up_high))
+    if down_n > 0 and down_low > eps and down_high > eps:
+        lows.append(_clamp_binary_price(1.0 - float(down_high)))
+        highs.append(_clamp_binary_price(1.0 - float(down_low)))
+
+    if not lows or not highs:
+        return 0.0, 1.0
+    lo = min(lows)
+    hi = max(highs)
+    if hi - lo <= eps:
+        return lo, lo
+    return lo, hi
+
+
 def snapshot_with_effective_price(features: FeatureSnapshot, effective_price: float) -> FeatureSnapshot:
     """
     用 effective_price 替换「最后一笔价」及其派生字段，供各规则在独立喂价间隔下评估；
@@ -34,9 +91,30 @@ def snapshot_with_effective_price(features: FeatureSnapshot, effective_price: fl
     """
     opening_level = features.price - features.opening_vs_last_move
     price_move = effective_price - opening_level
-    up_deviation = _deviation(effective_price, features.up_avg_price)
-    down_deviation = _deviation(effective_price, features.down_avg_price)
-    price_percentile = _price_percentile(effective_price, features.tape_low, features.tape_high)
+
+    up_last_price = float(features.up_last_price or 0.0)
+    down_last_price = float(features.down_last_price or 0.0)
+    if abs(features.price - up_last_price) <= 1e-12:
+        up_last_price = effective_price
+    elif abs(features.price - down_last_price) <= 1e-12:
+        down_last_price = effective_price
+    up_px, down_px = _resolve_outcome_prices(
+        up_last_price,
+        down_last_price,
+        effective_price,
+        infer_missing_with_binary_complement=True,
+    )
+    up_deviation = _deviation(up_px, features.up_avg_price)
+    down_deviation = _deviation(down_px, features.down_avg_price)
+    up_low, up_high = _implied_up_price_bounds(
+        up_low=features.up_market_low,
+        up_high=features.up_market_high,
+        up_n=features.up_market_n,
+        down_low=features.down_market_low,
+        down_high=features.down_market_high,
+        down_n=features.down_market_n,
+    )
+    price_percentile = _price_percentile(up_px, up_low, up_high)
     market_regime = (
         "trend"
         if features.trend_strength >= 0.35 or abs(price_move) > features.volatility * 0.5
@@ -46,6 +124,8 @@ def snapshot_with_effective_price(features: FeatureSnapshot, effective_price: fl
     return replace(
         features,
         price=effective_price,
+        up_last_price=up_px,
+        down_last_price=down_px,
         up_deviation=up_deviation,
         down_deviation=down_deviation,
         price_percentile=price_percentile,
@@ -80,6 +160,20 @@ def build_feature_snapshot(
     market_regime = "trend" if trend_strength >= 0.35 or abs(price_move) > volatility * 0.5 else "range"
     up_vwap = state.up_market_sum / state.up_market_n if state.up_market_n else 0.0
     down_vwap = state.down_market_sum / state.down_market_n if state.down_market_n else 0.0
+    up_px, down_px = _resolve_outcome_prices(
+        state.up_last_price,
+        state.down_last_price,
+        state.last_price,
+        infer_missing_with_binary_complement=True,
+    )
+    up_low, up_high = _implied_up_price_bounds(
+        up_low=state.up_market_low,
+        up_high=state.up_market_high,
+        up_n=state.up_market_n,
+        down_low=state.down_market_low,
+        down_high=state.down_market_high,
+        down_n=state.down_market_n,
+    )
     return FeatureSnapshot(
         market_id=state.market_id,
         cycle_id=state.cycle_id,
@@ -96,11 +190,11 @@ def build_feature_snapshot(
         down_held=state.down_position.held,
         up_avg_price=state.up_position.avg_price,
         down_avg_price=state.down_position.avg_price,
-        up_deviation=_deviation(state.last_price, state.up_position.avg_price),
-        down_deviation=_deviation(state.last_price, state.down_position.avg_price),
+        up_deviation=_deviation(up_px, state.up_position.avg_price),
+        down_deviation=_deviation(down_px, state.down_position.avg_price),
         volatility=volatility,
         volatility_ratio=volatility_ratio,
-        price_percentile=_price_percentile(state.last_price, state.low_price, state.high_price),
+        price_percentile=_price_percentile(up_px, up_low, up_high),
         realized_pnl=state.up_position.realized_pnl + state.down_position.realized_pnl,
         unrealized_up_pnl=summary.unrealized_up_pnl,
         unrealized_down_pnl=summary.unrealized_down_pnl,
@@ -110,8 +204,8 @@ def build_feature_snapshot(
         market_regime=market_regime,
         strategy_trades=state.strategy_trades,
         market_trades=state.market_trades,
-        up_last_price=state.up_last_price,
-        down_last_price=state.down_last_price,
+        up_last_price=up_px,
+        down_last_price=down_px,
         up_market_vwap=up_vwap,
         down_market_vwap=down_vwap,
         up_market_n=state.up_market_n,

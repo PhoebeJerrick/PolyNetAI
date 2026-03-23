@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from polynet_ai.domain.models import FeatureSnapshot
+from polynet_ai.domain.models import FeatureSnapshot, FillEvent, TradeEvent
+from polynet_ai.domain.state_engine import StateEngine
+from polynet_ai.strategy.features import build_feature_snapshot, snapshot_with_effective_price
 from polynet_ai.strategy.entry_rules import trend_entries
 from polynet_ai.strategy.price_reference import outcome_reference_price
 from polynet_ai.strategy.spec import StrategyConfig
@@ -95,4 +97,65 @@ def test_trend_entries_reference_price_follows_trend_bias() -> None:
     assert len(intents) == 1
     assert intents[0].outcome == "down"
     assert intents[0].reference_price == 0.2
+
+
+def test_build_feature_snapshot_uses_outcome_specific_prices_for_deviation() -> None:
+    engine = StateEngine()
+    t0 = datetime(2026, 1, 1, 12, 0, 0)
+    engine.apply_market_trade(
+        TradeEvent("m", "c1", t0, price=0.30, shares=10.0, outcome="down", action="buy")
+    )
+    engine.apply_strategy_fill(
+        FillEvent("m", "c1", t0, price=0.50, shares=10.0, outcome="down", action="buy")
+    )
+    engine.apply_market_trade(
+        TradeEvent("m", "c1", t0, price=0.30, shares=4.0, outcome="down", action="buy")
+    )
+    engine.apply_market_trade(
+        TradeEvent("m", "c1", t0, price=0.80, shares=5.0, outcome="up", action="buy")
+    )
+
+    snap = build_feature_snapshot(engine, cycle_seconds=300, last_minute_seconds=60)
+
+    # 最后一笔为 up=0.80，但 down 偏离应基于 down_last_price=0.30 计算，而不是 0.80。
+    assert round(snap.down_deviation, 6) == -0.4
+
+
+def test_snapshot_with_effective_price_updates_only_active_outcome_for_deviation() -> None:
+    base = _feature_snapshot(
+        price=0.8,
+        up_last_price=0.8,
+        down_last_price=0.3,
+        up_avg_price=0.6,
+        down_avg_price=0.5,
+    )
+    fed = snapshot_with_effective_price(base, 0.75)
+
+    # 当前 active outcome 是 up，因此 down 偏离应继续按 down_last_price=0.30 计算。
+    assert round(fed.down_deviation, 6) == -0.4
+
+
+def test_build_feature_snapshot_percentile_not_polluted_by_last_outcome_side() -> None:
+    t0 = datetime(2026, 1, 1, 12, 0, 0)
+
+    engine_up_last = StateEngine()
+    engine_up_last.apply_market_trade(
+        TradeEvent("m", "c1", t0, price=0.30, shares=1.0, outcome="down", action="buy")
+    )
+    engine_up_last.apply_market_trade(
+        TradeEvent("m", "c1", t0, price=0.70, shares=1.0, outcome="up", action="buy")
+    )
+    snap_up_last = build_feature_snapshot(engine_up_last, cycle_seconds=300, last_minute_seconds=60)
+
+    engine_down_last = StateEngine()
+    engine_down_last.apply_market_trade(
+        TradeEvent("m", "c1", t0, price=0.70, shares=1.0, outcome="up", action="buy")
+    )
+    engine_down_last.apply_market_trade(
+        TradeEvent("m", "c1", t0, price=0.30, shares=1.0, outcome="down", action="buy")
+    )
+    snap_down_last = build_feature_snapshot(engine_down_last, cycle_seconds=300, last_minute_seconds=60)
+
+    # 两种序列在经济含义上等价（up=0.7, down=0.3），price_percentile 应一致。
+    assert round(snap_up_last.price_percentile, 6) == round(snap_down_last.price_percentile, 6)
 

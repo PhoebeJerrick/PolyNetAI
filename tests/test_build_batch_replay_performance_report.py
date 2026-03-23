@@ -103,6 +103,7 @@ def test_build_report_writes_xlsx_and_trade_process(tmp_path) -> None:
     assert "成交价格" in cols
     assert "同向成交价波动幅度(%)" in cols
     assert cols.index("同向成交价波动幅度(%)") == cols.index("成交价格") + 1
+    assert "决策原因" in cols
     assert "Up积累份数" in tracker.columns
     assert "周期净利润" in tracker.columns
     marker_col = "下注时间距开盘差(分，秒)"

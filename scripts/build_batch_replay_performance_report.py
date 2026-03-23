@@ -40,6 +40,7 @@ from polynet_ai.reporting.excel_export import (
     SAME_OUTCOME_PRICE_MOVE_COL,
     _format_elapsed,
     compute_same_outcome_price_move_pct,
+    infer_decision_reason,
 )
 
 
@@ -255,6 +256,7 @@ def _batch_replay_decisions_to_tracker_input(
         price_col="fill_price",
         group_cols=["market_id", "_pid"],
     )
+    decision_reason = infer_decision_reason(dec)
 
     raw = pd.DataFrame(
         {
@@ -265,6 +267,7 @@ def _batch_replay_decisions_to_tracker_input(
             "时间周期": period,
             "结果代币类型": dec.get("selected_outcome", pd.Series(dtype=object)).fillna("").astype(str),
             "操作方向": dec.get("selected_action", pd.Series(dtype=object)).fillna("").astype(str),
+            "决策原因": decision_reason,
             "投注份数": shares,
             "USDT价值": shares * fill_px,
             "成交价格": fill_px,
