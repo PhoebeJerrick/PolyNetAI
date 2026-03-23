@@ -48,3 +48,25 @@ def test_settlement_summary_matches_winner_logic() -> None:
     assert summary.winner == "down"
     assert summary.realized_up_pnl == 0.1
     assert round(summary.unrealized_up_pnl, 3) == -3.2
+
+
+def test_winner_prefers_latest_market_tick_over_stale_side_price() -> None:
+    engine = StateEngine()
+    t0 = datetime(2026, 3, 22, 11, 0, 0)
+    # Stale Down-side tick (older and high).
+    engine.apply_market_trade(
+        TradeEvent("BTC", "cycle-3", t0, price=0.99, shares=1, outcome="down", action="buy")
+    )
+    # Latest market tick says UP at 0.99, so winner should be UP.
+    engine.apply_market_trade(
+        TradeEvent("BTC", "cycle-3", t0 + timedelta(seconds=299), price=0.99, shares=1, outcome="up", action="buy")
+    )
+    engine.apply_strategy_fill(
+        FillEvent("BTC", "cycle-3", t0 + timedelta(seconds=299), price=0.4, shares=10, outcome="up", action="buy")
+    )
+    engine.apply_strategy_fill(
+        FillEvent("BTC", "cycle-3", t0 + timedelta(seconds=299), price=0.6, shares=5, outcome="down", action="buy")
+    )
+
+    summary = settlement_summary(engine.state)
+    assert summary.winner == "up"

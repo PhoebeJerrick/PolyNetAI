@@ -62,6 +62,8 @@ class StateEngine:
         state = self.ensure_cycle(trade)
         self._update_price_stats(state, trade.price, trade.timestamp)
         self._update_market_price(state, trade.outcome, trade.price)
+        state.market_last_price = trade.price
+        state.market_last_outcome = trade.outcome
         self._bump_outcome_market_stats(state, trade.outcome, trade.price)
         state.market_trades += 1
         state.last_event_timestamp = trade.timestamp

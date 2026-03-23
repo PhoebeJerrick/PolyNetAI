@@ -21,7 +21,7 @@ exposure:
   hedge_trigger_value: 12.0
   hedge_scale: 0.05
   max_grid_net_position: 10
-  max_strategy_trades_per_cycle: 20
+  max_strategy_trades_per_cycle: 40
 trend:
   min_trend_strength: 0.5
   trend_price_edge: 0.03
@@ -53,19 +53,19 @@ execution:
   min_seconds_between_orders: 2.0
   min_same_outcome_price_move_ratio: 0.03
 rule_price_feed:
-  last_minute: 0.5
+  last_minute: 4
   entries:
-    opening: 0.5
-    hedge: 0.5
-    grid: 0.5
-    mean_reversion: 0.5
-    trend: 0.5
+    opening: 4
+    hedge: 4
+    grid: 4
+    mean_reversion: 4
+    trend: 4
   exits:
-    stop_loss: 0.5
-    hedge: 0.5
-    take_profit: 0.5
-    grid: 0.5
-    mean_reversion: 0.5
+    stop_loss: 4
+    hedge: 4
+    take_profit: 4
+    grid: 4
+    mean_reversion: 4
 priorities:
   risk: 10
   last_minute: 20

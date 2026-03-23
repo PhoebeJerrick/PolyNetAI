@@ -21,6 +21,12 @@ def _round3(value: float) -> float:
 
 
 def winner_from_state(state: CycleState) -> str | None:
+    # Prefer the latest market tick for binary winner inference.
+    if state.market_last_outcome and state.market_last_price > 0:
+        if state.market_last_outcome == "up":
+            return "up" if state.market_last_price >= 0.5 else "down"
+        return "down" if state.market_last_price >= 0.5 else "up"
+
     up_last = state.up_last_price
     down_last = state.down_last_price
     if up_last > 0 and down_last > 0:

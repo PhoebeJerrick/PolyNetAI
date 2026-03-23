@@ -152,6 +152,8 @@ class CycleState:
     low_price: float = 0.0
     up_last_price: float = 0.0
     down_last_price: float = 0.0
+    market_last_price: float = 0.0
+    market_last_outcome: Outcome | None = None
     up_market_sum: float = 0.0
     up_market_n: int = 0
     up_market_high: float = 0.0
