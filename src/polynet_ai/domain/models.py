@@ -240,6 +240,8 @@ class FeatureSnapshot:
     up_market_low: float
     down_market_high: float
     down_market_low: float
+    tape_low: float
+    tape_high: float
 
 
 @dataclass(slots=True)

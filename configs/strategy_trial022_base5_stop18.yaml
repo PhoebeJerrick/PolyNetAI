@@ -52,6 +52,20 @@ execution:
   slippage_bps: 5
   min_seconds_between_orders: 2.0
   min_same_outcome_price_move_ratio: 0.03
+rule_price_feed:
+  last_minute: 0
+  entries:
+    opening: 0
+    hedge: 0
+    grid: 0
+    mean_reversion: 0
+    trend: 0
+  exits:
+    stop_loss: 0
+    hedge: 0
+    take_profit: 0
+    grid: 0
+    mean_reversion: 0
 priorities:
   risk: 10
   last_minute: 20

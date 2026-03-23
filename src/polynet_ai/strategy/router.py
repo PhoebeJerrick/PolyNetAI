@@ -1,8 +1,23 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from polynet_ai.domain.models import DecisionOutcome, FeatureSnapshot, OrderIntent
-from polynet_ai.strategy.entry_rules import build_entry_candidates
-from polynet_ai.strategy.exit_rules import build_exit_candidates
+from polynet_ai.strategy.entry_rules import (
+    grid_entries,
+    hedge_entries,
+    mean_reversion_entries,
+    opening_entries,
+    trend_entries,
+)
+from polynet_ai.strategy.exit_rules import (
+    grid_exits,
+    hedge_exits,
+    mean_reversion_exits,
+    stop_loss_exits,
+    take_profit_exits,
+)
+from polynet_ai.strategy.features import snapshot_with_effective_price
 from polynet_ai.strategy.last_minute import build_last_minute_candidate
 from polynet_ai.strategy.spec import StrategyConfig
 
@@ -10,12 +25,72 @@ from polynet_ai.strategy.spec import StrategyConfig
 class StrategyRouter:
     def __init__(self, config: StrategyConfig) -> None:
         self.config = config
+        self._feed_market_cycle: tuple[str, str] | None = None
+        self._feed_last_at: dict[str, datetime] = {}
+        self._feed_prices: dict[str, float] = {}
+
+    def _reset_feed_context(self, features: FeatureSnapshot) -> None:
+        ctx = (features.market_id, features.cycle_id)
+        if self._feed_market_cycle != ctx:
+            self._feed_market_cycle = ctx
+            self._feed_last_at.clear()
+            self._feed_prices.clear()
+
+    @staticmethod
+    def _feed_key(path: tuple[str, ...]) -> str:
+        return ":".join(path)
+
+    def _feed_interval_seconds(self, path: tuple[str, ...]) -> float:
+        if path == ("last_minute",):
+            return float(self.config.get("rule_price_feed.last_minute", 0.0))
+        section, rule = path[0], path[1]
+        return float(self.config.get(f"rule_price_feed.{section}.{rule}", 0.0))
+
+    def _snapshot_for_rule(self, base: FeatureSnapshot, path: tuple[str, ...]) -> FeatureSnapshot:
+        interval = self._feed_interval_seconds(path)
+        if interval <= 0:
+            return base
+        key = self._feed_key(path)
+        now = base.timestamp
+        latest = base.price
+        last_at = self._feed_last_at.get(key)
+        if last_at is None or (now - last_at).total_seconds() >= interval:
+            self._feed_prices[key] = latest
+            self._feed_last_at[key] = now
+        effective = self._feed_prices.get(key, latest)
+        if abs(effective - base.price) <= 1e-15:
+            return base
+        return snapshot_with_effective_price(base, effective)
 
     def route(self, features: FeatureSnapshot, strategy_trades: int = 0) -> DecisionOutcome:
+        self._reset_feed_context(features)
         candidates: list[OrderIntent] = []
-        candidates.extend(build_last_minute_candidate(features, self.config))
-        candidates.extend(build_exit_candidates(features, self.config))
-        candidates.extend(build_entry_candidates(features, self.config))
+
+        candidates.extend(
+            build_last_minute_candidate(self._snapshot_for_rule(features, ("last_minute",)), self.config)
+        )
+        candidates.extend(
+            stop_loss_exits(self._snapshot_for_rule(features, ("exits", "stop_loss")), self.config)
+        )
+        candidates.extend(hedge_exits(self._snapshot_for_rule(features, ("exits", "hedge")), self.config))
+        candidates.extend(
+            take_profit_exits(self._snapshot_for_rule(features, ("exits", "take_profit")), self.config)
+        )
+        candidates.extend(grid_exits(self._snapshot_for_rule(features, ("exits", "grid")), self.config))
+        candidates.extend(
+            mean_reversion_exits(self._snapshot_for_rule(features, ("exits", "mean_reversion")), self.config)
+        )
+
+        candidates.extend(
+            opening_entries(self._snapshot_for_rule(features, ("entries", "opening")), self.config)
+        )
+        candidates.extend(hedge_entries(self._snapshot_for_rule(features, ("entries", "hedge")), self.config))
+        candidates.extend(grid_entries(self._snapshot_for_rule(features, ("entries", "grid")), self.config))
+        candidates.extend(
+            mean_reversion_entries(self._snapshot_for_rule(features, ("entries", "mean_reversion")), self.config)
+        )
+        candidates.extend(trend_entries(self._snapshot_for_rule(features, ("entries", "trend")), self.config))
+
         for candidate in candidates:
             candidate.metadata["strategy_trades"] = strategy_trades
         candidates = [candidate for candidate in candidates if candidate.shares > 0]

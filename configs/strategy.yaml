@@ -52,6 +52,21 @@ execution:
   slippage_bps: 5
   min_seconds_between_orders: 2.0
   min_same_outcome_price_move_ratio: 0.03
+# 各买入/卖出规则单独喂价：间隔内沿用上次刷新时的「最近价」；0 表示每 tick 用最新价（与旧行为一致）
+rule_price_feed:
+  last_minute: 0.5
+  entries:
+    opening: 0.5
+    hedge: 0.5
+    grid: 0.5
+    mean_reversion: 0.5
+    trend: 0.5
+  exits:
+    stop_loss: 0.5
+    hedge: 0.5
+    take_profit: 0.5
+    grid: 0.5
+    mean_reversion: 0.5
 priorities:
   risk: 10
   last_minute: 20

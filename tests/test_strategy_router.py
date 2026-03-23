@@ -19,6 +19,8 @@ _FEATURE_SNAPSHOT_DEFAULTS = dict(
     up_market_low=0.0,
     down_market_high=0.0,
     down_market_low=0.0,
+    tape_low=0.0,
+    tape_high=1.0,
 )
 
 

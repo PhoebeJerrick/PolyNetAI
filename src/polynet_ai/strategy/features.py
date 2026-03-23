@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 
 from polynet_ai.domain.models import FeatureSnapshot
@@ -24,6 +25,34 @@ def _confidence_proxy(net_profit: float, price_move: float, volatility: float) -
     if volatility <= 1e-10:
         return 0.5
     return max(0.0, min(1.0, signal / (signal + volatility)))
+
+
+def snapshot_with_effective_price(features: FeatureSnapshot, effective_price: float) -> FeatureSnapshot:
+    """
+    用 effective_price 替换「最后一笔价」及其派生字段，供各规则在独立喂价间隔下评估；
+    盘口 outcome 价、VWAP、持仓盈亏等仍保留 base 的实时值。
+    """
+    opening_level = features.price - features.opening_vs_last_move
+    price_move = effective_price - opening_level
+    up_deviation = _deviation(effective_price, features.up_avg_price)
+    down_deviation = _deviation(effective_price, features.down_avg_price)
+    price_percentile = _price_percentile(effective_price, features.tape_low, features.tape_high)
+    market_regime = (
+        "trend"
+        if features.trend_strength >= 0.35 or abs(price_move) > features.volatility * 0.5
+        else "range"
+    )
+    confidence_proxy = _confidence_proxy(features.cycle_net_profit, price_move, features.volatility)
+    return replace(
+        features,
+        price=effective_price,
+        up_deviation=up_deviation,
+        down_deviation=down_deviation,
+        price_percentile=price_percentile,
+        opening_vs_last_move=price_move,
+        confidence_proxy=confidence_proxy,
+        market_regime=market_regime,
+    )
 
 
 def build_feature_snapshot(
@@ -91,4 +120,6 @@ def build_feature_snapshot(
         up_market_low=state.up_market_low,
         down_market_high=state.down_market_high,
         down_market_low=state.down_market_low,
+        tape_low=state.low_price,
+        tape_high=state.high_price,
     )
