@@ -35,7 +35,11 @@ TRADE_PROCESS_PREF_COLS = (
     "account_cash",
 )
 
-from polynet_ai.reporting.excel_export import _format_elapsed
+from polynet_ai.reporting.excel_export import (
+    SAME_OUTCOME_PRICE_MOVE_COL,
+    _format_elapsed,
+    compute_same_outcome_price_move_pct,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -244,6 +248,12 @@ def _batch_replay_decisions_to_tracker_input(
 
     shares = pd.to_numeric(dec.get("selected_shares", pd.Series(0.0, index=dec.index)), errors="coerce").fillna(0.0)
     fill_px = pd.to_numeric(dec.get("fill_price", pd.Series(0.0, index=dec.index)), errors="coerce").fillna(0.0)
+    same_move = compute_same_outcome_price_move_pct(
+        dec,
+        outcome_col="selected_outcome",
+        price_col="fill_price",
+        group_cols=["market_id", "_pid"],
+    )
 
     raw = pd.DataFrame(
         {
@@ -257,6 +267,7 @@ def _batch_replay_decisions_to_tracker_input(
             "投注份数": shares,
             "USDT价值": shares * fill_px,
             "成交价格": fill_px,
+            SAME_OUTCOME_PRICE_MOVE_COL: same_move,
         }
     )
     raw["_sort"] = dec["_sort"]

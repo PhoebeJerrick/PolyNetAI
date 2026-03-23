@@ -2,8 +2,9 @@
 """
 Polymarket 交易明细 Excel 持仓分析 + 盈亏汇总。
 
-插入到"成交价格"后的列：
-  Up积累份数 / Up的加权均价 / Down积累份数 / Down加权均价 /
+插入到"成交价格"后的列（若输入中存在）：
+  同向成交价波动幅度(%) — 相对本周期内上一次同结果代币成交价的涨跌幅百分比，首笔为空；
+  其后为 Up积累份数 / Up的加权均价 / Down积累份数 / Down加权均价 /
   当前总持仓份数 / 净持仓份数 / 净持仓价值 / 净持仓方向 /
   Up已成交差价盈亏 / Down已成交差价盈亏
 
@@ -63,6 +64,9 @@ UP_KEYWORDS = ("up", "yes", "涨", "看涨", "做多", "多")
 DOWN_KEYWORDS = ("down", "no", "跌", "看跌", "做空", "空")
 
 # ── column groups ────────────────────────────────────────────────────
+# 可选；由批量回放等上游提供，insert_columns 会紧挨「成交价格」插入，再插入 INSERTED_COLUMNS
+EXTRA_COLUMNS_AFTER_PRICE = ("同向成交价波动幅度(%)",)
+
 INSERTED_COLUMNS = (
     "Up积累份数",
     "Up的加权均价",
@@ -339,9 +343,17 @@ def insert_columns(df: pd.DataFrame, price_col: str) -> pd.DataFrame:
             saved[c] = out.pop(c)
         else:
             raise ValueError(f"缺少 `{c}` 列。")
-    pos = out.columns.get_loc(price_col) + 1
+    extra_saved: dict[str, pd.Series] = {}
+    for c in EXTRA_COLUMNS_AFTER_PRICE:
+        if c in out.columns:
+            extra_saved[c] = out.pop(c)
+    pos = int(out.columns.get_loc(price_col)) + 1
+    offset = 0
+    for c, series in extra_saved.items():
+        out.insert(pos + offset, c, series)
+        offset += 1
     for i, c in enumerate(INSERTED_COLUMNS):
-        out.insert(pos + i, c, saved[c])
+        out.insert(pos + offset + i, c, saved[c])
     return out
 
 

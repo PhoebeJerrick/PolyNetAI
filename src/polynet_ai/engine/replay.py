@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -53,10 +54,16 @@ class ReplayEngine:
             fee_rate=float(config.get("execution.fee_rate", 0.002)),
             slippage_bps=float(config.get("execution.slippage_bps", 10)),
         )
+        self._last_strategy_fill_at: datetime | None = None
+        self._last_strategy_fill_price_up: float | None = None
+        self._last_strategy_fill_price_down: float | None = None
 
     def reset(self) -> None:
         self.state_engine = StateEngine()
         self.account = Account(starting_cash=self.account.starting_cash)
+        self._last_strategy_fill_at = None
+        self._last_strategy_fill_price_up = None
+        self._last_strategy_fill_price_down = None
 
     @classmethod
     def from_yaml(cls, path: str | Path, starting_cash: float = 1000.0) -> "ReplayEngine":
@@ -126,6 +133,9 @@ class ReplayEngine:
             decision.selected.metadata["market_price"] = event.price
             decision.selected.metadata.update(event.metadata)
             decision.selected.metadata.update(pending_context)
+            decision.selected.metadata["last_strategy_fill_at"] = self._last_strategy_fill_at
+            decision.selected.metadata["last_strategy_fill_price_up"] = self._last_strategy_fill_price_up
+            decision.selected.metadata["last_strategy_fill_price_down"] = self._last_strategy_fill_price_down
             row["selected_rule"] = decision.selected.category
             row["selected_action"] = decision.selected.action
             row["selected_outcome"] = decision.selected.outcome
@@ -202,6 +212,11 @@ class ReplayEngine:
     def _apply_fill(self, fill) -> None:
         self.account.apply_fill(fill)
         self.state_engine.apply_strategy_fill(fill)
+        self._last_strategy_fill_at = fill.timestamp
+        if fill.outcome == "up":
+            self._last_strategy_fill_price_up = fill.price
+        else:
+            self._last_strategy_fill_price_down = fill.price
 
     def _pending_context(self) -> dict[str, object]:
         if not hasattr(self.broker, "pending_context"):

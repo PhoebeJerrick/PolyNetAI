@@ -232,3 +232,61 @@ def test_apply_risk_limits_clips_sell_to_unreserved_position() -> None:
     assert decision.intent is not None
     assert decision.intent.shares == 3.0
     assert decision.intent.metadata["pending_sell_limited"] is True
+
+
+def test_apply_risk_limits_blocks_when_order_interval_too_short() -> None:
+    features = build_features()
+    features.timestamp = datetime(2026, 3, 20, 12, 0, 3)
+    intent = OrderIntent(
+        market_id="BTC",
+        cycle_id="cycle-a",
+        outcome="up",
+        action="buy",
+        shares=10.0,
+        reference_price=0.5,
+        category="grid",
+        reason="test",
+        priority=10,
+        metadata={
+            "account_cash": 100.0,
+            "last_strategy_fill_at": datetime(2026, 3, 20, 12, 0, 2),
+        },
+    )
+    decision = apply_risk_limits(features, intent, build_config())
+    assert not decision.accepted
+    assert "间隔" in decision.reason
+
+
+def test_apply_risk_limits_blocks_when_same_outcome_price_move_too_small() -> None:
+    intent = OrderIntent(
+        market_id="BTC",
+        cycle_id="cycle-a",
+        outcome="up",
+        action="buy",
+        shares=10.0,
+        reference_price=0.51,
+        category="grid",
+        reason="test",
+        priority=10,
+        metadata={"account_cash": 100.0, "last_strategy_fill_price_up": 0.50},
+    )
+    decision = apply_risk_limits(build_features(), intent, build_config())
+    assert not decision.accepted
+    assert "波动" in decision.reason
+
+
+def test_apply_risk_limits_allows_when_same_outcome_price_move_large_enough() -> None:
+    intent = OrderIntent(
+        market_id="BTC",
+        cycle_id="cycle-a",
+        outcome="up",
+        action="buy",
+        shares=10.0,
+        reference_price=0.52,
+        category="grid",
+        reason="test",
+        priority=10,
+        metadata={"account_cash": 100.0, "last_strategy_fill_price_up": 0.50},
+    )
+    decision = apply_risk_limits(build_features(), intent, build_config())
+    assert decision.accepted

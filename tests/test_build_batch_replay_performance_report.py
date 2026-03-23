@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 import pandas as pd
 
 from scripts.build_batch_replay_performance_report import (
@@ -52,6 +54,7 @@ def test_build_report_writes_xlsx_and_trade_process(tmp_path) -> None:
     pd.DataFrame(
         [
             {
+                "timestamp": datetime(2026, 3, 20, 12, 0, 0),
                 "selected_outcome": "up",
                 "selected_action": "buy",
                 "selected_shares": 10.0,
@@ -59,6 +62,7 @@ def test_build_report_writes_xlsx_and_trade_process(tmp_path) -> None:
                 "fill_price": 0.55,
             },
             {
+                "timestamp": datetime(2026, 3, 20, 12, 0, 30),
                 "selected_outcome": "up",
                 "selected_action": "sell",
                 "selected_shares": 5.0,
@@ -95,6 +99,10 @@ def test_build_report_writes_xlsx_and_trade_process(tmp_path) -> None:
 
     assert TRACKER_STYLE_SHEET in xl.sheet_names
     tracker = pd.read_excel(report_path, sheet_name=TRACKER_STYLE_SHEET)
+    cols = list(tracker.columns)
+    assert "成交价格" in cols
+    assert "同向成交价波动幅度(%)" in cols
+    assert cols.index("同向成交价波动幅度(%)") == cols.index("成交价格") + 1
     assert "Up积累份数" in tracker.columns
     assert "周期净利润" in tracker.columns
     marker_col = "下注时间距开盘差(分，秒)"

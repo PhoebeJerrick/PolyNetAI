@@ -1,9 +1,27 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 
 from polynet_ai.domain.models import FeatureSnapshot, OrderIntent
 from polynet_ai.strategy.spec import StrategyConfig
+
+
+def _coerce_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    else:
+        return None
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 @dataclass(slots=True)
@@ -28,6 +46,26 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
     clipped = intent.clipped(effective_min_order, max_order)
     if clipped is None:
         return RiskDecision(False, None, "订单规模低于最小阈值")
+
+    min_gap = float(config.get("execution.min_seconds_between_orders", 2.0))
+    if min_gap > 0:
+        last_at = _coerce_datetime(clipped.metadata.get("last_strategy_fill_at"))
+        if last_at is not None:
+            delta = (features.timestamp - last_at).total_seconds()
+            if delta <= min_gap:
+                return RiskDecision(False, None, f"策略下单间隔不足{min_gap:g}秒")
+
+    min_move = float(config.get("execution.min_same_outcome_price_move_ratio", 0.03))
+    if min_move > 0 and clipped.reference_price > 1e-12:
+        key = "last_strategy_fill_price_up" if clipped.outcome == "up" else "last_strategy_fill_price_down"
+        raw_last = clipped.metadata.get(key)
+        if raw_last is not None:
+            last_px = float(raw_last)
+            if last_px > 1e-12:
+                move = abs(clipped.reference_price - last_px) / last_px
+                if move <= min_move:
+                    pct = min_move * 100.0
+                    return RiskDecision(False, None, f"同方向价格相对上次成交价波动不足{pct:g}%")
 
     if features.net_position_value and abs(features.net_position_value) > max_exposure and clipped.action == "buy":
         if clipped.category not in {"hedge", "last_minute"}:
