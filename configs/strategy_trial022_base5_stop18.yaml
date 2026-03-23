@@ -53,19 +53,19 @@ execution:
   min_seconds_between_orders: 2.0
   min_same_outcome_price_move_ratio: 0.03
 rule_price_feed:
-  last_minute: 0
+  last_minute: 0.5
   entries:
-    opening: 0
-    hedge: 0
-    grid: 0
-    mean_reversion: 0
-    trend: 0
+    opening: 0.5
+    hedge: 0.5
+    grid: 0.5
+    mean_reversion: 0.5
+    trend: 0.5
   exits:
-    stop_loss: 0
-    hedge: 0
-    take_profit: 0
-    grid: 0
-    mean_reversion: 0
+    stop_loss: 0.5
+    hedge: 0.5
+    take_profit: 0.5
+    grid: 0.5
+    mean_reversion: 0.5
 priorities:
   risk: 10
   last_minute: 20
