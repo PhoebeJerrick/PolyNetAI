@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from polynet_ai.domain.models import FeatureSnapshot, OrderIntent
 from polynet_ai.strategy.spec import StrategyConfig
+from polynet_ai.strategy.price_reference import outcome_reference_price
 
 
 def build_last_minute_candidate(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
@@ -9,6 +10,9 @@ def build_last_minute_candidate(features: FeatureSnapshot, config: StrategyConfi
         return []
 
     priority = int(config.priorities.get("last_minute", 20))
+    infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
+    up_ref = outcome_reference_price(features, "up", infer_missing_with_binary_complement=infer_missing)
+    down_ref = outcome_reference_price(features, "down", infer_missing_with_binary_complement=infer_missing)
     intents: list[OrderIntent] = []
     if features.unrealized_up_pnl < 0 and features.up_held > 0:
         intents.append(
@@ -18,7 +22,7 @@ def build_last_minute_candidate(features: FeatureSnapshot, config: StrategyConfi
                 outcome="up",
                 action="sell",
                 shares=features.up_held,
-                reference_price=features.price,
+                reference_price=up_ref,
                 category="last_minute",
                 reason="最后一分钟强制平掉亏损 Up 方向",
                 priority=priority,
@@ -32,7 +36,7 @@ def build_last_minute_candidate(features: FeatureSnapshot, config: StrategyConfi
                 outcome="down",
                 action="sell",
                 shares=features.down_held,
-                reference_price=features.price,
+                reference_price=down_ref,
                 category="last_minute",
                 reason="最后一分钟强制平掉亏损 Down 方向",
                 priority=priority,
@@ -68,7 +72,7 @@ def build_last_minute_candidate(features: FeatureSnapshot, config: StrategyConfi
             outcome=target_outcome,
             action="buy",
             shares=max(0.0, target_net - held),
-            reference_price=features.price,
+            reference_price=up_ref if target_outcome == "up" else down_ref,
             category="last_minute",
             reason="最后一分钟按盈利方向和波动率调整留仓",
             priority=priority,

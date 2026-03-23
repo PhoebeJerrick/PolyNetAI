@@ -5,8 +5,9 @@ from typing import Iterable
 
 import pandas as pd
 
-# 与 analyze_polymarket_tracker / 批量绩效报告 BTC 表一致，置于「成交价格」右侧
+# 与 analyze_polymarket_tracker / 批量绩效报告交易流水表一致，置于「成交价格」右侧
 SAME_OUTCOME_PRICE_MOVE_COL = "同向成交价波动幅度(%)"
+EXECUTION_LEDGER_SHEET_NAME = "分周期执行交易流水"
 
 
 def compute_same_outcome_price_move_pct(
@@ -77,14 +78,9 @@ def _format_elapsed(label: pd.Timestamp, cycle_start: pd.Timestamp) -> str:
 
 
 def _build_sheet_name(values: Iterable[object]) -> str:
-    for value in values:
-        text = str(value or "").strip()
-        if not text:
-            continue
-        if text.lower().startswith("btc"):
-            return "BTC"
-        return text[:31]
-    return "Trades"
+    # 保持函数签名不变，兼容既有调用点；统一使用中文交易流水表名。
+    _ = values
+    return EXECUTION_LEDGER_SHEET_NAME
 
 
 def export_trade_ledger_to_excel(
@@ -123,7 +119,7 @@ def export_trade_ledger_to_excel(
         executed = executed[executed["executed"] == True].copy()
     if executed.empty:
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            pd.DataFrame(columns=columns).to_excel(writer, sheet_name="Trades", index=False)
+            pd.DataFrame(columns=columns).to_excel(writer, sheet_name=EXECUTION_LEDGER_SHEET_NAME, index=False)
         return output
 
     snapshots = snapshot_df.copy()

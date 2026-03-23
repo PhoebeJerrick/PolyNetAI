@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from polynet_ai.domain.models import FeatureSnapshot, OrderIntent, Outcome
 from polynet_ai.strategy.spec import StrategyConfig
+from polynet_ai.strategy.price_reference import outcome_reference_price
 
 
 def _base_size(config: StrategyConfig, features: FeatureSnapshot) -> float:
@@ -114,7 +115,9 @@ def trend_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Ord
     if deviation < price_edge:
         return []
 
+    infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
     size = _base_size(config, features) + abs(features.net_position) * float(config.get("trend.trend_scale", 0.15))
+    ref = outcome_reference_price(features, features.trend_bias, infer_missing_with_binary_complement=infer_missing)
     return [
         OrderIntent(
             market_id=features.market_id,
@@ -122,7 +125,7 @@ def trend_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Ord
             outcome=features.trend_bias,
             action="buy",
             shares=size,
-            reference_price=features.price,
+            reference_price=ref,
             category="trend",
             reason="趋势确认后顺势加仓",
             priority=int(config.priorities.get("trend", 80)),
@@ -139,6 +142,8 @@ def hedge_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Ord
     opposite = "down" if features.net_direction == "Up" else "up"
     excess = max(0.0, exposure - trigger)
     size = _base_size(config, features) + excess * float(config.get("exposure.hedge_scale", 0.15))
+    infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
+    ref = outcome_reference_price(features, opposite, infer_missing_with_binary_complement=infer_missing)
     return [
         OrderIntent(
             market_id=features.market_id,
@@ -146,7 +151,7 @@ def hedge_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Ord
             outcome=opposite,
             action="buy",
             shares=size,
-            reference_price=features.price,
+            reference_price=ref,
             category="hedge",
             reason="净敞口过大，执行反向对冲买入",
             priority=int(config.priorities.get("hedge", 40)),
@@ -164,7 +169,9 @@ def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Orde
     high = float(config.get("grid.grid_high_percentile", 0.75))
     size = _base_size(config, features)
     intents: list[OrderIntent] = []
+    infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
     if features.price_percentile <= low:
+        ref = outcome_reference_price(features, "up", infer_missing_with_binary_complement=infer_missing)
         intents.append(
             OrderIntent(
                 market_id=features.market_id,
@@ -172,13 +179,14 @@ def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Orde
                 outcome="up",
                 action="buy",
                 shares=size,
-                reference_price=features.price,
+                reference_price=ref,
                 category="grid",
                 reason="震荡区间低位买入 Up",
                 priority=int(config.priorities.get("grid", 60)),
             )
         )
     if features.price_percentile >= high:
+        ref = outcome_reference_price(features, "down", infer_missing_with_binary_complement=infer_missing)
         intents.append(
             OrderIntent(
                 market_id=features.market_id,
@@ -186,7 +194,7 @@ def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Orde
                 outcome="down",
                 action="buy",
                 shares=size,
-                reference_price=features.price,
+                reference_price=ref,
                 category="grid",
                 reason="震荡区间高位买入 Down",
                 priority=int(config.priorities.get("grid", 60)),
@@ -202,7 +210,9 @@ def mean_reversion_entries(features: FeatureSnapshot, config: StrategyConfig) ->
     down_threshold = float(config.get("mean_reversion.down_buy_deviation", 0.10))
     deviation_scale = float(config.get("mean_reversion.deviation_scale", 45.0))
     intents: list[OrderIntent] = []
+    infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
     if features.up_deviation >= up_threshold:
+        ref = outcome_reference_price(features, "up", infer_missing_with_binary_complement=infer_missing)
         intents.append(
             OrderIntent(
                 market_id=features.market_id,
@@ -210,13 +220,14 @@ def mean_reversion_entries(features: FeatureSnapshot, config: StrategyConfig) ->
                 outcome="up",
                 action="buy",
                 shares=_base_size(config, features) + features.up_deviation * deviation_scale,
-                reference_price=features.price,
+                reference_price=ref,
                 category="mean_reversion",
                 reason="Up 价格显著高于均价，执行追高买入",
                 priority=int(config.priorities.get("mean_reversion", 70)),
             )
         )
     if features.down_deviation <= -down_threshold:
+        ref = outcome_reference_price(features, "down", infer_missing_with_binary_complement=infer_missing)
         intents.append(
             OrderIntent(
                 market_id=features.market_id,
@@ -224,7 +235,7 @@ def mean_reversion_entries(features: FeatureSnapshot, config: StrategyConfig) ->
                 outcome="down",
                 action="buy",
                 shares=_base_size(config, features) + abs(features.down_deviation) * deviation_scale,
-                reference_price=features.price,
+                reference_price=ref,
                 category="mean_reversion",
                 reason="Down 价格显著低于均价，执行均值回归买入",
                 priority=int(config.priorities.get("mean_reversion", 70)),

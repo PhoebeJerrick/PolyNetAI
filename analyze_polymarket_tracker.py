@@ -80,6 +80,7 @@ INSERTED_COLUMNS = (
     "Down已成交差价盈亏",
 )
 SETTLEMENT_COLUMNS = ("未平仓UP盈亏", "未平仓Down盈亏", "周期净利润")
+SETTLEMENT_META_COLUMNS = ("最终Winner方向",)
 ALL_PNL_COLUMNS = ("Up已成交差价盈亏", "Down已成交差价盈亏") + SETTLEMENT_COLUMNS
 
 # ── styles ───────────────────────────────────────────────────────────
@@ -330,6 +331,7 @@ def settlement_summary(s: dict[str, float]) -> dict[str, float]:
         "up_realized_total": f3(s["up_realized"]),
         "dn_realized_total": f3(s["dn_realized"]),
         "周期净利润": f3(s["up_realized"] + s["dn_realized"] + up_stl + dn_stl),
+        "最终Winner方向": "Up" if w == "up" else ("Down" if w == "down" else ""),
     }
 
 
@@ -367,7 +369,7 @@ def append_subtotals(
     if df.empty:
         return df
 
-    all_cols = list(df.columns) + [c for c in SETTLEMENT_COLUMNS if c not in df.columns]
+    all_cols = list(df.columns) + [c for c in SETTLEMENT_COLUMNS + SETTLEMENT_META_COLUMNS if c not in df.columns]
     rows: list[dict[str, object]] = []
 
     for cyc_val, grp in df.groupby(cycle_col, sort=False):
@@ -391,6 +393,7 @@ def append_subtotals(
             sub["未平仓UP盈亏"] = sm["未平仓UP盈亏"]
             sub["未平仓Down盈亏"] = sm["未平仓Down盈亏"]
             sub["周期净利润"] = sm["周期净利润"]
+            sub["最终Winner方向"] = sm["最终Winner方向"]
 
         rows.append(sub)
 

@@ -29,6 +29,7 @@ def test_write_batch_trade_process_zh_writes_xlsx(tmp_path) -> None:
         [
             {
                 "cycle_slug": "cycle-a",
+                "market_outcome": "down",
                 "selected_outcome": "up",
                 "selected_action": "buy",
                 "executed": True,
@@ -47,5 +48,8 @@ def test_write_batch_trade_process_zh_writes_xlsx(tmp_path) -> None:
     assert path.exists()
     assert not (tmp_path / "batch_replay_trade_process_zh.md").exists()
     snap = pd.read_excel(path, sheet_name="周期快照")
+    dec = pd.read_excel(path, sheet_name="决策流水")
     assert "cycle-a" in snap["cycle_slug"].astype(str).tolist()
     assert "winner" in snap.columns
+    assert "市场方向" in dec.columns
+    assert "策略方向" in dec.columns

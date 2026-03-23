@@ -13,13 +13,14 @@ if str(ROOT) not in sys.path:
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-# 与 polymarket_tracker_collection_with_accumulated_shares_v5.xlsx 等工作簿一致：固定工作表名 BTC
-TRACKER_STYLE_SHEET = "BTC"
+# 分周期执行交易流水（原 BTC 工作表）
+TRACKER_STYLE_SHEET = "分周期执行交易流水"
 
 # 与 write_batch_trade_process_zh 决策表列顺序一致
 TRADE_PROCESS_PREF_COLS = (
     "timestamp",
     "market_price",
+    "market_outcome",
     "selected_rule",
     "selected_outcome",
     "selected_action",
@@ -275,7 +276,80 @@ def _batch_replay_decisions_to_tracker_input(
     return raw.reset_index(drop=True)
 
 
-def _append_tracker_style_sheet(writer: pd.ExcelWriter, raw_input: pd.DataFrame) -> None:
+def _winner_label(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if text == "up":
+        return "Up"
+    if text == "down":
+        return "Down"
+    return ""
+
+
+def _align_tracker_subtotals_with_cycle_snapshot(
+    tracker_df: pd.DataFrame,
+    cycle_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    用 cycle_df 的周期结算结果回填 BTC 表的【周期小计】行，避免与周期快照口径不一致。
+    """
+    if tracker_df.empty or cycle_df.empty:
+        return tracker_df
+    marker_col = "下注时间距开盘差(分，秒)"
+    cycle_col = "时间周期"
+    if marker_col not in tracker_df.columns or cycle_col not in tracker_df.columns:
+        return tracker_df
+    if "cycle_id" not in cycle_df.columns:
+        return tracker_df
+
+    out = tracker_df.copy()
+    subtotal_mask = out[marker_col].astype(str) == "【周期小计】"
+    if not subtotal_mask.any():
+        return out
+
+    cycle_lookup = cycle_df.drop_duplicates(subset=["cycle_id"], keep="last").set_index("cycle_id")
+
+    def _get(cycle_id: str, col: str) -> object:
+        if col not in cycle_lookup.columns:
+            return None
+        try:
+            return cycle_lookup.at[cycle_id, col]
+        except KeyError:
+            return None
+
+    for idx in out.index[subtotal_mask]:
+        cycle_id = str(out.at[idx, cycle_col])
+        if not cycle_id:
+            continue
+        if "最终Winner方向" in out.columns:
+            out.at[idx, "最终Winner方向"] = _winner_label(_get(cycle_id, "winner"))
+        if "未平仓UP盈亏" in out.columns:
+            value = _get(cycle_id, "unrealized_up_pnl")
+            if value is not None:
+                out.at[idx, "未平仓UP盈亏"] = value
+        if "未平仓Down盈亏" in out.columns:
+            value = _get(cycle_id, "unrealized_down_pnl")
+            if value is not None:
+                out.at[idx, "未平仓Down盈亏"] = value
+        if "周期净利润" in out.columns:
+            value = _get(cycle_id, "cycle_net_profit")
+            if value is not None:
+                out.at[idx, "周期净利润"] = value
+        if "Up已成交差价盈亏" in out.columns:
+            value = _get(cycle_id, "up_realized_pnl")
+            if value is not None:
+                out.at[idx, "Up已成交差价盈亏"] = value
+        if "Down已成交差价盈亏" in out.columns:
+            value = _get(cycle_id, "down_realized_pnl")
+            if value is not None:
+                out.at[idx, "Down已成交差价盈亏"] = value
+    return out
+
+
+def _append_tracker_style_sheet(
+    writer: pd.ExcelWriter,
+    raw_input: pd.DataFrame,
+    cycle_df: pd.DataFrame,
+) -> None:
     """调用 analyze_polymarket_tracker.compute + format_ws，生成与 v5 一致的累计持仓表。"""
     import analyze_polymarket_tracker as apt
 
@@ -286,6 +360,7 @@ def _append_tracker_style_sheet(writer: pd.ExcelWriter, raw_input: pd.DataFrame)
         )
         return
     proc, meta = apt.compute(raw_input.copy(), _tracker_compute_args())
+    proc = _align_tracker_subtotals_with_cycle_snapshot(proc, cycle_df)
     proc.to_excel(writer, sheet_name=name, index=False)
     apt.format_ws(writer.sheets[name], meta.get("marker_col"))
 
@@ -387,7 +462,7 @@ def _write_performance_report_xlsx(
         direction_df.to_excel(writer, sheet_name="执行方向分布", index=False)
         winner_df.to_excel(writer, sheet_name="周期赢家分布", index=False)
         net_direction_df.to_excel(writer, sheet_name="周期净方向分布", index=False)
-        _append_tracker_style_sheet(writer, tracker_raw)
+        _append_tracker_style_sheet(writer, tracker_raw, cycle_df)
 
     _finalize_xlsx_workbook(xlsx_path, skip_sheet_titles=frozenset({TRACKER_STYLE_SHEET}))
 
@@ -421,6 +496,13 @@ def build_performance_report_zh(
     enriched_summary = summary_df.copy()
     if total_cycles:
         enriched_summary["cumulative_profit"] = pd.to_numeric(enriched_summary["total_net_profit"], errors="coerce").fillna(0.0).cumsum()
+        if {"account_cash", "total_net_profit"}.issubset(enriched_summary.columns):
+            account_cash = pd.to_numeric(enriched_summary["account_cash"], errors="coerce")
+            total_net_profit_col = pd.to_numeric(enriched_summary["total_net_profit"], errors="coerce").fillna(0.0)
+            implied_start_cash = account_cash - total_net_profit_col
+            enriched_summary["implied_start_cash"] = implied_start_cash
+            first_start_cash = implied_start_cash.dropna().iloc[0] if implied_start_cash.notna().any() else 0.0
+            enriched_summary["estimated_cash_from_cum"] = first_start_cash + enriched_summary["cumulative_profit"]
 
     report_xlsx = output_path / "batch_replay_performance_report_zh.xlsx"
     shown_dir = display_batch_dir or resolved_batch_dir
@@ -478,6 +560,15 @@ def _write_batch_trade_process_xlsx(
             dec_out = dec.copy()
     else:
         dec_out = pd.DataFrame(columns=["cycle_slug"])
+
+    # Clarify "market direction" (event outcome) vs "strategy direction" (selected outcome).
+    dec_out = dec_out.rename(
+        columns={
+            "market_outcome": "市场方向",
+            "selected_outcome": "策略方向",
+            "selected_action": "策略动作",
+        }
+    )
 
     xlsx_path.parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:

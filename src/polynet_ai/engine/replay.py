@@ -109,6 +109,7 @@ class ReplayEngine:
             "cycle_id": event.cycle_id,
             "timestamp": event.timestamp,
             "market_price": event.price,
+            "market_outcome": event.outcome,
             "selected_rule": "",
             "selected_action": "",
             "selected_outcome": "",
