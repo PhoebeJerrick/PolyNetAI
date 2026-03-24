@@ -13,6 +13,7 @@ def test_estimate_fok_plan_for_buy_uses_ask_depth_and_buffer() -> None:
         ],
         bids=[],
         tick_size="0.01",
+        min_order_size="5",
     )
 
     plan = _estimate_fok_plan(book, action="buy", shares=5)
@@ -21,6 +22,7 @@ def test_estimate_fok_plan_for_buy_uses_ask_depth_and_buffer() -> None:
     assert round(plan.estimated_vwap, 3) == 0.516
     assert round(plan.deepest_price, 2) == 0.52
     assert round(plan.limit_price, 2) == 0.53
+    assert plan.min_order_size == 5.0
 
 
 def test_estimate_fok_plan_for_sell_uses_bid_depth_and_buffer() -> None:

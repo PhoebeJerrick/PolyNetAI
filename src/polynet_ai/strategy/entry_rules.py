@@ -7,8 +7,20 @@ from polynet_ai.strategy.price_reference import outcome_reference_price
 
 
 def _base_size(config: StrategyConfig, features: FeatureSnapshot) -> float:
-    return float(config.get("order_sizing.base_order_size", 5.0)) + (
-        features.volatility_ratio * float(config.get("order_sizing.volatility_order_scale", 10.0))
+    base_order_size = float(
+        config.get(
+            "order_sizing.buy.base_order_size",
+            config.get("order_sizing.base_order_size", 5.0),
+        )
+    )
+    volatility_order_scale = float(
+        config.get(
+            "order_sizing.buy.volatility_order_scale",
+            config.get("order_sizing.volatility_order_scale", 10.0),
+        )
+    )
+    return base_order_size + (
+        features.volatility_ratio * volatility_order_scale
     )
 
 

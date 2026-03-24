@@ -56,6 +56,21 @@ python scripts/run_parameter_sweep.py --input data/raw/polymarket_tracker_collec
 python scripts/run_auto_optimize.py --input data/raw/polymarket_tracker_collection.xlsx --config configs/strategy.yaml --optimize configs/optimize.yaml --output-dir artifacts/optimization/optimize_outputs
 ```
 
+### Tracker 持仓对比折线图（HTML）
+
+```bash
+python scripts/build_tracker_position_compare_chart.py --input data/processed/polymarket_tracker_collection_with_accumulated_shares_v5.xlsx --output artifacts/charts/tracker_position_compare.html
+```
+
+可选指定工作表：
+
+```bash
+python scripts/build_tracker_position_compare_chart.py --input data/processed/polymarket_tracker_collection_with_accumulated_shares_v5.xlsx --sheet BTC --output artifacts/charts/tracker_position_compare.html
+```
+
+输出文件为交互式 HTML，包含 6 条持仓相关折线，并将 `投注份数` 的 Up/Down 方向点用不同颜色标记，便于对比。
+图中会提供 `时间周期` 下拉框（默认第一个周期），并在下方提供每条曲线对应的 checkbox。勾选状态在切换周期后保持一致，可持续按指标过滤。页面下方会同步显示同周期的 `Up价格`/`Down价格` 折线图，两张图在切换周期时同时刷新，横轴均为单周期内秒数。
+
 ### 本地事件流准实时回放（对应“模拟下单测试”）
 
 ```bash

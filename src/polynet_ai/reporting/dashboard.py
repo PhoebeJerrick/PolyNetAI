@@ -417,21 +417,33 @@ def _build_dashboard_config_param_meta() -> dict[str, dict[str, str]]:
             "example": "开启：若只见 Up=0.6，则推断 Down≈0.4",
             "detail": "在仅单边有报价时避免规则完全失明；若数据源本身不可靠，可关闭改为要求双边价。",
         },
-        "order_sizing.base_order_size": {
-            "example": "5 表示多数规则从 5 份合约量级起步（具体单位随撮合定义）",
-            "detail": "会与波动率放大、max_order_size 等共同约束最终下单量。",
+        "order_sizing.buy.base_order_size": {
+            "example": "5 表示多数买入规则从 5 份合约量级起步（具体单位随撮合定义）",
+            "detail": "会与买入波动率放大、买入 max_order_size 等共同约束最终下单量。",
         },
-        "order_sizing.min_order_size": {
-            "example": "1 — 小于此值的下单请求会被直接拒绝",
-            "detail": "须不低于交易所或模拟器最小手数；与 max 搭配避免无效碎单。",
+        "order_sizing.buy.min_order_size": {
+            "example": "5 — 买单低于此值会被风控拦截",
+            "detail": "建议不低于交易所 orderbook 的 min_order_size，避免实盘拒单。",
         },
-        "order_sizing.max_order_size": {
-            "example": "40 — 单笔成交量不会超过 40",
-            "detail": "硬上限，用于抑制单条信号过激；与敞口、资金使用率一起看。",
+        "order_sizing.buy.max_order_size": {
+            "example": "40 — 单笔买入量不会超过 40",
+            "detail": "硬上限，用于抑制单条买入信号过激；与敞口、资金使用率一起看。",
         },
-        "order_sizing.volatility_order_scale": {
-            "example": "20 — 波动率指标越高，基础单量按模型放大越明显",
+        "order_sizing.buy.volatility_order_scale": {
+            "example": "20 — 波动率指标越高，买入基础单量按模型放大越明显",
             "detail": "设为 0 则关闭波动放大；过大可能在剧烈行情中单笔过重。",
+        },
+        "order_sizing.sell.min_order_size": {
+            "example": "5 — 卖单常规最小值（可被强平豁免逻辑覆盖）",
+            "detail": "与 execution.market_limits.enforce_sell_min_order_size 一起决定卖单是否严格受交易所最小手数约束。",
+        },
+        "order_sizing.sell.max_order_size": {
+            "example": "40 — 单笔卖出量不会超过 40",
+            "detail": "防止止盈/止损规则一次性卸仓过大。",
+        },
+        "order_sizing.sell.allow_close_below_min_order_size": {
+            "example": "开启：仅当剩余可卖仓位本身低于最小手数时允许低于最小值平仓",
+            "detail": "用于处理碎仓尾单；关闭后会严格按最小下单量执行。",
         },
         "capital.max_cash_utilization": {
             "example": "0.92 表示最多动用账户现金的 92%",
@@ -569,8 +581,20 @@ def _build_dashboard_config_param_meta() -> dict[str, dict[str, str]]:
             "example": "0.02 — 同一 outcome 再次下单前价格至少相对上次变动约 2%",
             "detail": "防止在同一价位附近反复小额加仓；设为 0 则关闭该过滤。",
         },
+        "execution.market_limits.use_orderbook_min_order_size": {
+            "example": "开启：按 orderbook 的 min_order_size 作为市场最小手数",
+            "detail": "建议保持开启；若关闭将仅按策略配置阈值约束。",
+        },
+        "execution.market_limits.fallback_min_order_size": {
+            "example": "5 — 当 orderbook 未返回 min_order_size 时的兜底值",
+            "detail": "建议设成该系列市场的常见最小手数。",
+        },
+        "execution.market_limits.enforce_sell_min_order_size": {
+            "example": "开启：卖单也按市场最小手数限制",
+            "detail": "关闭后仅买单强制市场最小手数，卖单可更灵活但实盘更易被拒。",
+        },
         "scenarios": {
-            "example": "数组内一项：name 填「基线」，overrides 里写 order_sizing.base_order_size: 5",
+            "example": "数组内一项：name 填「基线」，overrides 里写 order_sizing.buy.base_order_size: 5",
             "detail": "用于 sweep 命名分组；overrides 的键与 strategy.yaml 路径一致，值为该场景覆盖内容。",
         },
         "grid.execution.slippage_bps": {
@@ -702,6 +726,7 @@ def build_dashboard_html(
     .config-path {{ color:#64748b; font-size:12px; margin-bottom:6px; font-family: Consolas, monospace; }}
     .config-field-hint {{ color:#94a3b8; font-size:12px; line-height:1.5; margin-top:6px; }}
     .config-field-example {{ color:#a5b4fc; font-size:12px; line-height:1.5; margin-top:6px; }}
+    .config-field-error {{ color:#fca5a5; font-size:12px; line-height:1.5; margin-top:6px; white-space:pre-wrap; }}
     .config-label-inline {{ display:flex; align-items:center; gap:6px; flex-wrap:wrap; flex:1; min-width:0; }}
     .config-label-inline-text {{ margin-bottom:0 !important; display:inline; }}
     .config-param-help {{ position:relative; display:inline-flex; align-items:center; flex-shrink:0; outline:none; }}
@@ -731,6 +756,7 @@ def build_dashboard_html(
     .config-select {{ width:100%; background:#0b1220; color:#e2e8f0; border:1px solid #334155; border-radius:8px; padding:8px 10px; font:inherit; box-sizing:border-box; }}
     .config-input,.config-textarea {{ width:100%; box-sizing:border-box; }}
     .config-textarea {{ min-height:88px; resize:vertical; }}
+    .config-input.config-invalid,.config-textarea.config-invalid,.config-select.config-invalid {{ border-color:#ef4444; box-shadow:0 0 0 1px rgba(239,68,68,0.35); }}
     .config-hint {{ margin-top:12px; color:#94a3b8; font-size:12px; line-height:1.5; }}
     .config-status.ok {{ color:#86efac; }}
     .config-status.error {{ color:#fca5a5; }}
@@ -876,11 +902,17 @@ def build_dashboard_html(
       strategy: {{
         sections: [
           {{
-            title: "周期与节奏",
-            description: "控制一个交易周期多长、最后一分钟风控何时介入。",
+            title: "cycle（周期）",
+            description: "与 strategy.yaml 的 cycle 一致。",
             fields: [
               {{ path: "cycle.cycle_seconds", label: "周期长度（秒）", hint: "BTC 5 分钟市场通常为 300 秒。", type: "number", ui: "select", options: [300], risk: "low" }},
               {{ path: "cycle.last_minute_seconds", label: "尾盘窗口（秒）", hint: "最后一分钟逻辑开始生效的时间。", type: "number", ui: "select", options: [30, 45, 60, 75, 90], risk: "medium" }},
+            ],
+          }},
+          {{
+            title: "opening_entry（开盘试探）",
+            description: "与 strategy.yaml 的 opening_entry 一致。",
+            fields: [
               {{ path: "opening_entry.enabled", label: "开盘试探建仓使能", hint: "关闭后不在开盘窗口触发 opening 买入。", type: "boolean", risk: "medium" }},
               {{ path: "opening_entry.window_seconds", label: "开盘试探窗口（秒）", hint: "仅在周期起始该窗口内允许 opening 规则建仓。", type: "number", ui: "range", min: 5, max: 120, step: 1, risk: "low" }},
               {{ path: "opening_entry.vwap_epsilon", label: "开盘 VWAP 容差", hint: "弱势侧价格允许略高于 VWAP 的容差。", type: "number", ui: "range", min: 0.000, max: 0.050, step: 0.001, risk: "medium" }},
@@ -890,26 +922,29 @@ def build_dashboard_html(
             ],
           }},
           {{
-            title: "下单规模",
-            description: "基础单量、波动放大和单笔上下限。",
+            title: "order_sizing（下单规模）",
+            description: "与 strategy.yaml 的 order_sizing 一致。",
             fields: [
-              {{ path: "order_sizing.base_order_size", label: "基础下单量", hint: "大多数规则的起始仓位大小。", type: "number", ui: "range", min: 1, max: 20, step: 1, risk: "medium" }},
-              {{ path: "order_sizing.min_order_size", label: "最小下单量", hint: "低于该值的订单会被拒绝。", type: "number", min: 0.5, max: 10, step: 0.5, risk: "low" }},
-              {{ path: "order_sizing.max_order_size", label: "最大下单量", hint: "单笔订单的硬上限。", type: "number", ui: "range", min: 5, max: 200, step: 1, risk: "high" }},
-              {{ path: "order_sizing.volatility_order_scale", label: "波动率加仓系数", hint: "波动越大，基础下单量放大越明显。", type: "number", ui: "range", min: 0, max: 60, step: 1, risk: "medium" }},
+              {{ path: "order_sizing.buy.base_order_size", label: "买入基础下单量", hint: "大多数买入规则的起始仓位大小。", type: "number", ui: "range", min: 1, max: 20, step: 1, risk: "medium" }},
+              {{ path: "order_sizing.buy.min_order_size", label: "买入最小下单量", hint: "低于该值的买单会被风控拒绝。", type: "number", min: 0.5, max: 20, step: 0.5, risk: "low" }},
+              {{ path: "order_sizing.buy.max_order_size", label: "买入最大下单量", hint: "单笔买单的硬上限。", type: "number", ui: "range", min: 5, max: 200, step: 1, risk: "high" }},
+              {{ path: "order_sizing.buy.volatility_order_scale", label: "买入波动率加仓系数", hint: "波动越大，买入基础下单量放大越明显。", type: "number", ui: "range", min: 0, max: 60, step: 1, risk: "medium" }},
+              {{ path: "order_sizing.sell.min_order_size", label: "卖出最小下单量", hint: "卖单常规最小下单量。", type: "number", min: 0.5, max: 20, step: 0.5, risk: "low" }},
+              {{ path: "order_sizing.sell.max_order_size", label: "卖出最大下单量", hint: "单笔卖单的硬上限。", type: "number", ui: "range", min: 5, max: 200, step: 1, risk: "high" }},
+              {{ path: "order_sizing.sell.allow_close_below_min_order_size", label: "允许卖出低于最小值强平碎仓", hint: "仅当剩余仓位本身小于最小下单量时放行。", type: "boolean", risk: "medium" }},
             ],
           }},
           {{
-            title: "资金与本金",
-            description: "控制可用现金比例与安全缓冲，防止超过本金能力下单。",
+            title: "capital（资金）",
+            description: "与 strategy.yaml 的 capital 一致。",
             fields: [
               {{ path: "capital.max_cash_utilization", label: "最大资金使用率", hint: "例如 0.95 表示最多动用 95% 的现金。", type: "number", ui: "range", min: 0.50, max: 1.00, step: 0.01, risk: "high" }},
               {{ path: "capital.min_cash_buffer", label: "最小现金缓冲", hint: "始终保留的现金安全垫。", type: "number", ui: "range", min: 0, max: 200, step: 5, risk: "medium" }},
             ],
           }},
           {{
-            title: "敞口与风控",
-            description: "限制最大净敞口、网格净仓位和单周期交易次数。",
+            title: "exposure（敞口）",
+            description: "与 strategy.yaml 的 exposure 一致。",
             fields: [
               {{ path: "exposure.max_abs_exposure_value", label: "最大绝对敞口价值", hint: "限制净敞口价值上限。", type: "number", ui: "range", min: 20, max: 1000, step: 10, risk: "high" }},
               {{ path: "exposure.hedge_trigger_value", label: "对冲触发阈值", hint: "超过该敞口后可触发对冲逻辑。", type: "number", ui: "range", min: 10, max: 300, step: 5, risk: "medium" }},
@@ -919,20 +954,26 @@ def build_dashboard_html(
             ],
           }},
           {{
-            title: "趋势与网格",
-            description: "趋势追随和区间网格的关键阈值。",
+            title: "trend（趋势）",
+            description: "与 strategy.yaml 的 trend 一致。",
             fields: [
               {{ path: "trend.min_trend_strength", label: "最小趋势强度", hint: "低于该值则不触发趋势单。", type: "number", ui: "range", min: 0.10, max: 0.80, step: 0.01, risk: "medium" }},
               {{ path: "trend.trend_price_edge", label: "趋势价格边际", hint: "价格偏离需超过该值才追随趋势。", type: "number", ui: "range", min: 0.00, max: 0.30, step: 0.01, risk: "medium" }},
               {{ path: "trend.trend_scale", label: "趋势加仓系数", hint: "当前净仓越大，趋势单会按此系数放大。", type: "number", ui: "range", min: 0.00, max: 1.00, step: 0.01, risk: "high" }},
+            ],
+          }},
+          {{
+            title: "grid（网格）",
+            description: "与 strategy.yaml 的 grid 一致。",
+            fields: [
               {{ path: "grid.grid_low_percentile", label: "网格低位分位数", hint: "低于该分位视作区间低位。", type: "number", ui: "range", min: 0.05, max: 0.50, step: 0.01, risk: "low" }},
               {{ path: "grid.grid_high_percentile", label: "网格高位分位数", hint: "高于该分位视作区间高位。", type: "number", ui: "range", min: 0.50, max: 0.95, step: 0.01, risk: "low" }},
               {{ path: "grid.disable_within_seconds_before_end", label: "网格尾盘禁用窗口（秒）", hint: "周期剩余秒数小于等于该值时，网格买卖均停用。", type: "number", ui: "range", min: 0, max: 180, step: 1, risk: "medium" }},
             ],
           }},
           {{
-            title: "均值回归与止盈止损",
-            description: "控制回归入场、均值回归退出、止盈比例与止损阈值。",
+            title: "mean_reversion（均值回归）",
+            description: "与 strategy.yaml 的 mean_reversion 一致。",
             fields: [
               {{ path: "mean_reversion.enabled", label: "均值回归使能", hint: "关闭后均值回归买卖规则整体停用。", type: "boolean", risk: "medium" }},
               {{ path: "mean_reversion.up_buy_deviation", label: "Up 买入偏离阈值", hint: "Up 相对均价的偏离度达到该值时考虑买入。", type: "number", ui: "range", min: 0.01, max: 0.50, step: 0.01, risk: "medium" }},
@@ -941,26 +982,53 @@ def build_dashboard_html(
               {{ path: "mean_reversion.mean_reversion_sell_down_deviation", label: "Down 卖出偏离阈值", hint: "均值回归退出的 Down 阈值。", type: "number", ui: "range", min: 0.01, max: 0.60, step: 0.01, risk: "medium" }},
               {{ path: "mean_reversion.deviation_scale", label: "偏离度放大系数", hint: "偏离越大，单量放大越多。", type: "number", ui: "range", min: 1, max: 100, step: 1, risk: "high" }},
               {{ path: "mean_reversion.disable_within_seconds_before_end", label: "均值回归尾盘禁用窗口（秒）", hint: "周期剩余秒数小于等于该值时，均值回归买卖均停用。", type: "number", ui: "range", min: 0, max: 180, step: 1, risk: "medium" }},
+            ],
+          }},
+          {{
+            title: "profit_taking（止盈）",
+            description: "与 strategy.yaml 的 profit_taking 一致。",
+            fields: [
               {{ path: "profit_taking.take_profit_up_deviation", label: "Up 止盈偏离阈值", hint: "触发止盈所需偏离度。", type: "number", ui: "range", min: 0.01, max: 0.60, step: 0.01, risk: "low" }},
               {{ path: "profit_taking.take_profit_down_deviation", label: "Down 止盈偏离阈值", hint: "触发止盈所需偏离度。", type: "number", ui: "range", min: 0.01, max: 0.60, step: 0.01, risk: "low" }},
               {{ path: "profit_taking.take_profit_fraction", label: "止盈卖出比例", hint: "每次止盈卖出持仓的比例。", type: "number", ui: "range", min: 0.05, max: 1.00, step: 0.05, risk: "medium" }},
+            ],
+          }},
+          {{
+            title: "stop_loss（止损）",
+            description: "与 strategy.yaml 的 stop_loss 一致。",
+            fields: [
               {{ path: "stop_loss.stop_loss_cycle_loss", label: "周期止损阈值", hint: "周期亏损超过该值触发止损。", type: "number", ui: "range", min: 1, max: 100, step: 1, risk: "high" }},
               {{ path: "stop_loss.stop_loss_fraction", label: "止损卖出比例", hint: "每次止损卖出持仓的比例。", type: "number", ui: "range", min: 0.05, max: 1.00, step: 0.05, risk: "high" }},
             ],
           }},
           {{
-            title: "尾盘逻辑与执行",
-            description: "最后一分钟留仓、成交成本和规则优先级。",
+            title: "last_minute（尾盘）",
+            description: "与 strategy.yaml 的 last_minute 一致。",
             fields: [
               {{ path: "last_minute.last_minute_min_confidence", label: "尾盘最小信心阈值", hint: "低于该值不做尾盘主动留仓。", type: "number", ui: "range", min: 0.50, max: 0.99, step: 0.01, risk: "high" }},
               {{ path: "last_minute.tail_profit_scale", label: "尾盘盈利放大系数", hint: "周期盈利越高，允许尾盘保留更多仓位。", type: "number", ui: "range", min: 0.00, max: 1.00, step: 0.01, risk: "medium" }},
               {{ path: "last_minute.tail_volatility_scale", label: "尾盘波动放大系数", hint: "波动越高，尾盘目标仓位越大。", type: "number", ui: "range", min: 0, max: 100, step: 1, risk: "medium" }},
               {{ path: "last_minute.max_tail_exposure", label: "尾盘最大敞口", hint: "尾盘留仓的上限。", type: "number", ui: "range", min: 0, max: 200, step: 5, risk: "high" }},
               {{ path: "last_minute.preferred_leg_min_ratio", label: "优势侧最小份额倍率", hint: "浮盈较高一侧持仓需 ≥ 另一侧×该值；1.0 关闭。平局按市价较高侧为优势。", type: "number", ui: "range", min: 1.00, max: 3.00, step: 0.05, risk: "high" }},
+            ],
+          }},
+          {{
+            title: "execution（执行）",
+            description: "与 strategy.yaml 的 execution 一致。",
+            fields: [
               {{ path: "execution.fee_rate", label: "手续费率", hint: "paper broker 使用的模拟手续费。", type: "number", ui: "range", min: 0.000, max: 0.010, step: 0.0005, risk: "medium" }},
               {{ path: "execution.slippage_bps", label: "滑点（bps）", hint: "paper broker 使用的模拟滑点。", type: "number", ui: "select", options: [0, 5, 10, 15, 20, 30], risk: "medium" }},
               {{ path: "execution.min_seconds_between_orders", label: "最小下单间隔（秒）", hint: "两次下单之间的最短时间间隔。", type: "number", ui: "range", min: 0, max: 30, step: 0.5, risk: "medium" }},
               {{ path: "execution.min_same_outcome_price_move_ratio", label: "同方向最小价差比例", hint: "同一 outcome 连续下单前要求的最小价格变化比例。", type: "number", ui: "range", min: 0.00, max: 0.20, step: 0.005, risk: "medium" }},
+              {{ path: "execution.market_limits.use_orderbook_min_order_size", label: "使用盘口最小下单量约束", hint: "优先读取 orderbook.min_order_size。", type: "boolean", risk: "low" }},
+              {{ path: "execution.market_limits.fallback_min_order_size", label: "盘口缺失时最小下单量兜底", hint: "orderbook 未返回最小手数时使用。", type: "number", min: 0, max: 20, step: 0.5, risk: "low" }},
+              {{ path: "execution.market_limits.enforce_sell_min_order_size", label: "卖单也强制盘口最小下单量", hint: "关闭后卖单可更灵活，但实盘拒单风险更高。", type: "boolean", risk: "medium" }},
+            ],
+          }},
+          {{
+            title: "rule_price_feed（规则喂价）",
+            description: "与 strategy.yaml 的 rule_price_feed 一致。",
+            fields: [
               {{ path: "rule_price_feed.last_minute", label: "尾盘规则喂价间隔（秒）", hint: "0 表示每个 tick 使用最新价。", type: "number", ui: "range", min: 0, max: 20, step: 0.5, risk: "low" }},
               {{ path: "rule_price_feed.entries.opening", label: "opening 喂价间隔（秒）", hint: "入场 opening 规则价格缓存间隔。", type: "number", ui: "range", min: 0, max: 20, step: 0.5, risk: "low" }},
               {{ path: "rule_price_feed.entries.hedge", label: "hedge 入场喂价间隔（秒）", hint: "入场 hedge 规则价格缓存间隔。", type: "number", ui: "range", min: 0, max: 20, step: 0.5, risk: "low" }},
@@ -972,6 +1040,12 @@ def build_dashboard_html(
               {{ path: "rule_price_feed.exits.take_profit", label: "take_profit 喂价间隔（秒）", hint: "离场 take_profit 规则价格缓存间隔。", type: "number", ui: "range", min: 0, max: 20, step: 0.5, risk: "low" }},
               {{ path: "rule_price_feed.exits.grid", label: "grid 离场喂价间隔（秒）", hint: "离场 grid 规则价格缓存间隔。", type: "number", ui: "range", min: 0, max: 20, step: 0.5, risk: "low" }},
               {{ path: "rule_price_feed.exits.mean_reversion", label: "均值回归离场喂价间隔（秒）", hint: "离场 mean_reversion 规则价格缓存间隔。", type: "number", ui: "range", min: 0, max: 20, step: 0.5, risk: "low" }},
+            ],
+          }},
+          {{
+            title: "priorities（优先级）",
+            description: "与 strategy.yaml 的 priorities 一致；数值越小越优先。",
+            fields: [
               {{ path: "priorities.risk", label: "风险规则优先级", hint: "数值越小越优先。", type: "number", min: 1, max: 99, step: 1, risk: "low" }},
               {{ path: "priorities.last_minute", label: "尾盘规则优先级", hint: "数值越小越优先。", type: "number", min: 1, max: 99, step: 1, risk: "low" }},
               {{ path: "priorities.opening", label: "开盘规则优先级", hint: "数值越小越优先。", type: "number", min: 1, max: 99, step: 1, risk: "low" }},
@@ -1155,10 +1229,11 @@ def build_dashboard_html(
       const path = configEscapeHtml(resolved.path);
       const hint = resolved.hint ? `<div class="config-field-hint">${{configEscapeHtml(resolved.hint)}}</div>` : "";
       const example = resolved.example ? `<div class="config-field-example">示例：${{configEscapeHtml(resolved.example)}}</div>` : "";
+      const errorSlot = `<div class="config-field-error" data-config-error-for="${{path}}"></div>`;
       const riskBadge = buildRiskBadge(resolved);
       const rangeHint = buildRangeHint(resolved);
       const helpExtra = buildParamHelpExtra(resolved);
-      return `<div class="config-row"><div class="config-label-row"><div class="config-label-inline"><label class="config-label config-label-inline-text" for="cfg-${{path}}">${{label}}</label>${{helpExtra}}</div>${{riskBadge}}</div><div class="config-path">${{path}}</div>${{renderSchemaInput(resolved, value)}}${{rangeHint}}${{hint}}${{example}}</div>`;
+      return `<div class="config-row"><div class="config-label-row"><div class="config-label-inline"><label class="config-label config-label-inline-text" for="cfg-${{path}}">${{label}}</label>${{helpExtra}}</div>${{riskBadge}}</div><div class="config-path">${{path}}</div>${{renderSchemaInput(resolved, value)}}${{errorSlot}}${{rangeHint}}${{hint}}${{example}}</div>`;
     }}
     function renderConfigSection(section, rowsHtml) {{
       return `<section class="config-section"><div class="config-section-title">${{configEscapeHtml(section.title || "")}}</div><div class="config-section-desc">${{configEscapeHtml(section.description || "")}}</div><div class="config-grid">${{rowsHtml}}</div></section>`;
@@ -1229,8 +1304,35 @@ def build_dashboard_html(
       renderConfigForm(configConsoleState.currentName, configConsoleState.currentData);
       setConfigStatus(`已载入 ${{configConsoleState.currentName}}，保存后会直接写回 YAML。`, "ok");
     }}
-    function readConfigForm() {{
+    function clearConfigFieldError(path) {{
+      if (!path) return;
+      document.querySelectorAll("#config-form [data-config-path]").forEach((node) => {{
+        if ((node.getAttribute("data-config-path") || "") !== path) return;
+        node.classList.remove("config-invalid");
+      }});
+      document.querySelectorAll("#config-form [data-config-error-for]").forEach((node) => {{
+        if ((node.getAttribute("data-config-error-for") || "") !== path) return;
+        node.textContent = "";
+      }});
+    }}
+    function clearAllConfigFieldErrors() {{
+      document.querySelectorAll("#config-form .config-invalid").forEach((node) => node.classList.remove("config-invalid"));
+      document.querySelectorAll("#config-form [data-config-error-for]").forEach((node) => (node.textContent = ""));
+    }}
+    function setConfigFieldError(path, message) {{
+      if (!path) return;
+      document.querySelectorAll("#config-form [data-config-path]").forEach((node) => {{
+        if ((node.getAttribute("data-config-path") || "") !== path) return;
+        node.classList.add("config-invalid");
+      }});
+      document.querySelectorAll("#config-form [data-config-error-for]").forEach((node) => {{
+        if ((node.getAttribute("data-config-error-for") || "") !== path) return;
+        node.textContent = message || "";
+      }});
+    }}
+    function readConfigFormWithValidation() {{
       const out = {{}};
+      const errors = [];
       document.querySelectorAll("#config-form [data-config-path]").forEach((node) => {{
         const path = node.getAttribute("data-config-path") || "";
         const kind = node.getAttribute("data-config-kind") || "string";
@@ -1238,15 +1340,31 @@ def build_dashboard_html(
         if (kind === "boolean") {{
           value = Boolean(node.checked);
         }} else if (kind === "number") {{
-          value = Number(node.value);
+          const raw = String(node.value ?? "");
+          if (!raw.trim()) {{
+            errors.push({{ path, message: "数值不能为空" }});
+            return;
+          }}
+          const parsed = Number(raw);
+          if (!Number.isFinite(parsed)) {{
+            errors.push({{ path, message: `数值非法: ${{raw}}` }});
+            return;
+          }}
+          value = parsed;
         }} else if (kind === "json") {{
-          value = JSON.parse(node.value || "null");
+          try {{
+            value = JSON.parse(node.value || "null");
+          }} catch (error) {{
+            const detail = error && error.message ? error.message : String(error);
+            errors.push({{ path, message: `JSON 解析失败: ${{detail}}` }});
+            return;
+          }}
         }} else {{
           value = node.value;
         }}
         configSetByPath(out, path, value);
       }});
-      return out;
+      return {{ data: out, errors }};
     }}
     async function saveConfig() {{
       if (!configConsoleState.currentName) {{
@@ -1254,7 +1372,20 @@ def build_dashboard_html(
         return;
       }}
       try {{
-        const data = readConfigForm();
+        clearAllConfigFieldErrors();
+        const result = readConfigFormWithValidation();
+        const data = result.data;
+        const errors = result.errors || [];
+        if (errors.length) {{
+          errors.slice(0, 30).forEach((item) => setConfigFieldError(item.path, item.message));
+          const summary = errors
+            .slice(0, 8)
+            .map((item) => `- ${{item.path}}：${{item.message}}`)
+            .join("\\n");
+          const more = errors.length > 8 ? `\\n... 另有 ${{errors.length - 8}} 项错误` : "";
+          setConfigStatus(`保存失败：表单存在 ${{errors.length}} 项错误，请先修复。\\n${{summary}}${{more}}`, "error");
+          return;
+        }}
         await fetchConfigJson(`/api/config/${{configConsoleState.currentName}}`, {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
@@ -1545,7 +1676,14 @@ def build_dashboard_html(
             if (status && status.running) {{
               setLauncherStatus(`正在运行：${{status.profile_title || status.profile_name || ""}}`, "ok");
             }} else if (launcherState.runningSnapshot === false) {{
-              setLauncherStatus("当前无任务运行。", "");
+              if (status && status.last_exit_code !== null && status.last_exit_code !== undefined) {{
+                setLauncherStatus(
+                  `当前无任务运行，上次退出码: ${{status.last_exit_code}}`,
+                  status.last_exit_code === 0 ? "ok" : "error",
+                );
+              }} else {{
+                setLauncherStatus("当前无任务运行。", "");
+              }}
             }}
           }} catch (error) {{
           }}
@@ -1563,15 +1701,27 @@ def build_dashboard_html(
         form.addEventListener("input", function(event) {{
           const target = event.target;
           if (!target) return;
+          const configPath = target.getAttribute && target.getAttribute("data-config-path");
+          if (configPath) {{
+            clearConfigFieldError(configPath);
+          }}
           const numberId = target.getAttribute("data-sync-number");
           if (numberId) {{
             const numberNode = document.getElementById(numberId);
-            if (numberNode) numberNode.value = target.value;
+            if (numberNode) {{
+              numberNode.value = target.value;
+              const linkedPath = numberNode.getAttribute("data-config-path") || "";
+              if (linkedPath) clearConfigFieldError(linkedPath);
+            }}
           }}
           const rangeId = target.getAttribute("data-sync-range");
           if (rangeId) {{
             const rangeNode = document.getElementById(rangeId);
-            if (rangeNode) rangeNode.value = target.value;
+            if (rangeNode) {{
+              rangeNode.value = target.value;
+              const linkedPath = target.getAttribute("data-config-path") || "";
+              if (linkedPath) clearConfigFieldError(linkedPath);
+            }}
           }}
         }});
       }}

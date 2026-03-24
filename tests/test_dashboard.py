@@ -73,8 +73,12 @@ def test_generate_dashboard_bundle_writes_expected_files(tmp_path: Path) -> None
     assert "dashboard_state.js" in html_text
     assert "config-file-select" in html_text
     assert "/api/configs" in html_text
-    assert "资金与本金" in html_text
-    assert "周期与节奏" in html_text
+    assert "cycle（周期）" in html_text
+    assert "capital（资金）" in html_text
+    assert "priorities（优先级）" in html_text
+    assert "readConfigFormWithValidation" in html_text
+    assert "config-field-error" in html_text
+    assert "config-invalid" in html_text
     assert "Up / Down 实时价格曲线" in html_text
     assert "运行控制台" in html_text
     assert "launcher-profiles" in html_text

@@ -9,10 +9,15 @@ opening_entry:
   min_range_width: 0.02
   infer_missing_with_binary_complement: true
 order_sizing:
-  base_order_size: 5.0
-  min_order_size: 5.0
-  max_order_size: 45.0
-  volatility_order_scale: 5
+  buy:
+    base_order_size: 5.0
+    min_order_size: 5.0
+    max_order_size: 45.0
+    volatility_order_scale: 5
+  sell:
+    min_order_size: 5.0
+    max_order_size: 45.0
+    allow_close_below_min_order_size: true
 capital:
   max_cash_utilization: 0.85
   min_cash_buffer: 12.0
@@ -53,6 +58,10 @@ execution:
   slippage_bps: 5
   min_seconds_between_orders: 2.0
   min_same_outcome_price_move_ratio: 0.03
+  market_limits:
+    use_orderbook_min_order_size: true
+    fallback_min_order_size: 5.0
+    enforce_sell_min_order_size: true
 rule_price_feed:
   last_minute: 4
   entries:

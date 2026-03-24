@@ -31,9 +31,57 @@ class RiskDecision:
     reason: str = ""
 
 
+def _cfg_float(config: StrategyConfig, *paths: str, default: float) -> float:
+    for path in paths:
+        value = config.get(path, None)
+        if value is not None:
+            return float(value)
+    return default
+
+
+def _resolve_market_min_order_size(intent: OrderIntent, config: StrategyConfig) -> float:
+    use_orderbook_min = bool(config.get("execution.market_limits.use_orderbook_min_order_size", True))
+    if not use_orderbook_min:
+        return 0.0
+    raw_market_min = intent.metadata.get("market_min_order_size")
+    if raw_market_min is not None:
+        try:
+            return max(0.0, float(raw_market_min))
+        except (TypeError, ValueError):
+            pass
+    return max(0.0, float(config.get("execution.market_limits.fallback_min_order_size", 0.0)))
+
+
 def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: StrategyConfig) -> RiskDecision:
-    min_order = float(config.get("order_sizing.min_order_size", 2.0))
-    max_order = float(config.get("order_sizing.max_order_size", 60.0))
+    buy_min_order = _cfg_float(
+        config,
+        "order_sizing.buy.min_order_size",
+        "order_sizing.min_order_size",
+        default=2.0,
+    )
+    buy_max_order = _cfg_float(
+        config,
+        "order_sizing.buy.max_order_size",
+        "order_sizing.max_order_size",
+        default=60.0,
+    )
+    sell_min_order = _cfg_float(
+        config,
+        "order_sizing.sell.min_order_size",
+        default=buy_min_order,
+    )
+    sell_max_order = _cfg_float(
+        config,
+        "order_sizing.sell.max_order_size",
+        default=buy_max_order,
+    )
+    allow_close_below_sell_min = bool(
+        config.get("order_sizing.sell.allow_close_below_min_order_size", True)
+    )
+    market_min_order = _resolve_market_min_order_size(intent, config)
+    enforce_sell_market_min = bool(config.get("execution.market_limits.enforce_sell_min_order_size", True))
+    effective_buy_min_order = max(buy_min_order, market_min_order)
+    effective_sell_min_order = max(sell_min_order, market_min_order if enforce_sell_market_min else 0.0)
     max_exposure = float(
         config.get(
             "exposure.max_abs_exposure_value",
@@ -45,10 +93,10 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
     slippage_bps = float(config.get("execution.slippage_bps", 10.0))
     max_cash_utilization = float(config.get("capital.max_cash_utilization", 0.95))
     min_cash_buffer = float(config.get("capital.min_cash_buffer", 25.0))
-
-    # Polymarket 的最小份数约束主要作用于买单；卖单需要允许小于最小值以便减仓/平仓。
-    effective_min_order = min_order if intent.action == "buy" else 0.0
-    clipped = intent.clipped(effective_min_order, max_order)
+    if intent.action == "buy":
+        clipped = intent.clipped(effective_buy_min_order, buy_max_order)
+    else:
+        clipped = intent.clipped(effective_sell_min_order, sell_max_order)
     if clipped is None:
         return RiskDecision(False, None, "订单规模低于最小阈值")
 
@@ -97,7 +145,7 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
         unit_cost = unit_price * (1.0 + fee_rate)
         affordable_shares = spendable_cash / unit_cost if unit_cost > 0 else 0.0
 
-        if affordable_shares < min_order:
+        if affordable_shares < effective_buy_min_order:
             return RiskDecision(False, None, "可用现金不足，无法满足最小下单量")
 
         if affordable_shares < clipped.shares:
@@ -119,5 +167,15 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
         if available_shares < clipped.shares:
             clipped = replace(clipped, shares=available_shares)
             clipped.metadata["pending_sell_limited"] = True
+        if (
+            clipped.shares + 1e-12 < effective_sell_min_order
+            and available_shares > 0
+            and allow_close_below_sell_min
+            and available_shares + 1e-12 <= effective_sell_min_order
+        ):
+            clipped = replace(clipped, shares=available_shares)
+            clipped.metadata["sell_below_min_forced_close"] = True
+        elif clipped.shares + 1e-12 < effective_sell_min_order:
+            return RiskDecision(False, None, "卖单规模低于最小下单量")
 
     return RiskDecision(True, clipped, "")

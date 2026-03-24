@@ -29,6 +29,7 @@ class ExecutionPlan:
     limit_price: float
     deepest_price: float
     tick_size: float
+    min_order_size: float
 
 
 @dataclass(slots=True)
@@ -128,6 +129,7 @@ def _estimate_fok_plan(
         limit_price=limit_price,
         deepest_price=deepest,
         tick_size=tick_size,
+        min_order_size=float(book.min_order_size or 0.0),
     )
 
 
@@ -141,6 +143,9 @@ class PolymarketBroker:
     confirmation_poll_interval_seconds: float = 0.5
     confirmation_timeout_seconds: float = 8.0
     confirmation_grace_seconds: float = 0.25
+    use_orderbook_min_order_size: bool = True
+    market_min_order_size_fallback: float = 5.0
+    enforce_sell_min_order_size: bool = True
     submitted_orders: list[dict[str, Any]] = field(default_factory=list)
     pending_orders: dict[str, PendingOrder] = field(default_factory=dict)
     last_confirmation_poll_at: datetime | None = None
@@ -257,6 +262,11 @@ class PolymarketBroker:
     def execute(self, intent: OrderIntent, timestamp: datetime) -> ExecutionResult:
         token_id = self._resolve_token_id(intent)
         book = self.client.get_order_book(token_id)
+        tick_size = float(book.tick_size or "0.01")
+        raw_market_min = float(book.min_order_size or self.market_min_order_size_fallback)
+        market_min_order_size = max(0.0, raw_market_min if self.use_orderbook_min_order_size else 0.0)
+        enforce_min_order_size = intent.action == "buy" or self.enforce_sell_min_order_size
+        required_min_order_size = market_min_order_size if enforce_min_order_size else 0.0
         plan = _estimate_fok_plan(
             book,
             action=intent.action,
@@ -272,11 +282,31 @@ class PolymarketBroker:
             "requested_shares": float(intent.shares),
             "reference_price": float(intent.reference_price),
             "token_id": token_id,
+            "market_tick_size": tick_size,
+            "market_min_order_size": market_min_order_size,
+            "required_min_order_size": required_min_order_size,
         }
+        if required_min_order_size > 0 and float(intent.shares) + 1e-9 < required_min_order_size:
+            record["status"] = "invalid_amount"
+            record["status_reason"] = "below_market_min_order_size"
+            self.submitted_orders.append(record)
+            return ExecutionResult(
+                status="invalid_amount",
+                reason=f"下单份额低于市场最小下单量 {required_min_order_size:g}",
+            )
         if plan is None:
             record["status"] = "no_liquidity"
             self.submitted_orders.append(record)
             return ExecutionResult(status="no_liquidity", reason="订单簿深度不足")
+        if required_min_order_size > 0 and plan.shares + 1e-9 < required_min_order_size:
+            record["status"] = "invalid_amount"
+            record["status_reason"] = "normalized_shares_below_market_min_order_size"
+            record["execution_plan"] = asdict(plan)
+            self.submitted_orders.append(record)
+            return ExecutionResult(
+                status="invalid_amount",
+                reason=f"归一化后份额低于市场最小下单量 {required_min_order_size:g}",
+            )
 
         market_amount = _normalize_market_amount(intent.action, plan.shares, plan.limit_price)
         if market_amount <= 0:

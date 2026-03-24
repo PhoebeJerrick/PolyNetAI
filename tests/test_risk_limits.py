@@ -170,6 +170,75 @@ def test_apply_risk_limits_allows_small_sells_below_buy_minimum() -> None:
     assert decision.intent.shares == 2.5
 
 
+def test_apply_risk_limits_uses_market_min_order_size_for_buy() -> None:
+    config = StrategyConfig(
+        raw={
+            "order_sizing": {"min_order_size": 2.0, "max_order_size": 60.0},
+            "exposure": {"max_abs_exposure_value": 200.0, "max_strategy_trades_per_cycle": 12},
+            "execution": {
+                "fee_rate": 0.002,
+                "slippage_bps": 10,
+                "market_limits": {"use_orderbook_min_order_size": True},
+            },
+            "capital": {"max_cash_utilization": 0.95, "min_cash_buffer": 0.0},
+        }
+    )
+    intent = OrderIntent(
+        market_id="BTC",
+        cycle_id="cycle-a",
+        outcome="up",
+        action="buy",
+        shares=3.0,
+        reference_price=0.5,
+        category="grid",
+        reason="test",
+        priority=10,
+        metadata={"account_cash": 100.0, "market_min_order_size": 5.0},
+    )
+
+    decision = apply_risk_limits(build_features(), intent, config)
+
+    assert decision.accepted
+    assert decision.intent is not None
+    assert decision.intent.shares == 5.0
+
+
+def test_apply_risk_limits_allows_forced_close_below_sell_min() -> None:
+    config = StrategyConfig(
+        raw={
+            "order_sizing": {
+                "min_order_size": 2.0,
+                "max_order_size": 60.0,
+                "sell": {"min_order_size": 5.0, "max_order_size": 60.0, "allow_close_below_min_order_size": True},
+            },
+            "exposure": {"max_abs_exposure_value": 200.0, "max_strategy_trades_per_cycle": 12},
+            "execution": {"fee_rate": 0.002, "slippage_bps": 10},
+            "capital": {"max_cash_utilization": 0.95, "min_cash_buffer": 0.0},
+        }
+    )
+    features = build_features()
+    features.up_held = 3.0
+    intent = OrderIntent(
+        market_id="BTC",
+        cycle_id="cycle-a",
+        outcome="up",
+        action="sell",
+        shares=2.0,
+        reference_price=0.5,
+        category="stop_loss",
+        reason="test",
+        priority=10,
+        metadata={},
+    )
+
+    decision = apply_risk_limits(features, intent, config)
+
+    assert decision.accepted
+    assert decision.intent is not None
+    assert decision.intent.shares == 3.0
+    assert decision.intent.metadata["sell_below_min_forced_close"] is True
+
+
 def test_apply_risk_limits_uses_available_cash_over_total_cash() -> None:
     intent = OrderIntent(
         market_id="BTC",

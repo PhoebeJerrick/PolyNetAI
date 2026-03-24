@@ -173,7 +173,9 @@
 ## 风控硬约束
 
 - `abs(net_position_value) <= max_abs_exposure_value`
-- 单笔下单量位于 `[min_order_size, max_order_size]`
+- 买单下单量位于 `[order_sizing.buy.min_order_size, order_sizing.buy.max_order_size]`
+- 卖单下单量位于 `[order_sizing.sell.min_order_size, order_sizing.sell.max_order_size]`（当仅剩碎仓且允许强平时，可低于最小值）
+- 若配置 `execution.market_limits.use_orderbook_min_order_size=true`，则 orderbook 的 `min_order_size` 会作为市场硬约束（可选对卖单也强制）
 - 单周期策略下单次数不超过 `max_strategy_trades_per_cycle`
 - 若下单后风险仍超限，则该订单直接拦截
 

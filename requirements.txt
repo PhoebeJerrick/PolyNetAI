@@ -5,6 +5,7 @@
 # ---- 运行时依赖（与 pyproject.toml [project.dependencies] 一致）----
 openpyxl>=3.1
 pandas>=2.2
+plotly>=5.0
 PyYAML>=6.0
 websocket-client>=1.8
 requests>=2.28.0

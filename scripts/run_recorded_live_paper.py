@@ -15,11 +15,20 @@ if str(SRC) not in sys.path:
 from polynet_ai.adapters.trade_event_store import load_recorded_trade_events
 from polynet_ai.engine.live import LivePaperRunner, LiveRunnerResult, export_live_result
 from polynet_ai.engine.replay import ReplayEngine
-from scripts.build_batch_replay_performance_report import (
-    _cleanup_batch_replay_markdown,
-    build_performance_report_zh,
-    write_batch_trade_process_zh,
-)
+try:
+    # Preferred when running as module from project root.
+    from scripts.build_batch_replay_performance_report import (
+        _cleanup_batch_replay_markdown,
+        build_performance_report_zh,
+        write_batch_trade_process_zh,
+    )
+except ModuleNotFoundError:
+    # Fallback when running as a script file (sys.path[0] == scripts/).
+    from build_batch_replay_performance_report import (
+        _cleanup_batch_replay_markdown,
+        build_performance_report_zh,
+        write_batch_trade_process_zh,
+    )
 
 
 def parse_args() -> argparse.Namespace:
