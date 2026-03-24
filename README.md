@@ -69,8 +69,10 @@ PolyNetAI/
 
 ### 实时与复盘
 
+- `scripts/run_recorded_live_paper.py`
+  - 本地 `record_job/<cycle_slug>/ws_trade_events.ndjson` 的准实时 paper runner（对应 dashboard 的“模拟下单测试”）
 - `scripts/run_live_paper.py`
-  - 本地历史数据的准实时 paper runner
+  - 本地 Excel 历史数据的准实时 paper runner（保留旧口径，便于对照）
 - `scripts/run_polymarket_live_paper.py`
   - 接 Polymarket 公开实时 websocket 做 paper trading
 - `scripts/capture_polymarket_ws_events.py`
@@ -132,7 +134,13 @@ python scripts/run_parameter_sweep.py --input data/raw/polymarket_tracker_collec
 python scripts/run_auto_optimize.py --input data/raw/polymarket_tracker_collection.xlsx --config configs/strategy.yaml --optimize configs/optimize.yaml --output-dir artifacts/optimization/optimize_outputs
 ```
 
-### 6. 本地历史数据准实时回放
+### 6. 本地事件流准实时回放（模拟下单测试默认口径）
+
+```bash
+python scripts/run_recorded_live_paper.py --input-dir artifacts/live/record_job --cycle-glob "btc-updown-5m-*" --config configs/strategy.yaml --output-dir artifacts/live/record_job/batch_replay_outputs --pace-factor 20 --status-every 100 --dashboard-refresh-seconds 1
+```
+
+若你仍想按旧方式从本地 Excel 准实时回放，可继续使用：
 
 ```bash
 python scripts/run_live_paper.py --input data/raw/polymarket_tracker_collection.xlsx --sheet BTC --config configs/strategy.yaml --output-dir artifacts/live/live_outputs_btc --pace-factor 20 --status-every 100
@@ -318,8 +326,8 @@ python scripts/batch_replay_recorded_trade_events.py --input-dir artifacts/live/
 
 默认只会在 `batch_replay_outputs` 下生成 Excel（不在各周期子目录落盘中间件）：
 
-- `batch_replay_performance_report_zh.xlsx`（总绩效多工作表；含固定命名的 `BTC` 累计持仓与盈亏表，与 `analyze_polymarket_tracker.py` / `polymarket_tracker_collection_with_accumulated_shares_v5.xlsx` 同源格式）
-- `batch_replay_trade_process_zh.xlsx`（元数据、周期快照、决策流水；与总绩效配套）
+- `batch_replay_performance_report_zh_YYYYMMDD.xlsx`（总绩效多工作表；含固定命名的 `BTC` 累计持仓与盈亏表，与 `analyze_polymarket_tracker.py` / `polymarket_tracker_collection_with_accumulated_shares_v5.xlsx` 同源格式）
+- `batch_replay_trade_process_zh_YYYYMMDD.xlsx`（元数据、周期快照、决策流水；与总绩效配套）
 
 ### 11. 生成批量回放总绩效报告
 
@@ -337,8 +345,8 @@ python scripts/build_batch_replay_performance_report.py --input-dir artifacts/li
 
 默认会输出（与批量回放脚本一致）：
 
-- `batch_replay_performance_report_zh.xlsx`
-- `batch_replay_trade_process_zh.xlsx`
+- `batch_replay_performance_report_zh_YYYYMMDD.xlsx`
+- `batch_replay_trade_process_zh_YYYYMMDD.xlsx`
 
 若目录里仍有旧的「每周期 `cycles.csv` / `decisions.csv` / `metrics.csv`」结构，本脚本也会读取并生成上述 Excel。若目录里曾存在旧版 Markdown 产物，生成完成后会尝试删除 `batch_replay_performance_report_zh.md` 与 `batch_replay_trade_process_zh.md`，以保持输出目录仅保留 Excel。
 
@@ -357,7 +365,7 @@ python scripts/build_batch_replay_performance_report.py --input-dir artifacts/li
 ### 12. Dashboard 控制台
 
 ```bash
-python scripts/run_dashboard_console.py --dashboard-dir artifacts/live/polymarket_btc_10cycles
+python scripts/run_dashboard_console.py --dashboard-dir artifacts/live/record_job/batch_replay_outputs
 ```
 
 浏览器打开：
@@ -369,7 +377,7 @@ http://127.0.0.1:8765/dashboard.html
 ### 13. 补生成 dashboard
 
 ```bash
-python scripts/run_dashboard_report.py --input-dir artifacts/live/live_outputs_btc --title "BTC Live Dashboard"
+python scripts/run_dashboard_report.py --input-dir artifacts/live/trial_022 --output-dir artifacts/live/record_job/batch_replay_outputs --title "BTC Trial 022 Dashboard"
 ```
 
 ### 14. 原始 Excel 分析
@@ -406,7 +414,7 @@ python analyze_polymarket_tracker.py --input data/raw/polymarket_tracker_collect
 ### `batch_replay_recorded_trade_events.py`
 
 - 会扫描抓取目录下所有 `<cycle_slug>/ws_trade_events.ndjson`
-- 在内存中完成回放，只在 `batch_replay_outputs` 写出：`batch_replay_performance_report_zh.xlsx` 与 `batch_replay_trade_process_zh.xlsx`（并清理遗留的同名 `.md` 文件）
+- 在内存中完成回放，只在 `batch_replay_outputs` 写出：`batch_replay_performance_report_zh_YYYYMMDD.xlsx` 与 `batch_replay_trade_process_zh_YYYYMMDD.xlsx`（并清理遗留的同名 `.md` 文件）
 - 适合抓完 5 个、10 个或更多周期后，直接批量评估当前代码的离线盈亏能力
 
 ### `build_batch_replay_performance_report.py`

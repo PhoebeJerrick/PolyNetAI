@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -64,13 +66,17 @@ def _resolve_batch_replay_dir(input_dir: str | Path) -> Path:
     if not path.exists():
         raise FileNotFoundError(f"未找到输入目录: {path}")
     nested = path / "batch_replay_outputs"
-    report_markers = (
-        "batch_replay_summary.csv",
-        "batch_replay_performance_report_zh.xlsx",
+    report_markers = ("batch_replay_summary.csv",)
+    report_globs = ("batch_replay_performance_report_zh*.xlsx",)
+    has_report_in_path = any((path / name).exists() for name in report_markers) or any(
+        next(path.glob(pattern), None) is not None for pattern in report_globs
     )
-    if any((path / name).exists() for name in report_markers):
+    has_report_in_nested = any((nested / name).exists() for name in report_markers) or any(
+        next(nested.glob(pattern), None) is not None for pattern in report_globs
+    )
+    if has_report_in_path:
         return path
-    if any((nested / name).exists() for name in report_markers):
+    if has_report_in_nested:
         return nested
     if nested.exists():
         return nested
@@ -177,6 +183,118 @@ def _value_counts_frame(series: pd.Series, name: str) -> pd.DataFrame:
         .reset_index(name="count")
     )
     return counts
+
+
+def _infer_cycle_length_seconds(cycle_slug: object) -> int:
+    text = str(cycle_slug or "").lower()
+    m = re.search(r"-(\d+)m-", text)
+    if m:
+        return int(m.group(1)) * 60
+    return 300
+
+
+def summarize_tail_window_executions(
+    decision_df: pd.DataFrame,
+    cycle_df: pd.DataFrame,
+    *,
+    last_minute_seconds: int = 30,
+) -> tuple[pd.DataFrame, list[tuple[str, object]]]:
+    """
+    按周期汇总「周期末 last_minute_seconds 内」的已执行成交：笔数、现金流净额（不含结算）、手续费。
+    周期长度从 cycle_slug 中的 ``-Xm-`` 推断（如 5m -> 300s），否则 300s。
+    """
+    empty_overview: list[tuple[str, object]] = [
+        (
+            "尾盘窗口说明",
+            f"周期末最后 {last_minute_seconds}s（周期长度从 slug 中 -Xm- 推断，否则 300s）",
+        ),
+        ("尾盘已执行成交笔数(合计)", 0),
+        ("尾盘成交现金流净额(不含结算)", 0.0),
+        ("尾盘手续费合计", 0.0),
+    ]
+    if decision_df.empty or "cycle_slug" not in decision_df.columns:
+        return pd.DataFrame(), empty_overview
+
+    full = decision_df.copy()
+    full["timestamp"] = pd.to_datetime(full.get("timestamp"), errors="coerce", utc=True)
+    if "market_id" not in full.columns or full["market_id"].isna().all():
+        if not cycle_df.empty and "cycle_slug" in full.columns and "market_id" in cycle_df.columns:
+            full = full.merge(
+                cycle_df.drop_duplicates(subset=["cycle_slug"], keep="first")[["cycle_slug", "market_id"]],
+                on="cycle_slug",
+                how="left",
+            )
+    full["market_id"] = full.get("market_id", pd.Series(dtype=object)).fillna("").astype(str)
+    if "cycle_id" in full.columns:
+        full["_pid"] = full["cycle_id"].fillna(full.get("cycle_slug", "")).astype(str)
+    else:
+        full["_pid"] = full.get("cycle_slug", pd.Series(dtype=object)).fillna("").astype(str)
+    starts = full.groupby(["market_id", "_pid"], dropna=False)["timestamp"].min().reset_index(name="_cycle_start")
+
+    dec = decision_df.copy()
+    if "executed" in dec.columns:
+        dec = dec[dec["executed"].fillna(False).astype(bool)]
+    if dec.empty:
+        return pd.DataFrame(), empty_overview
+
+    if "market_id" not in dec.columns or dec["market_id"].isna().all():
+        if not cycle_df.empty and "cycle_slug" in dec.columns and "market_id" in cycle_df.columns:
+            dec = dec.merge(
+                cycle_df.drop_duplicates(subset=["cycle_slug"], keep="first")[["cycle_slug", "market_id"]],
+                on="cycle_slug",
+                how="left",
+            )
+    dec["market_id"] = dec.get("market_id", pd.Series(dtype=object)).fillna("").astype(str)
+    if "cycle_id" in dec.columns:
+        dec["_pid"] = dec["cycle_id"].fillna(dec.get("cycle_slug", "")).astype(str)
+    else:
+        dec["_pid"] = dec.get("cycle_slug", pd.Series(dtype=object)).fillna("").astype(str)
+    dec["timestamp"] = pd.to_datetime(dec.get("timestamp"), errors="coerce", utc=True)
+    dec = dec.merge(starts, on=["market_id", "_pid"], how="left")
+    dec = dec[dec["_cycle_start"].notna() & dec["timestamp"].notna()]
+    if dec.empty:
+        return pd.DataFrame(), empty_overview
+
+    dec["_cycle_len"] = dec["cycle_slug"].map(_infer_cycle_length_seconds)
+    dec["_elapsed_sec"] = (dec["timestamp"] - dec["_cycle_start"]).dt.total_seconds()
+    tail_cut = dec["_cycle_len"] - int(last_minute_seconds)
+    tail = dec[dec["_elapsed_sec"] >= tail_cut].copy()
+    if tail.empty:
+        return pd.DataFrame(), empty_overview
+
+    sh = pd.to_numeric(tail["selected_shares"], errors="coerce").fillna(0.0)
+    px = pd.to_numeric(tail["fill_price"], errors="coerce").fillna(0.0)
+    fee = pd.to_numeric(tail.get("fill_fee", 0.0), errors="coerce").fillna(0.0)
+    act = tail["selected_action"].fillna("").astype(str).str.lower()
+    cash = pd.Series(0.0, index=tail.index, dtype=float)
+    m_buy = act == "buy"
+    m_sell = act == "sell"
+    cash.loc[m_buy] = -(sh[m_buy] * px[m_buy] + fee[m_buy])
+    cash.loc[m_sell] = sh[m_sell] * px[m_sell] - fee[m_sell]
+    tail["_cash_flow"] = cash
+
+    per_cycle = (
+        tail.groupby("cycle_slug", dropna=False)
+        .agg(
+            tail_executed_trades=("selected_shares", "size"),
+            tail_cash_flow_net=("_cash_flow", "sum"),
+            tail_fees=("fill_fee", lambda s: pd.to_numeric(s, errors="coerce").fillna(0.0).sum()),
+        )
+        .reset_index()
+        .sort_values("cycle_slug", kind="mergesort")
+        .reset_index(drop=True)
+    )
+
+    overview_rows: list[tuple[str, object]] = [
+        (
+            "尾盘窗口说明",
+            f"周期末最后 {last_minute_seconds}s（周期长度从 slug 中 -Xm- 推断，否则 300s）",
+        ),
+        ("尾盘已执行成交笔数(合计)", int(len(tail))),
+        ("尾盘成交现金流净额(不含结算)", float(tail["_cash_flow"].sum())),
+        ("尾盘手续费合计", float(pd.to_numeric(tail["fill_fee"], errors="coerce").fillna(0.0).sum())),
+    ]
+    return per_cycle, overview_rows
 
 
 def _tracker_compute_args() -> argparse.Namespace:
@@ -405,6 +523,8 @@ def _write_performance_report_xlsx(
     enriched_summary: pd.DataFrame,
     cycle_df: pd.DataFrame,
     decision_df: pd.DataFrame,
+    tail_per_cycle_df: pd.DataFrame | None = None,
+    tail_overview_rows: list[tuple[str, object]] | None = None,
 ) -> None:
     overview_rows: list[tuple[str, object]] = [
         ("回放目录", str(shown_dir.as_posix())),
@@ -456,6 +576,11 @@ def _write_performance_report_xlsx(
         )
 
     overview_df = pd.DataFrame(overview_rows, columns=["项目", "值"])
+    if tail_overview_rows:
+        overview_df = pd.concat(
+            [overview_df, pd.DataFrame(tail_overview_rows, columns=["项目", "值"])],
+            ignore_index=True,
+        )
 
     xlsx_path.parent.mkdir(parents=True, exist_ok=True)
     tracker_raw = _batch_replay_decisions_to_tracker_input(cycle_df, decision_df)
@@ -465,9 +590,15 @@ def _write_performance_report_xlsx(
         direction_df.to_excel(writer, sheet_name="执行方向分布", index=False)
         winner_df.to_excel(writer, sheet_name="周期赢家分布", index=False)
         net_direction_df.to_excel(writer, sheet_name="周期净方向分布", index=False)
+        if tail_per_cycle_df is not None and not tail_per_cycle_df.empty:
+            tail_per_cycle_df.to_excel(writer, sheet_name="尾盘窗口成交汇总", index=False)
         _append_tracker_style_sheet(writer, tracker_raw, cycle_df)
 
     _finalize_xlsx_workbook(xlsx_path, skip_sheet_titles=frozenset({TRACKER_STYLE_SHEET}))
+
+
+def _today_suffix() -> str:
+    return datetime.now().strftime("%Y%m%d")
 
 
 def build_performance_report_zh(
@@ -507,8 +638,12 @@ def build_performance_report_zh(
             first_start_cash = implied_start_cash.dropna().iloc[0] if implied_start_cash.notna().any() else 0.0
             enriched_summary["estimated_cash_from_cum"] = first_start_cash + enriched_summary["cumulative_profit"]
 
-    report_xlsx = output_path / "batch_replay_performance_report_zh.xlsx"
+    report_xlsx = output_path / f"batch_replay_performance_report_zh_{_today_suffix()}.xlsx"
     shown_dir = display_batch_dir or resolved_batch_dir
+
+    tail_per_cycle, tail_overview = summarize_tail_window_executions(
+        decision_df, cycle_df, last_minute_seconds=30
+    )
 
     _write_performance_report_xlsx(
         report_xlsx,
@@ -528,6 +663,8 @@ def build_performance_report_zh(
         enriched_summary=enriched_summary,
         cycle_df=cycle_df,
         decision_df=decision_df,
+        tail_per_cycle_df=tail_per_cycle,
+        tail_overview_rows=tail_overview,
     )
 
     return report_xlsx
@@ -541,7 +678,7 @@ def _write_batch_trade_process_xlsx(
     output_path: Path,
 ) -> Path:
     """交易过程 Excel：元数据、周期快照、决策流水。"""
-    xlsx_path = output_path / "batch_replay_trade_process_zh.xlsx"
+    xlsx_path = output_path / f"batch_replay_trade_process_zh_{_today_suffix()}.xlsx"
     meta_df = pd.DataFrame([("数据目录", input_dir.as_posix())], columns=["项", "值"])
     snap_df = cycle_df.copy() if not cycle_df.empty else pd.DataFrame()
 
@@ -626,9 +763,16 @@ def build_report(batch_dir: str | Path, output_dir: str | Path | None = None) ->
     summary_df = _load_summary(resolved_batch_dir, cycle_dirs)
     cycle_df, decision_df = _load_cycle_frames(cycle_dirs)
     write_batch_trade_process_zh(input_dir=resolved_batch_dir, cycle_df=cycle_df, decision_df=decision_df, output_path=output_path)
-    build_performance_report_zh(resolved_batch_dir, summary_df, cycle_df, decision_df, output_path, display_batch_dir=resolved_batch_dir)
+    report_path = build_performance_report_zh(
+        resolved_batch_dir,
+        summary_df,
+        cycle_df,
+        decision_df,
+        output_path,
+        display_batch_dir=resolved_batch_dir,
+    )
     _cleanup_batch_replay_markdown(output_path)
-    return output_path / "batch_replay_performance_report_zh.xlsx"
+    return report_path
 
 
 def main() -> int:

@@ -206,6 +206,13 @@ def _load_manifest_rows(output_dir: Path) -> list[dict[str, object]]:
     return []
 
 
+def _latest_matching_file(directory: Path, pattern: str) -> Path | None:
+    matches = [path for path in directory.glob(pattern) if path.is_file()]
+    if not matches:
+        return None
+    return max(matches, key=lambda p: p.stat().st_mtime)
+
+
 def _print_status(args: argparse.Namespace) -> int:
     output_dir = Path(args.output_dir)
     capture_pid_path = output_dir / "capture.pid"
@@ -247,10 +254,10 @@ def _print_status(args: argparse.Namespace) -> int:
     batch_dir = output_dir / "batch_replay_outputs"
     summary_csv = batch_dir / "batch_replay_summary.csv"
     report_md = batch_dir / "batch_replay_performance_report_zh.md"
-    report_xlsx = batch_dir / "batch_replay_performance_report_zh.xlsx"
+    report_xlsx = _latest_matching_file(batch_dir, "batch_replay_performance_report_zh*.xlsx")
     trade_md = batch_dir / "batch_replay_trade_process_zh.md"
-    trade_xlsx = batch_dir / "batch_replay_trade_process_zh.xlsx"
-    report_ready = report_xlsx.exists() or report_md.exists()
+    trade_xlsx = _latest_matching_file(batch_dir, "batch_replay_trade_process_zh*.xlsx")
+    report_ready = bool(report_xlsx is not None) or report_md.exists()
     if summary_csv.exists():
         summary_df = pd.read_csv(summary_csv)
         print("")
@@ -261,7 +268,7 @@ def _print_status(args: argparse.Namespace) -> int:
             print(f"- 批量回放总净利润: {total_profit:.6f}")
         print(f"- 总绩效报告: {'已生成' if report_ready else '未生成'}")
         print(
-            f"- 交易过程文档: {'已生成' if (trade_xlsx.exists() or trade_md.exists()) else '未生成'}"
+            f"- 交易过程文档: {'已生成' if (trade_xlsx is not None or trade_md.exists()) else '未生成'}"
         )
         print(f"- 回放目录: {batch_dir}")
     elif report_md.exists():
@@ -276,10 +283,10 @@ def _print_status(args: argparse.Namespace) -> int:
         print(f"- 批量回放总净利润: {total_profit:.6f}")
         print(f"- 总绩效报告: 已生成")
         print(
-            f"- 交易过程文档: {'已生成' if (trade_xlsx.exists() or trade_md.exists()) else '未生成'}"
+            f"- 交易过程文档: {'已生成' if (trade_xlsx is not None or trade_md.exists()) else '未生成'}"
         )
         print(f"- 回放目录: {batch_dir}")
-    elif report_xlsx.exists():
+    elif report_xlsx is not None:
         try:
             overview = pd.read_excel(report_xlsx, sheet_name="概览")
             lookup = {str(row["项目"]): row["值"] for _, row in overview.iterrows()}
@@ -294,7 +301,7 @@ def _print_status(args: argparse.Namespace) -> int:
         print(f"- 批量回放总净利润: {total_profit:.6f}")
         print(f"- 总绩效报告: 已生成")
         print(
-            f"- 交易过程文档: {'已生成' if (trade_xlsx.exists() or trade_md.exists()) else '未生成'}"
+            f"- 交易过程文档: {'已生成' if (trade_xlsx is not None or trade_md.exists()) else '未生成'}"
         )
         print(f"- 回放目录: {batch_dir}")
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from polynet_ai.domain.models import FeatureSnapshot, OrderIntent
+from polynet_ai.strategy.cycle_windows import rule_disabled_in_cycle_tail
 from polynet_ai.strategy.spec import StrategyConfig
 from polynet_ai.strategy.price_reference import outcome_reference_price
 
@@ -93,6 +94,8 @@ def stop_loss_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[O
 
 
 def hedge_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
+    if features.is_last_minute:
+        return []
     exposure = abs(features.net_position_value)
     trigger = float(config.get("exposure.hedge_trigger_value", 50.0))
     if exposure < trigger or features.cycle_net_profit <= 0:
@@ -132,6 +135,8 @@ def hedge_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[Order
 
 
 def grid_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
+    if rule_disabled_in_cycle_tail(features, config, "grid"):
+        return []
     if features.market_regime != "range":
         return []
     low = float(config.get("grid.grid_low_percentile", 0.25))
@@ -172,6 +177,10 @@ def grid_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderI
 
 
 def mean_reversion_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
+    if not bool(config.get("mean_reversion.enabled", True)):
+        return []
+    if rule_disabled_in_cycle_tail(features, config, "mean_reversion"):
+        return []
     intents: list[OrderIntent] = []
     infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
     up_ref = outcome_reference_price(features, "up", infer_missing_with_binary_complement=infer_missing)

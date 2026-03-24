@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from polynet_ai.domain.models import FeatureSnapshot, OrderIntent, Outcome
+from polynet_ai.strategy.cycle_windows import rule_disabled_in_cycle_tail
 from polynet_ai.strategy.spec import StrategyConfig
 from polynet_ai.strategy.price_reference import outcome_reference_price
 
@@ -134,6 +135,8 @@ def trend_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Ord
 
 
 def hedge_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
+    if features.is_last_minute:
+        return []
     trigger = float(config.get("exposure.hedge_trigger_value", 50.0))
     exposure = abs(features.net_position_value)
     if exposure < trigger or features.net_direction in {"空仓", "平衡"}:
@@ -160,6 +163,8 @@ def hedge_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Ord
 
 
 def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
+    if rule_disabled_in_cycle_tail(features, config, "grid"):
+        return []
     if features.is_last_minute or features.market_regime != "range":
         return []
     if abs(features.net_position) > float(config.get("exposure.max_grid_net_position", 20.0)):
@@ -204,6 +209,10 @@ def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Orde
 
 
 def mean_reversion_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
+    if not bool(config.get("mean_reversion.enabled", True)):
+        return []
+    if rule_disabled_in_cycle_tail(features, config, "mean_reversion"):
+        return []
     if features.is_last_minute:
         return []
     up_threshold = float(config.get("mean_reversion.up_buy_deviation", 0.10))

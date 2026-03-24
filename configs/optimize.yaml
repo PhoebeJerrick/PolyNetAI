@@ -28,7 +28,7 @@ parameters:
   capital.min_cash_buffer:
     type: choice
     values: [8.0, 10.0, 12.0]
-  exposure.max_abs_exposure:
+  exposure.max_abs_exposure_value:
     type: choice
     values: [20.0, 30.0, 40.0]
   exposure.hedge_trigger_value:

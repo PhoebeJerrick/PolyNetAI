@@ -17,7 +17,7 @@ def test_build_launch_profiles_points_to_dashboard_dir(tmp_path: Path) -> None:
 
     assert "--output-dir" in sim.command
     assert str(tmp_path) in sim.command
-    assert "scripts/run_live_paper.py" in sim.command
+    assert "scripts/run_recorded_live_paper.py" in sim.command
 
     assert "--output-dir" in market.command
     assert str(tmp_path) in market.command
@@ -67,13 +67,15 @@ def test_apply_profile_overrides_updates_sim_profile_command(tmp_path: Path) -> 
     updated = apply_profile_overrides(
         profiles["sim-paper"],
         {
-            "sheet": "BTC",
+            "cycle_glob": "btc-updown-5m-*",
             "starting_cash": 5000,
+            "max_cycles": 25,
         },
     )
 
-    assert "BTC" in updated.command
+    assert "btc-updown-5m-*" in updated.command
     assert "5000" in updated.command
+    assert "25" in updated.command
 
 
 def test_resolve_profile_values_uses_defaults_for_missing_fields(tmp_path: Path) -> None:

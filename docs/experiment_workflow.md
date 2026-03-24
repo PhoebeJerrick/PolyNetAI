@@ -85,7 +85,7 @@ scenarios:
     overrides: {}
   - name: tighter_risk
     overrides:
-      exposure.max_abs_exposure: 150.0
+      exposure.max_abs_exposure_value: 150.0
       stop_loss.stop_loss_cycle_loss: 12.0
 ```
 

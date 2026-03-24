@@ -61,7 +61,8 @@ def test_snapshot_with_effective_price_recomputes_deviation() -> None:
     adj = snapshot_with_effective_price(base, 0.60)
     assert adj.price == 0.60
     assert abs(adj.up_deviation - 0.2) < 1e-9
-    assert adj.up_last_price == base.up_last_price
+    # snapshot_with_effective_price 会把 effective_price 映射到对应方向的 last_price。
+    assert abs(adj.up_last_price - 0.60) < 1e-9
 
 
 def test_trend_rule_keeps_prior_feed_until_interval() -> None:

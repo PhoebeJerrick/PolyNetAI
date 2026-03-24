@@ -28,7 +28,7 @@ def build_config() -> StrategyConfig:
     return StrategyConfig(
         raw={
             "order_sizing": {"min_order_size": 2.0, "max_order_size": 60.0},
-            "exposure": {"max_abs_exposure": 200.0, "max_strategy_trades_per_cycle": 12},
+            "exposure": {"max_abs_exposure_value": 200.0, "max_strategy_trades_per_cycle": 12},
             "execution": {"fee_rate": 0.002, "slippage_bps": 10},
             "capital": {"max_cash_utilization": 0.95, "min_cash_buffer": 25.0},
         }
@@ -114,7 +114,7 @@ def test_apply_risk_limits_enforces_min_order_size_for_buys() -> None:
     config = StrategyConfig(
         raw={
             "order_sizing": {"min_order_size": 5.0, "max_order_size": 60.0},
-            "exposure": {"max_abs_exposure": 200.0, "max_strategy_trades_per_cycle": 12},
+            "exposure": {"max_abs_exposure_value": 200.0, "max_strategy_trades_per_cycle": 12},
             "execution": {"fee_rate": 0.002, "slippage_bps": 10},
             "capital": {"max_cash_utilization": 0.95, "min_cash_buffer": 0.0},
         }
@@ -143,7 +143,7 @@ def test_apply_risk_limits_allows_small_sells_below_buy_minimum() -> None:
     config = StrategyConfig(
         raw={
             "order_sizing": {"min_order_size": 5.0, "max_order_size": 60.0},
-            "exposure": {"max_abs_exposure": 200.0, "max_strategy_trades_per_cycle": 12},
+            "exposure": {"max_abs_exposure_value": 200.0, "max_strategy_trades_per_cycle": 12},
             "execution": {"fee_rate": 0.002, "slippage_bps": 10},
             "capital": {"max_cash_utilization": 0.95, "min_cash_buffer": 0.0},
         }

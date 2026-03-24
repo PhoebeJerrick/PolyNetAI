@@ -28,8 +28,8 @@ def test_build_report_writes_xlsx_and_trade_process(tmp_path) -> None:
         [
             {
                 "cycle_slug": "btc-updown-5m-1774147200",
-                "executed_trades": 2,
-                "accepted_signals": 2,
+                "executed_trades": 3,
+                "accepted_signals": 3,
                 "blocked_signals": 0,
                 "total_net_profit": 1.5,
                 "total_fees": 0.1,
@@ -60,6 +60,7 @@ def test_build_report_writes_xlsx_and_trade_process(tmp_path) -> None:
                 "selected_shares": 10.0,
                 "executed": True,
                 "fill_price": 0.55,
+                "fill_fee": 0.02,
             },
             {
                 "timestamp": datetime(2026, 3, 20, 12, 0, 30),
@@ -68,6 +69,16 @@ def test_build_report_writes_xlsx_and_trade_process(tmp_path) -> None:
                 "selected_shares": 5.0,
                 "executed": True,
                 "fill_price": 0.62,
+                "fill_fee": 0.01,
+            },
+            {
+                "timestamp": datetime(2026, 3, 20, 12, 4, 35),
+                "selected_outcome": "down",
+                "selected_action": "buy",
+                "selected_shares": 2.0,
+                "executed": True,
+                "fill_price": 0.40,
+                "fill_fee": 0.001,
             },
         ]
     ).to_csv(cycle_dir / "decisions.csv", index=False, encoding="utf-8-sig")
@@ -77,8 +88,8 @@ def test_build_report_writes_xlsx_and_trade_process(tmp_path) -> None:
             {
                 "total_net_profit": 1.5,
                 "total_fees": 0.1,
-                "executed_trades": 2,
-                "accepted_signals": 2,
+                "executed_trades": 3,
+                "accepted_signals": 3,
                 "blocked_signals": 0,
             }
         ]
@@ -96,6 +107,14 @@ def test_build_report_writes_xlsx_and_trade_process(tmp_path) -> None:
     assert abs(float(lookup["总净利润"]) - 1.5) < 1e-9
     assert abs(float(lookup["胜率"]) - 1.0) < 1e-9
     assert abs(float(lookup["最大回撤"]) - 0.0) < 1e-9
+    assert int(float(lookup["尾盘已执行成交笔数(合计)"])) == 1
+    assert abs(float(lookup["尾盘手续费合计"]) - 0.001) < 1e-9
+    assert abs(float(lookup["尾盘成交现金流净额(不含结算)"]) - (-(2.0 * 0.40 + 0.001))) < 1e-9
+
+    assert "尾盘窗口成交汇总" in xl.sheet_names
+    tail_df = pd.read_excel(report_path, sheet_name="尾盘窗口成交汇总")
+    assert len(tail_df) == 1
+    assert int(tail_df["tail_executed_trades"].iloc[0]) == 1
 
     assert TRACKER_STYLE_SHEET in xl.sheet_names
     tracker = pd.read_excel(report_path, sheet_name=TRACKER_STYLE_SHEET)
@@ -116,8 +135,9 @@ def test_build_report_writes_xlsx_and_trade_process(tmp_path) -> None:
 
     assert not (batch_dir / "batch_replay_performance_report_zh.md").exists()
     assert not (batch_dir / "batch_replay_trade_process_zh.md").exists()
-    assert (batch_dir / "batch_replay_trade_process_zh.xlsx").exists()
-    txl = pd.ExcelFile(batch_dir / "batch_replay_trade_process_zh.xlsx")
+    trade_files = list(batch_dir.glob("batch_replay_trade_process_zh_*.xlsx"))
+    assert trade_files
+    txl = pd.ExcelFile(trade_files[0])
     assert "元数据" in txl.sheet_names
     assert "周期快照" in txl.sheet_names
     assert "决策流水" in txl.sheet_names

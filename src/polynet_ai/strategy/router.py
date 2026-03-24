@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from polynet_ai.domain.models import DecisionOutcome, FeatureSnapshot, OrderIntent
+from polynet_ai.domain.models import DecisionOutcome, FeatureSnapshot, OrderIntent, Outcome
 from polynet_ai.strategy.entry_rules import (
     grid_entries,
     hedge_entries,
@@ -17,7 +17,7 @@ from polynet_ai.strategy.exit_rules import (
     stop_loss_exits,
     take_profit_exits,
 )
-from polynet_ai.strategy.features import snapshot_with_effective_price
+from polynet_ai.strategy.features import snapshot_with_effective_price, snapshot_with_effective_quotes
 from polynet_ai.strategy.last_minute import build_last_minute_candidate
 from polynet_ai.strategy.spec import StrategyConfig
 
@@ -28,6 +28,8 @@ class StrategyRouter:
         self._feed_market_cycle: tuple[str, str] | None = None
         self._feed_last_at: dict[str, datetime] = {}
         self._feed_prices: dict[str, float] = {}
+        self._feed_effective_outcomes: dict[str, Outcome | None] = {}
+        self._feed_quotes: dict[str, tuple[float, float]] = {}
 
     def _reset_feed_context(self, features: FeatureSnapshot) -> None:
         ctx = (features.market_id, features.cycle_id)
@@ -35,6 +37,8 @@ class StrategyRouter:
             self._feed_market_cycle = ctx
             self._feed_last_at.clear()
             self._feed_prices.clear()
+            self._feed_effective_outcomes.clear()
+            self._feed_quotes.clear()
 
     @staticmethod
     def _feed_key(path: tuple[str, ...]) -> str:
@@ -57,10 +61,31 @@ class StrategyRouter:
         if last_at is None or (now - last_at).total_seconds() >= interval:
             self._feed_prices[key] = latest
             self._feed_last_at[key] = now
+            self._feed_quotes[key] = (float(base.up_last_price), float(base.down_last_price))
+            # 推断本次缓存的价格来自哪个 outcome（由 base.price 对应到 up/down last_price）
+            effective_outcome: Outcome | None = None
+            if base.up_last_price > 1e-12 and abs(base.price - base.up_last_price) <= 1e-12:
+                effective_outcome = "up"
+            elif base.down_last_price > 1e-12 and abs(base.price - base.down_last_price) <= 1e-12:
+                effective_outcome = "down"
+            self._feed_effective_outcomes[key] = effective_outcome
         effective = self._feed_prices.get(key, latest)
-        if abs(effective - base.price) <= 1e-15:
+        cached_quote = self._feed_quotes.get(key, (float(base.up_last_price), float(base.down_last_price)))
+        cached_up, cached_down = cached_quote
+        if (
+            abs(effective - base.price) <= 1e-15
+            and abs(cached_up - float(base.up_last_price)) <= 1e-15
+            and abs(cached_down - float(base.down_last_price)) <= 1e-15
+        ):
             return base
-        return snapshot_with_effective_price(base, effective)
+        effective_outcome = self._feed_effective_outcomes.get(key)
+        # 用双边价格快照重建规则特征，避免 0.5 附近单价映射歧义。
+        return snapshot_with_effective_quotes(
+            base,
+            up_price=cached_up,
+            down_price=cached_down,
+            active_outcome=effective_outcome,
+        )
 
     def route(self, features: FeatureSnapshot, strategy_trades: int = 0) -> DecisionOutcome:
         self._reset_feed_context(features)

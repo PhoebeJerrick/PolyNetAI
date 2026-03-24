@@ -34,7 +34,12 @@ class RiskDecision:
 def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: StrategyConfig) -> RiskDecision:
     min_order = float(config.get("order_sizing.min_order_size", 2.0))
     max_order = float(config.get("order_sizing.max_order_size", 60.0))
-    max_exposure = float(config.get("exposure.max_abs_exposure", 200.0))
+    max_exposure = float(
+        config.get(
+            "exposure.max_abs_exposure_value",
+            config.get("exposure.max_abs_exposure", 200.0),
+        )
+    )
     max_trades = int(config.get("exposure.max_strategy_trades_per_cycle", 12))
     fee_rate = float(config.get("execution.fee_rate", 0.002))
     slippage_bps = float(config.get("execution.slippage_bps", 10.0))

@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from polynet_ai.reporting.dashboard import generate_dashboard_bundle, generate_dashboard_from_directory
+from polynet_ai.reporting.dashboard import (
+    generate_dashboard_bundle,
+    generate_dashboard_from_directory,
+    refresh_dashboard_html_shell,
+)
 
 
 def build_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -76,6 +80,8 @@ def test_generate_dashboard_bundle_writes_expected_files(tmp_path: Path) -> None
     assert "launcher-profiles" in html_text
     assert "initializeRunConsole()" in html_text
     assert "collectLauncherOverrides" in html_text
+    assert "launcherState.draftOverrides" in html_text
+    assert "replaceLauncherDraftWithCatalog" in html_text
     assert "保存为默认值" in html_text
     assert "参数偏好文件" in html_text
     assert "data-launch-field" in html_text
@@ -87,6 +93,15 @@ def test_generate_dashboard_bundle_writes_expected_files(tmp_path: Path) -> None
     assert "核心指标" in artifacts.markdown_path.read_text(encoding="utf-8")
     summary_text = artifacts.summary_csv_path.read_text(encoding="utf-8-sig")
     assert "alert_count" in summary_text
+
+
+def test_refresh_dashboard_html_shell_writes_html(tmp_path: Path) -> None:
+    out = tmp_path / "shell"
+    artifacts = refresh_dashboard_html_shell(out, title="Shell Only")
+    assert artifacts.html_path.exists()
+    html_text = artifacts.html_path.read_text(encoding="utf-8")
+    assert "Shell Only" in html_text
+    assert "CONFIG_PARAM_META" in html_text or "enrichConfigSchemaField" in html_text
 
 
 def test_generate_dashboard_from_directory_reads_csv_inputs(tmp_path: Path) -> None:

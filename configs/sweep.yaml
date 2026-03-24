@@ -8,7 +8,7 @@ scenarios:
       exposure.max_strategy_trades_per_cycle: 12
   - name: tighter_risk
     overrides:
-      exposure.max_abs_exposure: 20
+      exposure.max_abs_exposure_value: 20
       exposure.hedge_trigger_value: 8
       stop_loss.stop_loss_cycle_loss: 12.0
       exposure.max_strategy_trades_per_cycle: 8

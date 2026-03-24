@@ -20,6 +20,8 @@ class LaunchField:
     step: float | int | None = None
     options: list[Any] = field(default_factory=list)
     required: bool = False
+    example: str = ""
+    detail: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -34,6 +36,8 @@ class LaunchField:
             "step": self.step,
             "options": list(self.options),
             "required": self.required,
+            "example": self.example,
+            "detail": self.detail,
         }
 
 
@@ -151,15 +155,17 @@ def build_launch_profiles(
         "sim-paper": LaunchProfile(
             name="sim-paper",
             title="模拟下单测试",
-            description="使用本地 Excel 成交流回放做准实时 paper trading，并持续刷新当前 dashboard。",
+            description="使用本地 record_job 下 btc-updown-5m-* 成交流回放做准实时 paper trading，并持续刷新当前 dashboard。",
             mode="paper_simulation",
             command=[
                 python_cmd,
-                "scripts/run_live_paper.py",
-                "--input",
-                "data/raw/polymarket_tracker_collection.xlsx",
-                "--sheet",
-                "BTC",
+                "scripts/run_recorded_live_paper.py",
+                "--input-dir",
+                "artifacts/live/record_job",
+                "--cycle-glob",
+                "btc-updown-5m-*",
+                "--max-cycles",
+                "10",
                 "--config",
                 "configs/strategy.yaml",
                 "--output-dir",
@@ -175,14 +181,15 @@ def build_launch_profiles(
             ],
             fields=[
                 LaunchField(
-                    name="sheet",
-                    label="Excel 工作表",
-                    kind="select",
-                    default="BTC",
-                    description="从本地历史 Excel 的哪个工作表读取成交流。",
-                    cli_flag="--sheet",
-                    options=["BTC"],
+                    name="cycle_glob",
+                    label="周期目录匹配",
+                    kind="text",
+                    default="btc-updown-5m-*",
+                    description="按目录名匹配要回放的周期集合。",
+                    cli_flag="--cycle-glob",
                     required=True,
+                    example="btc-updown-5m-*",
+                    detail="默认扫描 input-dir 下所有匹配目录，并读取各目录内 ws_trade_events.ndjson 作为回放输入。",
                 ),
                 LaunchField(
                     name="starting_cash",
@@ -194,6 +201,21 @@ def build_launch_profiles(
                     min_value=10,
                     max_value=1000000,
                     step=10,
+                    example="1000 表示用 1000 USDC 等名义资金开跑",
+                    detail="仅影响 paper 账户规模与曲线刻度；与实盘资金无关。过小可能导致频繁因资金不足拒单。",
+                ),
+                LaunchField(
+                    name="max_cycles",
+                    label="测试周期数",
+                    kind="number",
+                    default=10,
+                    description="本次模拟最多回放多少个周期目录（按时间顺序取前 N 个）。",
+                    cli_flag="--max-cycles",
+                    min_value=1,
+                    max_value=10000,
+                    step=1,
+                    example="10 表示只回放最早的 10 个 btc-updown-5m-* 周期目录",
+                    detail="用于快速验证参数而不必跑完整历史；设大一些可做更长区间模拟。",
                 ),
             ],
         ),
@@ -229,6 +251,8 @@ def build_launch_profiles(
                     description="机器人模式用它自动发现目标市场窗口，例如 btc-updown-5m-。",
                     cli_flag="--slug-prefix",
                     required=True,
+                    example="btc-updown-5m- 会匹配 slug 以该串开头的当期合约",
+                    detail="前缀错误会订阅不到目标市场；改品种或周期时须换成对应 slug 命名习惯（仍以官方接口为准）。",
                 ),
                 LaunchField(
                     name="max_cycles",
@@ -240,6 +264,8 @@ def build_launch_profiles(
                     min_value=1,
                     max_value=500,
                     step=1,
+                    example="10 表示连跑约 10 个 5 分钟窗后进程结束",
+                    detail="用于控制单次验证时长与磁盘写入量；调大前注意网络与机器长期稳定性。",
                 ),
                 LaunchField(
                     name="starting_cash",
@@ -251,6 +277,8 @@ def build_launch_profiles(
                     min_value=10,
                     max_value=1000000,
                     step=10,
+                    example="1000 — 与模拟下单、资金曲线展示一致",
+                    detail="robot-mode 下仍为模拟资金；与 Polymarket 账户余额无自动关联。",
                 ),
             ],
         ),
@@ -311,7 +339,7 @@ def build_project_help_text(
         [
             "",
             "说明：",
-            "  - sim-paper: 使用本地 Excel 数据做准实时模拟下单测试。",
+            "  - sim-paper: 使用本地 record_job 事件流做准实时模拟下单测试。",
             "  - market-paper: 接真实 Polymarket 行情做实盘验证，但仍是 paper 模式，不会真实下单。",
             "  - dashboard 控制台负责可视化改参数、查看状态，并可一键启动/停止上面两个运行档案。",
         ]

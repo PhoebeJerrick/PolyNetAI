@@ -131,8 +131,9 @@ def test_snapshot_with_effective_price_updates_only_active_outcome_for_deviation
     )
     fed = snapshot_with_effective_price(base, 0.75)
 
-    # 当前 active outcome 是 up，因此 down 偏离应继续按 down_last_price=0.30 计算。
-    assert round(fed.down_deviation, 6) == -0.4
+    # 当前 active outcome 是 up，因此 effective_price 需要映射为：
+    # up_px = 0.75，down_px = 1 - 0.75 = 0.25（用于二元互补）。
+    assert round(fed.down_deviation, 6) == -0.5
 
 
 def test_build_feature_snapshot_percentile_not_polluted_by_last_outcome_side() -> None:

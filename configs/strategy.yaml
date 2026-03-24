@@ -17,7 +17,7 @@ capital:
   max_cash_utilization: 0.85
   min_cash_buffer: 12.0
 exposure:
-  max_abs_exposure: 40.0
+  max_abs_exposure_value: 40.0
   hedge_trigger_value: 20.0
   hedge_scale: 0.05
   max_grid_net_position: 10
@@ -29,12 +29,17 @@ trend:
 grid:
   grid_low_percentile: 0.45
   grid_high_percentile: 0.95
+  # 周期剩余时间（秒）<= 该值时禁用网格买卖；不配置则仅受 is_last_minute 等对入场的限制
+  disable_within_seconds_before_end: 50
 mean_reversion:
+  enabled: true
   up_buy_deviation: 0.1
   down_buy_deviation: 0.1
   mean_reversion_sell_up_deviation: 0.2
   mean_reversion_sell_down_deviation: 0.2
   deviation_scale: 45
+  # 周期剩余时间（秒）<= 该值时禁用均值回归买卖（80 即最后一分 20 秒起停止）
+  disable_within_seconds_before_end: 80
 profit_taking:
   take_profit_up_deviation: 0.15
   take_profit_down_deviation: 0.15
@@ -43,10 +48,12 @@ stop_loss:
   stop_loss_cycle_loss: 18.0
   stop_loss_fraction: 0.5
 last_minute:
-  last_minute_min_confidence: 0.9
+  last_minute_min_confidence: 0.87
   tail_profit_scale: 0.35
   tail_volatility_scale: 14
   max_tail_exposure: 25.0
+  # 浮盈较多一侧份额需 >= 另一侧 * ratio；1.0 表示不启用。平局时按 up/down 市价较高者为「优势侧」。
+  preferred_leg_min_ratio: 1.2
 execution:
   fee_rate: 0.002
   slippage_bps: 5

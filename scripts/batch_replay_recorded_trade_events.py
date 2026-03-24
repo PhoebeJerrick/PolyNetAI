@@ -144,7 +144,7 @@ def main() -> int:
         decision_df=decision_df,
         output_path=output_dir,
     )
-    build_performance_report_zh(
+    xlsx_report = build_performance_report_zh(
         resolved_batch_dir=output_dir,
         summary_df=summary_df,
         cycle_df=cycle_df,
@@ -153,8 +153,6 @@ def main() -> int:
         display_batch_dir=input_dir,
     )
     _cleanup_batch_replay_markdown(output_dir)
-
-    xlsx_report = output_dir / "batch_replay_performance_report_zh.xlsx"
 
     print(f"批量回放完成，共 {len(summary_df)} 个周期")
     print(f"交易过程 (Excel): {trade_xlsx}")

@@ -172,7 +172,7 @@
 
 ## 风控硬约束
 
-- `abs(net_position_value) <= max_abs_exposure`
+- `abs(net_position_value) <= max_abs_exposure_value`
 - 单笔下单量位于 `[min_order_size, max_order_size]`
 - 单周期策略下单次数不超过 `max_strategy_trades_per_cycle`
 - 若下单后风险仍超限，则该订单直接拦截

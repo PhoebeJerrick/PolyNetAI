@@ -36,7 +36,11 @@ def _format_value(value: Any, digits: int = 3) -> str:
     if isinstance(value, bool):
         return "True" if value else "False"
     if isinstance(value, (int, float)):
-        return f"{float(value):,.{digits}f}"
+        text = f"{float(value):,.{digits}f}"
+        # Display at most `digits` decimals instead of always fixed width.
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text
     return str(value)
 
 
@@ -154,7 +158,16 @@ def _render_table(
     for _, row in frame.iterrows():
         css_class = row_class_fn(row) if row_class_fn else ""
         class_attr = f' class="{css_class}"' if css_class else ""
-        cells = "".join(f"<td>{html.escape(str(value))}</td>" for value in row.tolist())
+        rendered_cells: list[str] = []
+        for value in row.tolist():
+            if isinstance(value, bool):
+                rendered = "True" if value else "False"
+            elif isinstance(value, (int, float)):
+                rendered = _format_value(value, 3)
+            else:
+                rendered = str(value)
+            rendered_cells.append(f"<td>{html.escape(rendered)}</td>")
+        cells = "".join(rendered_cells)
         rows.append(f"<tr{class_attr}>{cells}</tr>")
     return f'<table class="table"><thead><tr>{headers}</tr></thead><tbody>{"".join(rows)}</tbody></table>'
 
@@ -330,6 +343,301 @@ def _build_dashboard_state_script(state: dict[str, Any]) -> str:
     return "window.__POLYNET_DASHBOARD_STATE__ = " + json.dumps(state, ensure_ascii=False) + ";\n"
 
 
+def _dashboard_rule_price_param_meta() -> dict[str, dict[str, str]]:
+    detail = (
+        "秒数为规则侧缓存盘口价的刷新间隔；0 表示尽量用当前 tick 的最新价。"
+        "调大可减轻细碎抖动，但在极速行情中判断会略滞后。"
+    )
+    pairs = [
+        ("rule_price_feed.last_minute", "尾盘：常填 0 或 0.5"),
+        ("rule_price_feed.entries.opening", "opening：例 0、1"),
+        ("rule_price_feed.entries.hedge", "hedge 入场：例 0、1"),
+        ("rule_price_feed.entries.grid", "grid 入场：例 0、2"),
+        ("rule_price_feed.entries.mean_reversion", "均值回归入场：例 0、1"),
+        ("rule_price_feed.entries.trend", "trend 入场：例 0、1"),
+        ("rule_price_feed.exits.stop_loss", "止损离场：建议偏小，如 0、0.5"),
+        ("rule_price_feed.exits.hedge", "对冲离场：例 0、1"),
+        ("rule_price_feed.exits.take_profit", "止盈离场：例 0、1"),
+        ("rule_price_feed.exits.grid", "grid 离场：例 0、2"),
+        ("rule_price_feed.exits.mean_reversion", "均值回归离场：例 0、1"),
+    ]
+    return {path: {"example": ex, "detail": detail} for path, ex in pairs}
+
+
+def _dashboard_priority_param_meta() -> dict[str, dict[str, str]]:
+    detail = (
+        "数字越小优先级越高（越早参与本 tick 的规则排序）。"
+        "通常让风险、止损等护栏排在加仓类规则之前；改完后建议回放确认拦截顺序符合预期。"
+    )
+    pairs = [
+        ("priorities.risk", "例：1，统合风险最先裁定"),
+        ("priorities.last_minute", "例：3～8，尾盘在多数入场之后"),
+        ("priorities.opening", "例：5～15，开盘试探插队位置"),
+        ("priorities.stop_loss", "例：2～5，紧挨风险之后"),
+        ("priorities.hedge", "例：4～10"),
+        ("priorities.take_profit", "例：6～12"),
+        ("priorities.grid", "例：8～20"),
+        ("priorities.mean_reversion", "例：8～20"),
+        ("priorities.trend", "例：10～25"),
+    ]
+    return {path: {"example": ex, "detail": detail} for path, ex in pairs}
+
+
+def _build_dashboard_config_param_meta() -> dict[str, dict[str, str]]:
+    meta: dict[str, dict[str, str]] = {
+        "cycle.cycle_seconds": {
+            "example": "300 — 常见 BTC 5 分钟 Up/Down 一整轮秒数",
+            "detail": "必须与所交易市场的实际周期一致；换 15 分钟等品种时要改成 900 等对应值，否则尾盘与节奏类逻辑会错位。",
+        },
+        "cycle.last_minute_seconds": {
+            "example": "60 表示周期最后 60 秒内进入「最后一分钟」规则集",
+            "detail": "过大会过早进入尾盘逻辑，过小则几乎没有缓冲；需与 cycle_seconds 和实盘节奏一起考虑。",
+        },
+        "opening_entry.enabled": {
+            "example": "勾选：周期开头允许按 opening 规则试探建仓",
+            "detail": "关闭后仅依赖网格、趋势等后续逻辑，适合想完全禁用开盘脉冲的场景。",
+        },
+        "opening_entry.window_seconds": {
+            "example": "30 — 仅周期开始后 30 秒内评估 opening",
+            "detail": "窗口越短越保守；过长会把中段行情仍当作「开盘」，与业务语义不符。",
+        },
+        "opening_entry.vwap_epsilon": {
+            "example": "0.01 表示弱势侧可比 VWAP 高约 1 分（0.01）仍算可接受",
+            "detail": "用于放宽「必须严格在 VWAP 下」的硬条件；过大可能买到明显偏贵的边际。",
+        },
+        "opening_entry.range_low_fraction": {
+            "example": "0.35 表示价格落在区间下 35% 宽度内才算「低位」",
+            "detail": "与 min_range_width 联用；过宽几乎总触发，过窄则很少开仓。",
+        },
+        "opening_entry.min_range_width": {
+            "example": "0.02 表示买卖价差至少约 2 分才启用区间低位判断",
+            "detail": "盘口极薄时跳过区间逻辑，避免在噪声上误判「低位」。",
+        },
+        "opening_entry.infer_missing_with_binary_complement": {
+            "example": "开启：若只见 Up=0.6，则推断 Down≈0.4",
+            "detail": "在仅单边有报价时避免规则完全失明；若数据源本身不可靠，可关闭改为要求双边价。",
+        },
+        "order_sizing.base_order_size": {
+            "example": "5 表示多数规则从 5 份合约量级起步（具体单位随撮合定义）",
+            "detail": "会与波动率放大、max_order_size 等共同约束最终下单量。",
+        },
+        "order_sizing.min_order_size": {
+            "example": "1 — 小于此值的下单请求会被直接拒绝",
+            "detail": "须不低于交易所或模拟器最小手数；与 max 搭配避免无效碎单。",
+        },
+        "order_sizing.max_order_size": {
+            "example": "40 — 单笔成交量不会超过 40",
+            "detail": "硬上限，用于抑制单条信号过激；与敞口、资金使用率一起看。",
+        },
+        "order_sizing.volatility_order_scale": {
+            "example": "20 — 波动率指标越高，基础单量按模型放大越明显",
+            "detail": "设为 0 则关闭波动放大；过大可能在剧烈行情中单笔过重。",
+        },
+        "capital.max_cash_utilization": {
+            "example": "0.92 表示最多动用账户现金的 92%",
+            "detail": "留余量应对手续费、滑点与未结算占用；拉满到 1.0 容易因舍入或费用导致拒单。",
+        },
+        "capital.min_cash_buffer": {
+            "example": "50 — 账户始终保留约 50 单位现金不动",
+            "detail": "缓冲越大越保守；在高频小单策略中可适当降低。",
+        },
+        "exposure.max_abs_exposure_value": {
+            "example": "200 — 净敞口价值绝对值不超过 200（与账户币种一致）",
+            "detail": "超过后风控会限制新开仓；与对冲、网格净仓协同使用。",
+        },
+        "exposure.hedge_trigger_value": {
+            "example": "80 — 净敞口超过 80 时开始考虑对冲单",
+            "detail": "阈值越低越早对冲，可能增加换手；越高则单边暴露时间更长。",
+        },
+        "exposure.hedge_scale": {
+            "example": "0.5 表示超额敞口的一半换算为对冲目标量（示意，以代码为准）",
+            "detail": "调大对冲更猛，调小更温和；需与 hedge_trigger 一起看。",
+        },
+        "exposure.max_grid_net_position": {
+            "example": "15 — 网格策略净仓绝对值不超过 15",
+            "detail": "防止网格在单边趋势中滚成过大净赌方向。",
+        },
+        "exposure.max_strategy_trades_per_cycle": {
+            "example": "12 — 单个 5 分钟周期内策略成交不超过 12 次",
+            "detail": "抑制过度交易与费用；实盘延迟高时可适当降低。",
+        },
+        "trend.min_trend_strength": {
+            "example": "0.35 — 趋势强度低于 0.35 不触发趋势单",
+            "detail": "越高越挑剔，越少追涨杀跌；越低越容易在弱趋势中频繁交易。",
+        },
+        "trend.trend_price_edge": {
+            "example": "0.05 — 价格需偏离参考价约 5 分以上才认定「够偏」",
+            "detail": "过滤微小波动；过大可能错过早期趋势段。",
+        },
+        "trend.trend_scale": {
+            "example": "0.3 — 净仓越大，趋势单量按该系数额外放大",
+            "detail": "高风险参数：放大后单边加速更快，需配合止损与敞口上限。",
+        },
+        "grid.grid_low_percentile": {
+            "example": "0.2 — 价格低于近期分布的 20% 分位视为网格「低位」",
+            "detail": "与 grid_high_percentile 共同定义区间；两者过近会减少网格触发。",
+        },
+        "grid.grid_high_percentile": {
+            "example": "0.8 — 高于 80% 分位视为「高位」",
+            "detail": "典型设置是低分位 < 高分位，留出中间中性带。",
+        },
+        "grid.disable_within_seconds_before_end": {
+            "example": "45 — 周期剩余 ≤45 秒时不再挂网格买卖",
+            "detail": "避免临近结算时区间策略与尾盘留仓逻辑冲突；可与均值回归尾盘窗口对齐调参。",
+        },
+        "mean_reversion.enabled": {
+            "example": "开启：允许偏离均值时的买卖与回归平仓",
+            "detail": "关闭后整条均值回归链路停用，仅保留其他规则。",
+        },
+        "mean_reversion.up_buy_deviation": {
+            "example": "0.08 — Up 价比参考均价低约 8 分时考虑买入",
+            "detail": "阈值越小信号越密；越大则只在深度折价时出手。",
+        },
+        "mean_reversion.down_buy_deviation": {
+            "example": "0.08 — Down 侧对称逻辑",
+            "detail": "可与 Up 侧设为不同值以反映流动性或偏好差异。",
+        },
+        "mean_reversion.mean_reversion_sell_up_deviation": {
+            "example": "0.1 — Up 涨回接近均价以上约 10 分时考虑卖出",
+            "detail": "均值回归「获利了结」侧阈值，与买入阈值不必对称。",
+        },
+        "mean_reversion.mean_reversion_sell_down_deviation": {
+            "example": "0.1 — Down 侧回归卖出阈值",
+            "detail": "过紧可能过早卖飞，过松则回撤吞掉利润。",
+        },
+        "mean_reversion.deviation_scale": {
+            "example": "25 — 偏离越大，单次下单量按模型放得越多",
+            "detail": "放大系数过高时，深偏离会带来超大单，务必有 max_order_size 与敞口兜底。",
+        },
+        "mean_reversion.disable_within_seconds_before_end": {
+            "example": "60 — 最后 60 秒不做均值回归开平仓",
+            "detail": "防止与尾盘竞价、结算价跳动叠加造成误触。",
+        },
+        "profit_taking.take_profit_up_deviation": {
+            "example": "0.12 — Up 侧浮盈达到约 12 分偏离时触发止盈评估",
+            "detail": "与 take_profit_fraction 配合决定「赚多少卖多少」。",
+        },
+        "profit_taking.take_profit_down_deviation": {
+            "example": "0.12 — Down 侧止盈触发偏离",
+            "detail": "两侧可不对称，以匹配历史波动或持仓结构。",
+        },
+        "profit_taking.take_profit_fraction": {
+            "example": "0.35 — 每次止盈卖出当前该腿持仓的 35%",
+            "detail": "1.0 表示一次性清仓该方向；分批卖出可平滑收益曲线。",
+        },
+        "stop_loss.stop_loss_cycle_loss": {
+            "example": "18 — 本周期已实现亏损超过 18 单位则触发止损流程",
+            "detail": "单位与账户计价一致；过小易误触，过大则单笔周期风险高。",
+        },
+        "stop_loss.stop_loss_fraction": {
+            "example": "0.5 — 止损动作时卖掉约一半相关持仓",
+            "detail": "与周期止损阈值搭配；全卖用 1.0，温和减仓用更小比例。",
+        },
+        "last_minute.last_minute_min_confidence": {
+            "example": "0.72 — 模型或规则给出的信心低于 0.72 则不做主动尾盘留仓",
+            "detail": "越高越谨慎，尾盘仓位越小；越低越激进。",
+        },
+        "last_minute.tail_profit_scale": {
+            "example": "0.4 — 本周期盈利越多，尾盘允许保留的仓位按该系数放大",
+            "detail": "盈利薄时尾盘收缩，盈利厚时略放宽；与 max_tail_exposure 上限一起约束。",
+        },
+        "last_minute.tail_volatility_scale": {
+            "example": "15 — 波动率越高，尾盘目标仓位按模型放得越大",
+            "detail": "认为波动大时「值得一搏」的权重；设为 0 可关闭该维度影响。",
+        },
+        "last_minute.max_tail_exposure": {
+            "example": "80 — 尾盘净敞口价值不超过 80",
+            "detail": "最后一道上限，防止尾盘逻辑在极端信号下堆过大裸敞口。",
+        },
+        "last_minute.preferred_leg_min_ratio": {
+            "example": "1.15 — 优势侧份额至少为另一侧的 1.15 倍才满足「偏一边」",
+            "detail": "1.0 表示关闭该约束；大于 1 会强制尾盘更「站队」一侧。",
+        },
+        "execution.fee_rate": {
+            "example": "0.002 表示成交名义金额的约 0.2% 作为手续费",
+            "detail": "仅影响 paper 成本模拟；与实盘费率不一致时回测收益会偏差。",
+        },
+        "execution.slippage_bps": {
+            "example": "10 — 假设每边约 10 bps 的成交价劣化",
+            "detail": "基点越大模拟越悲观；0 表示理想成交价。",
+        },
+        "execution.min_seconds_between_orders": {
+            "example": "2.5 — 两次下单至少间隔 2.5 秒",
+            "detail": "抑制刷单与 API 压力；实盘延迟大时可略放宽。",
+        },
+        "execution.min_same_outcome_price_move_ratio": {
+            "example": "0.02 — 同一 outcome 再次下单前价格至少相对上次变动约 2%",
+            "detail": "防止在同一价位附近反复小额加仓；设为 0 则关闭该过滤。",
+        },
+        "scenarios": {
+            "example": "数组内一项：name 填「基线」，overrides 里写 order_sizing.base_order_size: 5",
+            "detail": "用于 sweep 命名分组；overrides 的键与 strategy.yaml 路径一致，值为该场景覆盖内容。",
+        },
+        "grid.execution.slippage_bps": {
+            "example": "[0, 5, 10, 20] — 网格逐档试这些滑点假设",
+            "detail": "与 grid 扫描脚本约定一致；元素须为合法 bps 数值。",
+        },
+        "grid.profit_taking.take_profit_fraction": {
+            "example": "[0.25, 0.5, 0.75] — 扫描多档止盈比例",
+            "detail": "每项应在 0～1 之间；与回测目标函数一起看性价比。",
+        },
+        "trials": {
+            "example": "40 — 自动寻优随机/贝叶斯采样 40 组参数",
+            "detail": "越大搜索越充分但耗时越久；可先小 trials 粗搜再放大。",
+        },
+        "seed": {
+            "example": "42 — 固定种子使同样 trials 下复现同一批候选",
+            "detail": "改种子会换一批采样；调参对比时建议记录 seed。",
+        },
+        "export_top_n": {
+            "example": "5 — 把得分最高的 5 组参数导出为配置文件或报告",
+            "detail": "便于人工复核前几名，而不是只看单一最优。",
+        },
+        "score_weights.total_net_profit": {
+            "example": "1.0 — 净利润每多 1 单位约贡献 1 分（示意）",
+            "detail": "权重为相对比例；需与其它指标量级匹配，否则某一项会主导排序。",
+        },
+        "score_weights.max_drawdown": {
+            "example": "-2.0 — 回撤越大扣分越多（负权重）",
+            "detail": "通常用负数惩罚回撤；绝对值越大越厌恶回撤。",
+        },
+        "score_weights.total_fees": {
+            "example": "-0.5 — 费用越高得分越低",
+            "detail": "抑制高换手策略；若回测费用模型偏低，可适当加大惩罚。",
+        },
+        "score_weights.win_rate": {
+            "example": "0.8 — 胜率高的试验得分略上浮",
+            "detail": "若只追求胜率可能牺牲盈亏比，建议与利润、回撤权重复合使用。",
+        },
+        "score_weights.signal_execution_rate": {
+            "example": "0.3 — 信号能落地的比例越高越好",
+            "detail": "反映参数是否过于激进导致大量被风控拦截；与净利润权重平衡。",
+        },
+        "parameters": {
+            "example": "键为 strategy 路径，值为 dict：如 type: uniform, low: 3, high: 8",
+            "detail": "与 optimize 脚本约定的参数空间格式一致；错误路径会导致寻优跳过或运行报错。",
+        },
+    }
+    meta.update(_dashboard_rule_price_param_meta())
+    meta.update(_dashboard_priority_param_meta())
+    return meta
+
+
+def _dashboard_config_param_meta_script() -> str:
+    payload = json.dumps(_build_dashboard_config_param_meta(), ensure_ascii=False)
+    return (
+        f"\n    const CONFIG_PARAM_META = {payload};\n"
+        "    function enrichConfigSchemaField(field) {\n"
+        "      const meta = CONFIG_PARAM_META[field.path];\n"
+        "      if (!meta) return field;\n"
+        "      return Object.assign({}, field, {\n"
+        "        example: field.example || meta.example,\n"
+        "        detail: field.detail || meta.detail,\n"
+        "      });\n"
+        "    }\n"
+    )
+
+
 def build_dashboard_html(
     title: str,
     metrics_df: pd.DataFrame,
@@ -393,6 +701,26 @@ def build_dashboard_html(
     .config-label-row {{ display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; }}
     .config-path {{ color:#64748b; font-size:12px; margin-bottom:6px; font-family: Consolas, monospace; }}
     .config-field-hint {{ color:#94a3b8; font-size:12px; line-height:1.5; margin-top:6px; }}
+    .config-field-example {{ color:#a5b4fc; font-size:12px; line-height:1.5; margin-top:6px; }}
+    .config-label-inline {{ display:flex; align-items:center; gap:6px; flex-wrap:wrap; flex:1; min-width:0; }}
+    .config-label-inline-text {{ margin-bottom:0 !important; display:inline; }}
+    .config-param-help {{ position:relative; display:inline-flex; align-items:center; flex-shrink:0; outline:none; }}
+    .config-param-help-mark {{
+      display:inline-flex; align-items:center; justify-content:center;
+      width:18px; height:18px; border-radius:999px;
+      background:#334155; color:#e2e8f0; font-size:11px; font-weight:700;
+      cursor:help; line-height:1; user-select:none;
+    }}
+    .config-param-tooltip-panel {{
+      display:none; position:absolute; left:0; top:calc(100% + 8px); z-index:60;
+      min-width:240px; max-width:min(420px, 92vw);
+      padding:10px 12px; background:#1e293b; color:#e2e8f0;
+      border:1px solid #475569; border-radius:10px;
+      box-shadow:0 12px 32px rgba(0,0,0,0.45);
+      font-size:12px; font-weight:400; line-height:1.55; white-space:pre-wrap;
+    }}
+    .config-param-help:hover .config-param-tooltip-panel,
+    .config-param-help:focus-within .config-param-tooltip-panel {{ display:block; }}
     .config-range-note {{ color:#93c5fd; font-size:12px; margin-top:6px; }}
     .config-risk-badge {{ font-size:11px; padding:3px 8px; border-radius:999px; white-space:nowrap; border:1px solid transparent; }}
     .config-risk-badge.low {{ color:#86efac; border-color:#166534; background:#052e16; }}
@@ -439,7 +767,7 @@ def build_dashboard_html(
       <button id="config-save-btn" type="button">保存配置</button>
     </div>
     <div id="config-form" class="config-form"></div>
-    <div class="config-hint">说明：`strategy.yaml` 可在 live runner 运行中热加载；`sweep.yaml` 和 `optimize.yaml` 会影响后续扫描/寻优任务，不会回溯修改已完成结果。</div>
+    <div class="config-hint">说明：`strategy.yaml` 可在 live runner 运行中热加载；`sweep.yaml` 和 `optimize.yaml` 会影响后续扫描/寻优任务，不会回溯修改已完成结果。每项下的「示例」为典型填法；标签旁「?」可悬停或按 Tab 聚焦查看扩展说明。</div>
   </div>
   <div class="panel">
     <h2>运行控制台</h2>
@@ -541,6 +869,8 @@ def build_dashboard_html(
     }};
     const launcherState = {{
       profiles: [],
+      draftOverrides: {{}},
+      runningSnapshot: null,
     }};
     const CONFIG_SCHEMAS = {{
       strategy: {{
@@ -551,6 +881,12 @@ def build_dashboard_html(
             fields: [
               {{ path: "cycle.cycle_seconds", label: "周期长度（秒）", hint: "BTC 5 分钟市场通常为 300 秒。", type: "number", ui: "select", options: [300], risk: "low" }},
               {{ path: "cycle.last_minute_seconds", label: "尾盘窗口（秒）", hint: "最后一分钟逻辑开始生效的时间。", type: "number", ui: "select", options: [30, 45, 60, 75, 90], risk: "medium" }},
+              {{ path: "opening_entry.enabled", label: "开盘试探建仓使能", hint: "关闭后不在开盘窗口触发 opening 买入。", type: "boolean", risk: "medium" }},
+              {{ path: "opening_entry.window_seconds", label: "开盘试探窗口（秒）", hint: "仅在周期起始该窗口内允许 opening 规则建仓。", type: "number", ui: "range", min: 5, max: 120, step: 1, risk: "low" }},
+              {{ path: "opening_entry.vwap_epsilon", label: "开盘 VWAP 容差", hint: "弱势侧价格允许略高于 VWAP 的容差。", type: "number", ui: "range", min: 0.000, max: 0.050, step: 0.001, risk: "medium" }},
+              {{ path: "opening_entry.range_low_fraction", label: "开盘低位分段比例", hint: "弱势侧价格落在区间低位该比例内时可放行。", type: "number", ui: "range", min: 0.05, max: 0.95, step: 0.01, risk: "medium" }},
+              {{ path: "opening_entry.min_range_width", label: "开盘最小区间宽度", hint: "盘口区间过窄时不开启区间低位判断。", type: "number", ui: "range", min: 0.000, max: 0.200, step: 0.001, risk: "low" }},
+              {{ path: "opening_entry.infer_missing_with_binary_complement", label: "缺失盘口用互补价推断", hint: "仅有单边价格时用 1-p 补齐另一侧价格。", type: "boolean", risk: "low" }},
             ],
           }},
           {{
@@ -575,7 +911,7 @@ def build_dashboard_html(
             title: "敞口与风控",
             description: "限制最大净敞口、网格净仓位和单周期交易次数。",
             fields: [
-              {{ path: "exposure.max_abs_exposure", label: "最大绝对敞口", hint: "限制净敞口价值上限。", type: "number", ui: "range", min: 20, max: 1000, step: 10, risk: "high" }},
+              {{ path: "exposure.max_abs_exposure_value", label: "最大绝对敞口价值", hint: "限制净敞口价值上限。", type: "number", ui: "range", min: 20, max: 1000, step: 10, risk: "high" }},
               {{ path: "exposure.hedge_trigger_value", label: "对冲触发阈值", hint: "超过该敞口后可触发对冲逻辑。", type: "number", ui: "range", min: 10, max: 300, step: 5, risk: "medium" }},
               {{ path: "exposure.hedge_scale", label: "对冲强度系数", hint: "超额敞口换算成对冲单量的比例。", type: "number", ui: "range", min: 0.01, max: 1.00, step: 0.01, risk: "medium" }},
               {{ path: "exposure.max_grid_net_position", label: "网格最大净仓位", hint: "防止区间策略滚成单边大仓。", type: "number", ui: "range", min: 2, max: 100, step: 1, risk: "high" }},
@@ -591,17 +927,20 @@ def build_dashboard_html(
               {{ path: "trend.trend_scale", label: "趋势加仓系数", hint: "当前净仓越大，趋势单会按此系数放大。", type: "number", ui: "range", min: 0.00, max: 1.00, step: 0.01, risk: "high" }},
               {{ path: "grid.grid_low_percentile", label: "网格低位分位数", hint: "低于该分位视作区间低位。", type: "number", ui: "range", min: 0.05, max: 0.50, step: 0.01, risk: "low" }},
               {{ path: "grid.grid_high_percentile", label: "网格高位分位数", hint: "高于该分位视作区间高位。", type: "number", ui: "range", min: 0.50, max: 0.95, step: 0.01, risk: "low" }},
+              {{ path: "grid.disable_within_seconds_before_end", label: "网格尾盘禁用窗口（秒）", hint: "周期剩余秒数小于等于该值时，网格买卖均停用。", type: "number", ui: "range", min: 0, max: 180, step: 1, risk: "medium" }},
             ],
           }},
           {{
             title: "均值回归与止盈止损",
             description: "控制回归入场、均值回归退出、止盈比例与止损阈值。",
             fields: [
+              {{ path: "mean_reversion.enabled", label: "均值回归使能", hint: "关闭后均值回归买卖规则整体停用。", type: "boolean", risk: "medium" }},
               {{ path: "mean_reversion.up_buy_deviation", label: "Up 买入偏离阈值", hint: "Up 相对均价的偏离度达到该值时考虑买入。", type: "number", ui: "range", min: 0.01, max: 0.50, step: 0.01, risk: "medium" }},
               {{ path: "mean_reversion.down_buy_deviation", label: "Down 买入偏离阈值", hint: "Down 相对均价的偏离度达到该值时考虑买入。", type: "number", ui: "range", min: 0.01, max: 0.50, step: 0.01, risk: "medium" }},
               {{ path: "mean_reversion.mean_reversion_sell_up_deviation", label: "Up 卖出偏离阈值", hint: "均值回归退出的 Up 阈值。", type: "number", ui: "range", min: 0.01, max: 0.60, step: 0.01, risk: "medium" }},
               {{ path: "mean_reversion.mean_reversion_sell_down_deviation", label: "Down 卖出偏离阈值", hint: "均值回归退出的 Down 阈值。", type: "number", ui: "range", min: 0.01, max: 0.60, step: 0.01, risk: "medium" }},
               {{ path: "mean_reversion.deviation_scale", label: "偏离度放大系数", hint: "偏离越大，单量放大越多。", type: "number", ui: "range", min: 1, max: 100, step: 1, risk: "high" }},
+              {{ path: "mean_reversion.disable_within_seconds_before_end", label: "均值回归尾盘禁用窗口（秒）", hint: "周期剩余秒数小于等于该值时，均值回归买卖均停用。", type: "number", ui: "range", min: 0, max: 180, step: 1, risk: "medium" }},
               {{ path: "profit_taking.take_profit_up_deviation", label: "Up 止盈偏离阈值", hint: "触发止盈所需偏离度。", type: "number", ui: "range", min: 0.01, max: 0.60, step: 0.01, risk: "low" }},
               {{ path: "profit_taking.take_profit_down_deviation", label: "Down 止盈偏离阈值", hint: "触发止盈所需偏离度。", type: "number", ui: "range", min: 0.01, max: 0.60, step: 0.01, risk: "low" }},
               {{ path: "profit_taking.take_profit_fraction", label: "止盈卖出比例", hint: "每次止盈卖出持仓的比例。", type: "number", ui: "range", min: 0.05, max: 1.00, step: 0.05, risk: "medium" }},
@@ -617,10 +956,25 @@ def build_dashboard_html(
               {{ path: "last_minute.tail_profit_scale", label: "尾盘盈利放大系数", hint: "周期盈利越高，允许尾盘保留更多仓位。", type: "number", ui: "range", min: 0.00, max: 1.00, step: 0.01, risk: "medium" }},
               {{ path: "last_minute.tail_volatility_scale", label: "尾盘波动放大系数", hint: "波动越高，尾盘目标仓位越大。", type: "number", ui: "range", min: 0, max: 100, step: 1, risk: "medium" }},
               {{ path: "last_minute.max_tail_exposure", label: "尾盘最大敞口", hint: "尾盘留仓的上限。", type: "number", ui: "range", min: 0, max: 200, step: 5, risk: "high" }},
+              {{ path: "last_minute.preferred_leg_min_ratio", label: "优势侧最小份额倍率", hint: "浮盈较高一侧持仓需 ≥ 另一侧×该值；1.0 关闭。平局按市价较高侧为优势。", type: "number", ui: "range", min: 1.00, max: 3.00, step: 0.05, risk: "high" }},
               {{ path: "execution.fee_rate", label: "手续费率", hint: "paper broker 使用的模拟手续费。", type: "number", ui: "range", min: 0.000, max: 0.010, step: 0.0005, risk: "medium" }},
               {{ path: "execution.slippage_bps", label: "滑点（bps）", hint: "paper broker 使用的模拟滑点。", type: "number", ui: "select", options: [0, 5, 10, 15, 20, 30], risk: "medium" }},
+              {{ path: "execution.min_seconds_between_orders", label: "最小下单间隔（秒）", hint: "两次下单之间的最短时间间隔。", type: "number", ui: "range", min: 0, max: 30, step: 0.5, risk: "medium" }},
+              {{ path: "execution.min_same_outcome_price_move_ratio", label: "同方向最小价差比例", hint: "同一 outcome 连续下单前要求的最小价格变化比例。", type: "number", ui: "range", min: 0.00, max: 0.20, step: 0.005, risk: "medium" }},
+              {{ path: "rule_price_feed.last_minute", label: "尾盘规则喂价间隔（秒）", hint: "0 表示每个 tick 使用最新价。", type: "number", ui: "range", min: 0, max: 20, step: 0.5, risk: "low" }},
+              {{ path: "rule_price_feed.entries.opening", label: "opening 喂价间隔（秒）", hint: "入场 opening 规则价格缓存间隔。", type: "number", ui: "range", min: 0, max: 20, step: 0.5, risk: "low" }},
+              {{ path: "rule_price_feed.entries.hedge", label: "hedge 入场喂价间隔（秒）", hint: "入场 hedge 规则价格缓存间隔。", type: "number", ui: "range", min: 0, max: 20, step: 0.5, risk: "low" }},
+              {{ path: "rule_price_feed.entries.grid", label: "grid 入场喂价间隔（秒）", hint: "入场 grid 规则价格缓存间隔。", type: "number", ui: "range", min: 0, max: 20, step: 0.5, risk: "low" }},
+              {{ path: "rule_price_feed.entries.mean_reversion", label: "均值回归入场喂价间隔（秒）", hint: "入场 mean_reversion 规则价格缓存间隔。", type: "number", ui: "range", min: 0, max: 20, step: 0.5, risk: "low" }},
+              {{ path: "rule_price_feed.entries.trend", label: "trend 喂价间隔（秒）", hint: "入场 trend 规则价格缓存间隔。", type: "number", ui: "range", min: 0, max: 20, step: 0.5, risk: "low" }},
+              {{ path: "rule_price_feed.exits.stop_loss", label: "stop_loss 喂价间隔（秒）", hint: "离场 stop_loss 规则价格缓存间隔。", type: "number", ui: "range", min: 0, max: 20, step: 0.5, risk: "low" }},
+              {{ path: "rule_price_feed.exits.hedge", label: "hedge 离场喂价间隔（秒）", hint: "离场 hedge 规则价格缓存间隔。", type: "number", ui: "range", min: 0, max: 20, step: 0.5, risk: "low" }},
+              {{ path: "rule_price_feed.exits.take_profit", label: "take_profit 喂价间隔（秒）", hint: "离场 take_profit 规则价格缓存间隔。", type: "number", ui: "range", min: 0, max: 20, step: 0.5, risk: "low" }},
+              {{ path: "rule_price_feed.exits.grid", label: "grid 离场喂价间隔（秒）", hint: "离场 grid 规则价格缓存间隔。", type: "number", ui: "range", min: 0, max: 20, step: 0.5, risk: "low" }},
+              {{ path: "rule_price_feed.exits.mean_reversion", label: "均值回归离场喂价间隔（秒）", hint: "离场 mean_reversion 规则价格缓存间隔。", type: "number", ui: "range", min: 0, max: 20, step: 0.5, risk: "low" }},
               {{ path: "priorities.risk", label: "风险规则优先级", hint: "数值越小越优先。", type: "number", min: 1, max: 99, step: 1, risk: "low" }},
               {{ path: "priorities.last_minute", label: "尾盘规则优先级", hint: "数值越小越优先。", type: "number", min: 1, max: 99, step: 1, risk: "low" }},
+              {{ path: "priorities.opening", label: "开盘规则优先级", hint: "数值越小越优先。", type: "number", min: 1, max: 99, step: 1, risk: "low" }},
               {{ path: "priorities.stop_loss", label: "止损规则优先级", hint: "数值越小越优先。", type: "number", min: 1, max: 99, step: 1, risk: "low" }},
               {{ path: "priorities.hedge", label: "对冲规则优先级", hint: "数值越小越优先。", type: "number", min: 1, max: 99, step: 1, risk: "low" }},
               {{ path: "priorities.take_profit", label: "止盈规则优先级", hint: "数值越小越优先。", type: "number", min: 1, max: 99, step: 1, risk: "low" }},
@@ -682,7 +1036,7 @@ def build_dashboard_html(
         ],
       }},
     }};
-    function setConfigStatus(message, level) {{
+    {_dashboard_config_param_meta_script()}    function setConfigStatus(message, level) {{
       const node = document.getElementById("config-console-status");
       if (!node) return;
       node.textContent = message || "";
@@ -741,6 +1095,10 @@ def build_dashboard_html(
       }};
       return `<span class="config-risk-badge ${{configEscapeHtml(risk)}}">${{configEscapeHtml(mapping[risk] || risk)}}</span>`;
     }}
+    function buildParamHelpExtra(field) {{
+      if (!field.detail) return "";
+      return `<span class="config-param-help" tabindex="0" aria-label="扩展说明"><span class="config-param-help-mark">?</span><span class="config-param-tooltip-panel" role="tooltip">${{configEscapeHtml(field.detail)}}</span></span>`;
+    }}
     function configSetByPath(target, path, value) {{
       const parts = path.split(".");
       let node = target;
@@ -792,12 +1150,15 @@ def build_dashboard_html(
       return renderConfigInput(field.path, value, field.type);
     }}
     function renderConfigField(field, value) {{
-      const label = configEscapeHtml(field.label || field.path);
-      const path = configEscapeHtml(field.path);
-      const hint = field.hint ? `<div class="config-field-hint">${{configEscapeHtml(field.hint)}}</div>` : "";
-      const riskBadge = buildRiskBadge(field);
-      const rangeHint = buildRangeHint(field);
-      return `<div class="config-row"><div class="config-label-row"><label class="config-label" for="cfg-${{path}}">${{label}}</label>${{riskBadge}}</div><div class="config-path">${{path}}</div>${{renderSchemaInput(field, value)}}${{rangeHint}}${{hint}}</div>`;
+      const resolved = enrichConfigSchemaField(field);
+      const label = configEscapeHtml(resolved.label || resolved.path);
+      const path = configEscapeHtml(resolved.path);
+      const hint = resolved.hint ? `<div class="config-field-hint">${{configEscapeHtml(resolved.hint)}}</div>` : "";
+      const example = resolved.example ? `<div class="config-field-example">示例：${{configEscapeHtml(resolved.example)}}</div>` : "";
+      const riskBadge = buildRiskBadge(resolved);
+      const rangeHint = buildRangeHint(resolved);
+      const helpExtra = buildParamHelpExtra(resolved);
+      return `<div class="config-row"><div class="config-label-row"><div class="config-label-inline"><label class="config-label config-label-inline-text" for="cfg-${{path}}">${{label}}</label>${{helpExtra}}</div>${{riskBadge}}</div><div class="config-path">${{path}}</div>${{renderSchemaInput(resolved, value)}}${{rangeHint}}${{hint}}${{example}}</div>`;
     }}
     function renderConfigSection(section, rowsHtml) {{
       return `<section class="config-section"><div class="config-section-title">${{configEscapeHtml(section.title || "")}}</div><div class="config-section-desc">${{configEscapeHtml(section.description || "")}}</div><div class="config-grid">${{rowsHtml}}</div></section>`;
@@ -824,7 +1185,13 @@ def build_dashboard_html(
       const unknownFields = configCollectUnknownFields(data, schema);
       if (unknownFields.length) {{
         const advancedRows = unknownFields
-          .map((row) => renderConfigField({{ path: row.path, label: row.path, hint: "未预设说明的高级参数，仍可直接按 YAML 路径编辑。" }}, row.value))
+          .map((row) => renderConfigField({{
+            path: row.path,
+            label: row.path,
+            hint: "未预设说明的高级参数，仍可直接按 YAML 路径编辑。",
+            example: "保留当前 YAML 中该键已有取值，或对照策略代码/注释填写",
+            detail: "该键未列入控制台标准表单。请确认路径与策略配置模型一致，类型错误可能导致加载或运行时报错。",
+          }}, row.value))
           .join("");
         sections.push(renderConfigSection({{ title: "其他高级配置", description: "以下字段未预置为业务表单，但仍然可以继续编辑。" }}, advancedRows));
       }}
@@ -905,12 +1272,23 @@ def build_dashboard_html(
       node.textContent = message || "";
       node.className = "config-status" + (tone ? ` ${{tone}}` : "");
     }}
+    function getLauncherDraftValue(profileName, fieldName, fallbackValue) {{
+      const profileDraft = launcherState.draftOverrides[profileName];
+      if (profileDraft && Object.prototype.hasOwnProperty.call(profileDraft, fieldName)) {{
+        return profileDraft[fieldName];
+      }}
+      return fallbackValue;
+    }}
     function renderLauncherField(profile, field) {{
       const profileName = configEscapeHtml(profile.name || "");
       const fieldName = configEscapeHtml(field.name || "");
+      const draftValue = getLauncherDraftValue(profile.name || "", field.name || "", field.value);
       const label = configEscapeHtml(field.label || field.name || "");
+      const helpExtra = buildParamHelpExtra(field);
+      const labelRow = `<div class="config-label-row"><div class="config-label-inline"><span class="config-label config-label-inline-text">${{label}}</span>${{helpExtra}}</div></div>`;
       const notes = [];
       if (field.description) notes.push(`<div class="config-field-hint">${{configEscapeHtml(field.description)}}</div>`);
+      if (field.example) notes.push(`<div class="config-field-example">示例：${{configEscapeHtml(field.example)}}</div>`);
       if (field.saved_default !== undefined && field.saved_default !== null) {{
         notes.push(`<div class="config-field-hint">默认值：${{configEscapeHtml(field.saved_default)}}</div>`);
       }}
@@ -924,15 +1302,15 @@ def build_dashboard_html(
       if (field.kind === "select" && Array.isArray(field.options)) {{
         const options = field.options.map((option) => {{
           const value = configEscapeHtml(option);
-          const selected = String(option) === String(field.value) ? "selected" : "";
+          const selected = String(option) === String(draftValue) ? "selected" : "";
           return `<option value="${{value}}" ${{selected}}>${{value}}</option>`;
         }}).join("");
-        return `<div class="config-row"><label class="config-label">${{label}}</label><select class="config-select" data-launch-profile="${{profileName}}" data-launch-field="${{fieldName}}">${{options}}</select>${{desc}}</div>`;
+        return `<div class="config-row">${{labelRow}}<select class="config-select" data-launch-profile="${{profileName}}" data-launch-field="${{fieldName}}">${{options}}</select>${{desc}}</div>`;
       }}
       if (field.kind === "number") {{
-        return `<div class="config-row"><label class="config-label">${{label}}</label><input class="config-input" type="number" value="${{configEscapeHtml(field.value)}}" data-launch-profile="${{profileName}}" data-launch-field="${{fieldName}}" ${{min}} ${{max}} ${{step}}>${{buildRangeHint(field)}}${{desc}}</div>`;
+        return `<div class="config-row">${{labelRow}}<input class="config-input" type="number" value="${{configEscapeHtml(draftValue)}}" data-launch-profile="${{profileName}}" data-launch-field="${{fieldName}}" ${{min}} ${{max}} ${{step}}>${{buildRangeHint(field)}}${{desc}}</div>`;
       }}
-      return `<div class="config-row"><label class="config-label">${{label}}</label><input class="config-input" type="text" value="${{configEscapeHtml(field.value ?? "")}}" data-launch-profile="${{profileName}}" data-launch-field="${{fieldName}}">${{desc}}</div>`;
+      return `<div class="config-row">${{labelRow}}<input class="config-input" type="text" value="${{configEscapeHtml(draftValue ?? "")}}" data-launch-profile="${{profileName}}" data-launch-field="${{fieldName}}">${{desc}}</div>`;
     }}
     function collectLauncherOverrides(profileName) {{
       const overrides = {{}};
@@ -942,6 +1320,33 @@ def build_dashboard_html(
         overrides[fieldName] = node.value;
       }});
       return overrides;
+    }}
+    function updateLauncherDraft(profileName, fieldName, value) {{
+      if (!profileName || !fieldName) return;
+      if (!launcherState.draftOverrides[profileName]) {{
+        launcherState.draftOverrides[profileName] = {{}};
+      }}
+      launcherState.draftOverrides[profileName][fieldName] = value;
+    }}
+    function replaceLauncherDraftWithCatalog(profiles) {{
+      const nextDrafts = {{}};
+      (profiles || []).forEach((profile) => {{
+        const profileName = profile.name || "";
+        if (!profileName) return;
+        const currentDraft = launcherState.draftOverrides[profileName] || {{}};
+        const fieldDraft = {{}};
+        (profile.fields || []).forEach((field) => {{
+          const fieldName = field.name || "";
+          if (!fieldName) return;
+          if (Object.prototype.hasOwnProperty.call(currentDraft, fieldName)) {{
+            fieldDraft[fieldName] = currentDraft[fieldName];
+          }} else {{
+            fieldDraft[fieldName] = field.value;
+          }}
+        }});
+        nextDrafts[profileName] = fieldDraft;
+      }});
+      launcherState.draftOverrides = nextDrafts;
     }}
     function renderLauncherProfiles(profiles, status) {{
       const container = document.getElementById("launcher-profiles");
@@ -1023,16 +1428,29 @@ def build_dashboard_html(
       const refreshButton = document.getElementById("launcher-refresh-btn");
       const stopButton = document.getElementById("launcher-stop-btn");
       if (profilesNode) {{
-        profilesNode.addEventListener("click", async function(event) {{
+        profilesNode.addEventListener("input", function(event) {{
           const target = event.target;
           if (!target) return;
           const profileName = target.getAttribute("data-launch-profile");
+          const fieldName = target.getAttribute("data-launch-field");
+          if (!profileName || !fieldName) return;
+          updateLauncherDraft(profileName, fieldName, target.value);
+        }});
+        profilesNode.addEventListener("click", async function(event) {{
+          const target = event.target;
+          if (!target) return;
+          const isStartButton = target.classList && target.classList.contains("launcher-start-btn");
+          const isSaveDefaultsButton = target.classList && target.classList.contains("launcher-save-defaults-btn");
+          const profileName = target.getAttribute("data-launch-profile");
           const saveProfileName = target.getAttribute("data-launch-save-profile");
-          if (profileName) {{
+          if (isStartButton && profileName) {{
             const overrides = collectLauncherOverrides(profileName);
             setLauncherStatus(`正在启动 ${{profileName}} ...`, "");
             try {{
               const payload = await startLauncherProfile(profileName, overrides);
+              if (launcherState.draftOverrides[profileName]) {{
+                delete launcherState.draftOverrides[profileName];
+              }}
               renderLauncherMeta(payload.status || {{}}, "", "");
               setLauncherStatus(
                 payload.status && payload.status.running
@@ -1048,12 +1466,16 @@ def build_dashboard_html(
             }}
             return;
           }}
-          if (saveProfileName) {{
+          if (isSaveDefaultsButton && saveProfileName) {{
             const overrides = collectLauncherOverrides(saveProfileName);
             setLauncherStatus(`正在保存 ${{saveProfileName}} 默认值...`, "");
             try {{
               await saveLauncherDefaults(saveProfileName, overrides);
+              if (launcherState.draftOverrides[saveProfileName]) {{
+                delete launcherState.draftOverrides[saveProfileName];
+              }}
               const catalog = await loadLauncherCatalog();
+              replaceLauncherDraftWithCatalog(catalog.profiles || []);
               renderLauncherProfiles(catalog.profiles || [], catalog.status || {{}});
               renderLauncherMeta(catalog.status || {{}}, catalog.help_command || "", catalog.preferences_path || "");
               setLauncherStatus("默认值已保存，下次打开页面会自动回填。", "ok");
@@ -1067,6 +1489,7 @@ def build_dashboard_html(
         refreshButton.addEventListener("click", async function() {{
           try {{
             const payload = await loadLauncherCatalog();
+            replaceLauncherDraftWithCatalog(payload.profiles || []);
             renderLauncherProfiles(payload.profiles || [], payload.status || {{}});
             renderLauncherMeta(payload.status || {{}}, payload.help_command || "", payload.preferences_path || "");
             if (payload.status && payload.status.running) {{
@@ -1098,8 +1521,10 @@ def build_dashboard_html(
       }}
       try {{
         const payload = await loadLauncherCatalog();
+        replaceLauncherDraftWithCatalog(payload.profiles || []);
         renderLauncherProfiles(payload.profiles || [], payload.status || {{}});
         renderLauncherMeta(payload.status || {{}}, payload.help_command || "", payload.preferences_path || "");
+        launcherState.runningSnapshot = Boolean(payload.status && payload.status.running);
         if (payload.status && payload.status.running) {{
           setLauncherStatus(`正在运行：${{payload.status.profile_title || payload.status.profile_name || ""}}`, "ok");
         }} else {{
@@ -1109,10 +1534,18 @@ def build_dashboard_html(
           try {{
             const status = await refreshLauncherStatus();
             renderLauncherMeta(status || {{}}, payload.help_command || "", payload.preferences_path || "");
-            const catalog = await loadLauncherCatalog();
-            renderLauncherProfiles(catalog.profiles || [], status || {{}});
+            const runningNow = Boolean(status && status.running);
+            const shouldReloadCatalog = launcherState.runningSnapshot !== runningNow;
+            if (shouldReloadCatalog) {{
+              const catalog = await loadLauncherCatalog();
+              replaceLauncherDraftWithCatalog(catalog.profiles || []);
+              renderLauncherProfiles(catalog.profiles || [], status || {{}});
+              launcherState.runningSnapshot = runningNow;
+            }}
             if (status && status.running) {{
               setLauncherStatus(`正在运行：${{status.profile_title || status.profile_name || ""}}`, "ok");
+            }} else if (launcherState.runningSnapshot === false) {{
+              setLauncherStatus("当前无任务运行。", "");
             }}
           }} catch (error) {{
           }}
@@ -1294,14 +1727,46 @@ def generate_dashboard_bundle(
     )
 
 
+def refresh_dashboard_html_shell(
+    output_dir: str | Path,
+    title: str = "Polynet AI Monitoring Dashboard",
+    refresh_seconds: float = 1.0,
+) -> DashboardArtifacts:
+    """Write dashboard.html / dashboard_state.js / daily_report.md / summary csv with empty data.
+
+    Use when the target folder has no live ``metrics.csv`` (e.g. ``batch_replay_outputs``) but you
+    need an up-to-date HTML shell for the config console and launcher UI.
+    """
+    empty = pd.DataFrame()
+    return generate_dashboard_bundle(
+        empty,
+        empty,
+        empty,
+        empty,
+        output_dir,
+        title=title,
+        refresh_seconds=refresh_seconds,
+    )
+
+
 def generate_dashboard_from_directory(
     input_dir: str | Path,
     output_dir: str | Path | None = None,
     title: str = "Polynet AI Monitoring Dashboard",
 ) -> DashboardArtifacts:
     directory = Path(input_dir)
+    metrics_path = directory / "metrics.csv"
+    if not metrics_path.is_file():
+        hint_dir = Path(output_dir).resolve() if output_dir else directory.resolve()
+        raise FileNotFoundError(
+            f"找不到 {metrics_path.resolve()}。该路径应是 live/单次回放输出根目录（根下有 metrics.csv、"
+            "cycles.csv、decisions.csv）。\n"
+            "batch_replay_outputs 等目录只有 batch_replay_summary 等文件，没有上述 CSV。\n"
+            "若只需刷新 dashboard 页面外壳（参数控制台、运行控制台），请改用：\n"
+            f'  python scripts/run_dashboard_report.py --html-only --output-dir "{hint_dir}"'
+        )
     target = Path(output_dir) if output_dir else directory
-    metrics_df = pd.read_csv(directory / "metrics.csv")
+    metrics_df = pd.read_csv(metrics_path)
     cycles_df = pd.read_csv(directory / "cycles.csv")
     decisions_df = pd.read_csv(directory / "decisions.csv")
     snapshot_path = directory / "snapshots.csv"

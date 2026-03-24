@@ -58,7 +58,7 @@ def test_dashboard_run_manager_records_last_used_values(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(MODULE.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
 
-    status = manager.start("sim-paper", {"sheet": "BTC", "starting_cash": 4321})
+    status = manager.start("sim-paper", {"cycle_glob": "btc-updown-5m-*", "starting_cash": 4321, "max_cycles": 7})
     payload = manager.profiles_payload()
     sim_profile = next(profile for profile in payload["profiles"] if profile["name"] == "sim-paper")
     fields = {field["name"]: field for field in sim_profile["fields"]}
@@ -66,3 +66,5 @@ def test_dashboard_run_manager_records_last_used_values(tmp_path: Path, monkeypa
     assert status["running"] is True
     assert fields["starting_cash"]["last_used"] == 4321
     assert fields["starting_cash"]["value"] == 4321
+    assert fields["max_cycles"]["last_used"] == 7
+    assert fields["max_cycles"]["value"] == 7
