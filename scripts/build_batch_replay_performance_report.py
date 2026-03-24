@@ -598,7 +598,7 @@ def _write_performance_report_xlsx(
 
 
 def _today_suffix() -> str:
-    return datetime.now().strftime("%Y%m%d")
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
 def build_performance_report_zh(
