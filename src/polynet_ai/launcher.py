@@ -160,7 +160,7 @@ def build_launch_profiles(
             command=[
                 python_cmd,
                 "scripts/run_recorded_live_paper.py",
-                "--input-dir",
+                "--input-dirs",
                 "artifacts/live/record_job",
                 "--cycle-glob",
                 "btc-updown-5m-*",
@@ -180,6 +180,17 @@ def build_launch_profiles(
                 "1000",
             ],
             fields=[
+                LaunchField(
+                    name="input_dirs",
+                    label="数据源根目录（多路径）",
+                    kind="text",
+                    default="artifacts/live/record_job",
+                    description="逗号或分号分隔多个输入根目录；每个目录下会扫描匹配周期子目录并合并回放事件。",
+                    cli_flag="--input-dirs",
+                    required=False,
+                    example="artifacts/live/record_job;artifacts/live/record_job_v2",
+                    detail="用于“模拟下单回放测试”。如果你只用一个目录，直接填默认值即可。",
+                ),
                 LaunchField(
                     name="cycle_glob",
                     label="周期目录匹配",

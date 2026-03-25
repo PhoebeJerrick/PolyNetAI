@@ -184,3 +184,106 @@
 - 以成交价作为仿真成交价基准。
 - 仿真 broker 采用立即成交模型，可叠加固定滑点和手续费。
 - 配置文件是单一真源，补充 txt 文档只作为参数与案例来源。
+
+---
+
+# v1.1 更新日志（代码迭代后补充）
+
+## 新增特征定义
+
+### 价格百分位（Price Percentile）
+
+- 定义：`price_percentile = (price - low_price) / (high_price - low_price)`
+- 范围：[0, 1]  
+- 应用：网格规则判断低位(<=0.25)/高位(>=0.75)
+
+### 信心代理（Confidence Proxy）
+
+- 公式：`confidence_proxy = signal / (signal + volatility)`
+- 其中：`signal = abs(cycle_net_profit) + abs(price_move)`
+- 应用：Last Minute规则判断是否保留方向性仓位（门槛0.85）
+
+## 新增机制
+
+### Price Feed 缓存机制
+
+- 为每条规则独立维护价格缓存和更新时间戳
+- 配置项：`rule_price_feed.{section}.{rule}` (秒数，0=实时)
+- 作用：避免规则快速切换，提高稳定性
+
+## 新增规则
+
+### Opening Entry（周期开盘试探建仓）
+
+- 优先级：52
+- 触发条件：周期开始30秒内、无策略成交、存在弱势方、时机OK
+- 下单量：`base_order_size + volatility_ratio * volatility_order_scale`
+- 改进：添加流动性检查 `min_market_trades >= 3`
+
+## 现有规则补充与改进
+
+### Trend Entry
+
+- 原始：下单量按 `base_size + net_position * trend_scale` 计算
+- 风险：下单量可能膨胀，需添加上限约束
+- 改进：引入 `max_trend_order_size = 80.0` 配置项，实现 `size = min(size, max_trend_order_size)`
+
+### Mean Reversion Entry  
+
+- 原始：双向独立检测，同步时可能同时买入两侧
+- 风险：双向同时触发可能放大敞口和风险
+- 改进：优先平衡净方向
+  - 当 `net_direction = "Up"` 且 `down_deviation <= -threshold` 时，**仅买Down**（平衡优先）
+  - 当 `net_direction = "Down"` 且 `up_deviation >= threshold` 时，**仅买Up**（平衡优先）
+  - 当净方向平衡或空仓时，允许双向建仓
+
+### Stop Loss Exit
+
+- 说明：仅卖一侧持仓（另一侧在下一时刻处理）✓ 正确
+
+### Hedge Exit
+
+- 原始：双侧盈利时仅返回第一个意图
+- 风险：无法完整对冲，另一侧继续持仓
+- 改进：返回多个意图列表，支持双侧同步卖出
+  - Up盈利时添加Up卖出意图（优先级40）
+  - Down盈利时添加Down卖出意图（优先级41）
+  - 调用方可能执行其中一个或全部
+
+### Grid Sell  
+
+- 原始：硬编码卖出25%持仓 `_held_up(features) * 0.25`
+- 改进：参数化为 `grid.grid_exit_fraction: 0.25`，增强灵活性
+
+### Mean Reversion Sell
+
+- 原始：硬编码卖出40%持仓 `_held_up(features) * 0.4`
+- 改进：参数化为 `mean_reversion.mean_reversion_sell_fraction: 0.40`，增强灵活性
+
+## Last Minute补充
+
+### Step 3：双边比例约束
+
+- 机制：当 `preferred_leg_min_ratio > 1.0` 时，强制优势侧最小比例
+- 配置：`last_minute.preferred_leg_min_ratio`（默认1.0=禁用）
+- 效果：防止end-of-cycle时持仓严重不平衡
+
+## 新增风控约束
+
+### 1. 相邻成交时间约束
+
+- 配置：`execution.min_seconds_between_orders`（默认2.0秒）
+- 作用：防止过度频繁交易导致流动性成本增加
+
+### 2. 同方向价格波动约束
+
+- 配置：`execution.min_same_outcome_price_move_ratio`（默认0.03 = 3%）
+- 作用：避免价格无意义波动时重复操作同一侧
+
+### 3. 现金利用率约束
+
+- 配置项：
+  - `capital.max_cash_utilization`（默认0.95）：最大资本投入比例
+  - `capital.min_cash_buffer`（默认25.0）：最小现金缓冲
+  - `execution.fee_rate`（默认0.002）：交易费率
+  - `execution.slippage_bps`（默认10）：滑点基点

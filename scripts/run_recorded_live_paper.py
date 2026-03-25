@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import time
 from pathlib import Path
@@ -33,7 +34,12 @@ except ModuleNotFoundError:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="基于 ws_trade_events.ndjson 的准实时 paper trading runner")
-    parser.add_argument("--input-dir", default="artifacts/live/record_job")
+    parser.add_argument("--input-dir", default="artifacts/live/record_job;artifacts/live/record_job/More_RawData", help="单一输入根目录（兼容旧参数）")
+    parser.add_argument(
+        "--input-dirs",
+        default="",
+        help="多个输入根目录（用逗号或分号分隔）。会在每个目录下扫描周期子目录并合并回放事件。",
+    )
     parser.add_argument("--cycle-glob", default="btc-updown-5m-*")
     parser.add_argument("--event-file-name", default="ws_trade_events.ndjson")
     parser.add_argument("--max-cycles", type=int, default=10)
@@ -54,6 +60,34 @@ def _cycle_sort_key(path: Path) -> tuple[int, str]:
         return (int(suffix), path.name)
     except ValueError:
         return (0, path.name)
+
+
+def _parse_input_dirs(raw: str | None) -> list[str]:
+    if raw is None:
+        return []
+    raw = str(raw).strip()
+    if not raw:
+        return []
+    # 允许同时用逗号或分号分隔；避免在路径中包含逗号/分号导致无法解析的问题。
+    return [p.strip() for p in re.split(r"[;,]", raw) if p and p.strip()]
+
+
+def _resolve_input_dir(root: Path, raw_dir: str) -> Path:
+    p = Path(raw_dir).expanduser()
+    if not p.is_absolute():
+        p = root / p
+    return p.resolve()
+
+
+def _load_cycle_dirs_from_input_dirs(
+    input_dirs: list[Path],
+    cycle_glob: str,
+) -> list[Path]:
+    # 返回所有匹配的“周期子目录”，后续由调用方做全局排序与截断。
+    cycle_dirs: list[Path] = []
+    for input_dir in input_dirs:
+        cycle_dirs.extend((p for p in input_dir.glob(cycle_glob) if p.is_dir()))
+    return cycle_dirs
 
 
 def _load_events_from_cycle_dirs(input_dir: Path, cycle_glob: str, event_file_name: str, max_cycles: int | None):
@@ -152,14 +186,36 @@ def _write_sim_batch_reports(output_dir: str | Path, result: LiveRunnerResult) -
 
 def main() -> int:
     args = parse_args()
-    input_dir = (ROOT / args.input_dir).resolve()
-    if not input_dir.exists():
-        raise FileNotFoundError(f"输入目录不存在: {input_dir}")
+
+    input_dir_parts = _parse_input_dirs(args.input_dirs)
+    if input_dir_parts:
+        input_dirs = [_resolve_input_dir(ROOT, raw) for raw in input_dir_parts]
+    else:
+        input_dirs = [_resolve_input_dir(ROOT, args.input_dir)]
+
+    missing = [p for p in input_dirs if not p.exists()]
+    if missing:
+        raise FileNotFoundError(f"输入目录不存在: {', '.join(str(p) for p in missing)}")
+
     max_cycles = args.max_cycles if args.max_cycles and args.max_cycles > 0 else None
-    events = _load_events_from_cycle_dirs(input_dir, args.cycle_glob, args.event_file_name, max_cycles)
+
+    cycle_dirs = sorted(_load_cycle_dirs_from_input_dirs(input_dirs, args.cycle_glob), key=_cycle_sort_key)
+    if max_cycles is not None and max_cycles > 0:
+        cycle_dirs = cycle_dirs[:max_cycles]
+
+    events = []
+    for cycle_dir in cycle_dirs:
+        event_path = cycle_dir / args.event_file_name
+        cycle_events = load_recorded_trade_events(event_path)
+        if cycle_events:
+            events.extend(cycle_events)
+    events = sorted(events, key=lambda item: item.timestamp)
     if not events:
         raise RuntimeError(
-            f"未在 {input_dir} 下找到匹配 {args.cycle_glob}/{args.event_file_name} 的成交流文件，无法启动准实时回放。"
+            "未找到成交流文件，无法启动准实时回放。"
+            f"\n- 输入目录: {', '.join(str(p) for p in input_dirs)}"
+            f"\n- 周期匹配: {args.cycle_glob}"
+            f"\n- 成交流文件: {args.event_file_name}"
         )
     if args.limit is not None:
         events = events[: args.limit]

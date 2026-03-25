@@ -68,12 +68,14 @@ def test_apply_profile_overrides_updates_sim_profile_command(tmp_path: Path) -> 
         profiles["sim-paper"],
         {
             "cycle_glob": "btc-updown-5m-*",
+            "input_dirs": "artifacts/live/record_job;artifacts/live/record_job_v2",
             "starting_cash": 5000,
             "max_cycles": 25,
         },
     )
 
     assert "btc-updown-5m-*" in updated.command
+    assert "artifacts/live/record_job;artifacts/live/record_job_v2" in updated.command
     assert "5000" in updated.command
     assert "25" in updated.command
 

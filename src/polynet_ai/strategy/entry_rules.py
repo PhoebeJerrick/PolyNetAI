@@ -81,6 +81,14 @@ def _opening_price_timing_ok(
 
 
 def opening_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
+    """
+    改进的开盘试探规则：添加多指标确认机制
+    - 原有：单一信号入场 (弱势一侧)
+    - 改进：需要2个指标确认才入场
+      1. 弱势一侧价格检查
+      2. 流动性确认
+      3. 市场状态确认 (可选)
+    """
     if not config.get("opening_entry.enabled", True):
         return []
     if features.is_last_minute or features.strategy_trades != 0:
@@ -92,6 +100,15 @@ def opening_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[O
     weak = _opening_weak_outcome(features, use_comp)
     if weak is None:
         return []
+    
+    # 【改进1】流动性检查 - 确保有足够的市场成交
+    min_market_trades = int(config.get("opening_entry.min_market_trades", 2))  # 增加到2笔
+    if weak == "up" and features.up_market_n < min_market_trades:
+        return []
+    if weak == "down" and features.down_market_n < min_market_trades:
+        return []
+    
+    # 【改进2】价格时机确认 - 原有逻辑
     if not _opening_price_timing_ok(
         weak,
         features,
@@ -100,7 +117,33 @@ def opening_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[O
         float(config.get("opening_entry.min_range_width", 0.02)),
     ):
         return []
+    
+    # 【改进3】市场状态确认 - 避免在极端波动下入场
+    max_volatility = float(config.get("opening_entry.max_volatility_for_entry", 2.0))
+    if features.volatility_ratio > max_volatility:
+        return []  # 波动率过高，不入场
+    
+    # 【改进4】置信度评分
+    # 计算入场置信度 (0-1): 
+    # - 市场成交笔数越多越好
+    # - 价格偏离中位数越远越好
+    # - 波动率越低越好
+    market_n = features.up_market_n if weak == "up" else features.down_market_n
+    confidence = 0.6  # 基础分
+    confidence += min(0.2, (market_n - 1) / 10)  # 最多+0.2
+    confidence += min(0.2, 1 - features.volatility_ratio / max_volatility)  # 最多+0.2
+    
+    # 只有置信度足够高才入场 (可以通过配置调整)
+    min_confidence = float(config.get("opening_entry.min_confidence", 0.65))
+    if confidence < min_confidence:
+        return []
+    
     size = _base_size(config, features)
+    
+    # 根据置信度调整头寸大小
+    size_multiplier = confidence / min_confidence  # 置信度越高，头寸越大
+    size = size * size_multiplier
+    
     ref = features.up_last_price if weak == "up" else features.down_last_price
     return [
         OrderIntent(
@@ -111,7 +154,7 @@ def opening_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[O
             shares=size,
             reference_price=ref,
             category="opening",
-            reason="周期开盘试探建仓：买入相对低价（弱势）一侧，并在不高于该侧市场加权价或区间相对低位时介入",
+            reason=f"开盘试探建仓：买入相对低价（{weak}方），多指标确认（置信度{confidence:.1%}）",
             priority=int(config.priorities.get("opening", 52)),
         )
     ]
@@ -129,7 +172,17 @@ def trend_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Ord
         return []
 
     infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
-    size = _base_size(config, features) + abs(features.net_position) * float(config.get("trend.trend_scale", 0.15))
+    
+    # 计算基础下单量
+    base_size = _base_size(config, features)
+    trend_scale = float(config.get("trend.trend_scale", 0.15))
+    position_add = abs(features.net_position) * trend_scale
+    size = base_size + position_add
+    
+    # 添加上限约束 (新增)
+    max_trend_order_size = float(config.get("trend.max_trend_order_size", 80.0))
+    size = min(size, max_trend_order_size)
+    
     ref = outcome_reference_price(features, features.trend_bias, infer_missing_with_binary_complement=infer_missing)
     return [
         OrderIntent(
@@ -221,47 +274,117 @@ def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Orde
 
 
 def mean_reversion_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
+    """
+    改进的均值回归规则：优先平衡净方向
+    
+    逻辑改进：
+    1. 当有大额单向持仓时，优先平衡反向
+    2. 仅在净方向平衡后，才允许双向建仓
+    3. 加入头寸大小限制，防止过度集中
+    """
     if not bool(config.get("mean_reversion.enabled", True)):
         return []
     if rule_disabled_in_cycle_tail(features, config, "mean_reversion"):
         return []
     if features.is_last_minute:
         return []
+    
     up_threshold = float(config.get("mean_reversion.up_buy_deviation", 0.10))
     down_threshold = float(config.get("mean_reversion.down_buy_deviation", 0.10))
     deviation_scale = float(config.get("mean_reversion.deviation_scale", 45.0))
+    
+    # 【新增】头寸限制
+    max_net_position = float(config.get("mean_reversion.max_net_position", 60.0))
+    
     intents: list[OrderIntent] = []
     infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
-    if features.up_deviation >= up_threshold:
-        ref = outcome_reference_price(features, "up", infer_missing_with_binary_complement=infer_missing)
-        intents.append(
-            OrderIntent(
-                market_id=features.market_id,
-                cycle_id=features.cycle_id,
-                outcome="up",
-                action="buy",
-                shares=_base_size(config, features) + features.up_deviation * deviation_scale,
-                reference_price=ref,
-                category="mean_reversion",
-                reason="Up 价格显著高于均价，执行追高买入",
-                priority=int(config.priorities.get("mean_reversion", 70)),
+    
+    # 【改进】优先平衡大额单向持仓逻辑
+    # 如果持仓过于倾斜，优先平衡反向
+    abs_net = abs(features.net_position)
+    imbalance_threshold = float(config.get("mean_reversion.position_imbalance_threshold", 30.0))
+    
+    if abs_net > imbalance_threshold:
+        # 持仓严重不平衡，需要立即平衡
+        if features.net_direction == "Up" and features.down_held < abs_net * 0.5:
+            # Up方向过多，优先买Down平衡
+            if features.down_deviation <= -down_threshold:
+                ref = outcome_reference_price(features, "down", infer_missing_with_binary_complement=infer_missing)
+                balance_size = min(
+                    _base_size(config, features) + abs(features.down_deviation) * deviation_scale,
+                    abs_net * 0.8  # 平衡目标：至少缩小到80%
+                )
+                intents.append(
+                    OrderIntent(
+                        market_id=features.market_id,
+                        cycle_id=features.cycle_id,
+                        outcome="down",
+                        action="buy",
+                        shares=balance_size,
+                        reference_price=ref,
+                        category="mean_reversion",
+                        reason=f"优先平衡持仓不均：Up {features.up_held:.1f}占优，买入 Down 平衡",
+                        priority=int(config.priorities.get("mean_reversion", 70)) + 5,  # 优先级更高
+                    )
+                )
+                return intents  # 优先执行平衡，暂不进行其他操作
+        
+        elif features.net_direction == "Down" and features.up_held < abs_net * 0.5:
+            # Down方向过多，优先买Up平衡
+            if features.up_deviation >= up_threshold:
+                ref = outcome_reference_price(features, "up", infer_missing_with_binary_complement=infer_missing)
+                balance_size = min(
+                    _base_size(config, features) + features.up_deviation * deviation_scale,
+                    abs_net * 0.8  # 平衡目标
+                )
+                intents.append(
+                    OrderIntent(
+                        market_id=features.market_id,
+                        cycle_id=features.cycle_id,
+                        outcome="up",
+                        action="buy",
+                        shares=balance_size,
+                        reference_price=ref,
+                        category="mean_reversion",
+                        reason=f"优先平衡持仓不均：Down {features.down_held:.1f}占优，买入 Up 平衡",
+                        priority=int(config.priorities.get("mean_reversion", 70)) + 5,  # 优先级更高
+                    )
+                )
+                return intents  # 优先执行平衡，暂不进行其他操作
+    
+    # 【保留】原有双向建仓逻辑（仅在持仓平衡时执行）
+    if abs_net <= imbalance_threshold:
+        if features.up_deviation >= up_threshold and features.net_position < max_net_position:
+            ref = outcome_reference_price(features, "up", infer_missing_with_binary_complement=infer_missing)
+            intents.append(
+                OrderIntent(
+                    market_id=features.market_id,
+                    cycle_id=features.cycle_id,
+                    outcome="up",
+                    action="buy",
+                    shares=_base_size(config, features) + features.up_deviation * deviation_scale,
+                    reference_price=ref,
+                    category="mean_reversion",
+                    reason="Up 价格显著高于均价，执行均值回归买入",
+                    priority=int(config.priorities.get("mean_reversion", 70)),
+                )
             )
-        )
-    if features.down_deviation <= -down_threshold:
-        ref = outcome_reference_price(features, "down", infer_missing_with_binary_complement=infer_missing)
-        intents.append(
-            OrderIntent(
-                market_id=features.market_id,
-                cycle_id=features.cycle_id,
-                outcome="down",
-                action="buy",
-                shares=_base_size(config, features) + abs(features.down_deviation) * deviation_scale,
-                reference_price=ref,
-                category="mean_reversion",
-                reason="Down 价格显著低于均价，执行均值回归买入",
-                priority=int(config.priorities.get("mean_reversion", 70)),
+        if features.down_deviation <= -down_threshold and features.net_position > -max_net_position:
+            ref = outcome_reference_price(features, "down", infer_missing_with_binary_complement=infer_missing)
+            intents.append(
+                OrderIntent(
+                    market_id=features.market_id,
+                    cycle_id=features.cycle_id,
+                    outcome="down",
+                    action="buy",
+                    shares=_base_size(config, features) + abs(features.down_deviation) * deviation_scale,
+                    reference_price=ref,
+                    category="mean_reversion",
+                    reason="Down 价格显著低于均价，执行均值回归买入",
+                    priority=int(config.priorities.get("mean_reversion", 70)),
+                )
             )
-        )
+    
     return intents
 
 

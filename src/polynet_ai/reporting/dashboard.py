@@ -1439,7 +1439,8 @@ def build_dashboard_html(
         return `<div class="config-row">${{labelRow}}<select class="config-select" data-launch-profile="${{profileName}}" data-launch-field="${{fieldName}}">${{options}}</select>${{desc}}</div>`;
       }}
       if (field.kind === "number") {{
-        return `<div class="config-row">${{labelRow}}<input class="config-input" type="number" value="${{configEscapeHtml(draftValue)}}" data-launch-profile="${{profileName}}" data-launch-field="${{fieldName}}" ${{min}} ${{max}} ${{step}}>${{buildRangeHint(field)}}${{desc}}</div>`;
+        // 用 type="text" 避免浏览器对 type="number"（min/max/step）的一些强校验导致你无法稳定输入。
+        return `<div class="config-row">${{labelRow}}<input class="config-input" type="text" inputmode="numeric" autocomplete="off" value="${{configEscapeHtml(draftValue)}}" data-launch-profile="${{profileName}}" data-launch-field="${{fieldName}}">${{buildRangeHint(field)}}${{desc}}</div>`;
       }}
       return `<div class="config-row">${{labelRow}}<input class="config-input" type="text" value="${{configEscapeHtml(draftValue ?? "")}}" data-launch-profile="${{profileName}}" data-launch-field="${{fieldName}}">${{desc}}</div>`;
     }}
@@ -1668,9 +1669,8 @@ def build_dashboard_html(
             const runningNow = Boolean(status && status.running);
             const shouldReloadCatalog = launcherState.runningSnapshot !== runningNow;
             if (shouldReloadCatalog) {{
-              const catalog = await loadLauncherCatalog();
-              replaceLauncherDraftWithCatalog(catalog.profiles || []);
-              renderLauncherProfiles(catalog.profiles || [], status || {{}});
+              // 不在轮询期间重建 profiles 卡片，避免覆盖用户正在编辑的输入值。
+              // 启动/停止按钮点击后会显式刷新需要更新的 UI。
               launcherState.runningSnapshot = runningNow;
             }}
             if (status && status.running) {{

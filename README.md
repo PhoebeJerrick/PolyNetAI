@@ -46,91 +46,29 @@ python scripts/run_dashboard_console.py --dashboard-dir artifacts/live/record_jo
 
 > 如果你的目录不是 `artifacts/live/record_job/batch_replay_outputs`，把上面两个命令里的目录换成你自己的输出目录。
 
+> 运行 `record.sh` 的小结：
+> - Linux：可直接 `./record.sh ds10`
+> - Windows（PowerShell）：建议用 `bash -lc "./record.sh ds10"`（否则可能出现“没反应/没输出”，因为 `record.sh` 是 `bash` 脚本，PowerShell 不会自动按 bash 解释）。
+
+## record.sh 一键入口（推荐）
+```bash
+./record.sh help
+./record.sh d                  # 启动 dashboard 控制台
+./record.sh ds<N>             # dashboard + 模拟下单回放 N 个 5m 周期
+./record.sh chart              # 打开 artifacts/charts/tracker_position_compare.html
+./record.sh excel-v5          # 生成/更新 data/processed/..._with_accumulated_shares_v5.xlsx
+
+./record.sh s<N>              # 后台开始抓未来 N 个完整 5m 周期
+./record.sh r<N>              # 前台抓取并回放 N 个周期（直到生成业绩报告）
+./record.sh rb<N>             # 后台抓取并回放 N 个周期（直到生成业绩报告）
+./record.sh p                 # 查看后台状态和进度
+./record.sh x                 # 停止后台任务
+```
+
 ## 常用命令（按场景）
 
-### 离线回放与调参
-
-```bash
-python scripts/run_paper_replay.py --input data/raw/polymarket_tracker_collection.xlsx --config configs/strategy.yaml --output artifacts/replays/paper_replay_report.xlsx
-python scripts/run_parameter_sweep.py --input data/raw/polymarket_tracker_collection.xlsx --config configs/strategy.yaml --sweep configs/sweep.yaml --output-dir artifacts/sweeps/sweep_outputs
-python scripts/run_auto_optimize.py --input data/raw/polymarket_tracker_collection.xlsx --config configs/strategy.yaml --optimize configs/optimize.yaml --output-dir artifacts/optimization/optimize_outputs
-```
-
 ### Tracker 持仓对比折线图（HTML）
-
-```bash
-python scripts/build_tracker_position_compare_chart.py --input data/processed/polymarket_tracker_collection_with_accumulated_shares_v5.xlsx --output artifacts/charts/tracker_position_compare.html
-```
-
-可选指定工作表：
-
-```bash
-python scripts/build_tracker_position_compare_chart.py --input data/processed/polymarket_tracker_collection_with_accumulated_shares_v5.xlsx --sheet BTC --output artifacts/charts/tracker_position_compare.html
-```
-
-输出文件为交互式 HTML，上图包含持仓相关折线（含 `Up方向投注总价值`、`Down方向投注总价值`、`当前持仓投注总价值`、`净持仓价值`），并将 `投注份数` 的 Up/Down 方向点用不同颜色标记，便于对比。
-图中会提供 `时间周期` 下拉框（默认第一个周期），并在下方提供每条曲线对应的 checkbox。勾选状态在切换周期后保持一致，可持续按指标过滤。页面下方会同步显示同周期的 `Up价格`/`Down价格` 折线图，两张图在切换周期时同时刷新，横轴均为单周期内秒数。
-
-### 本地事件流准实时回放（对应“模拟下单测试”）
-
-```bash
-python scripts/run_recorded_live_paper.py --input-dir artifacts/live/record_job --cycle-glob "btc-updown-5m-*" --max-cycles 10 --config configs/strategy.yaml --output-dir artifacts/live/record_job/batch_replay_outputs --pace-factor 20 --status-every 100 --dashboard-refresh-seconds 1 --starting-cash 1000
-```
-
-### 实时行情 paper（对应“实盘行情验证”）
-
-```bash
-python -u scripts/run_polymarket_live_paper.py --robot-mode --slug-prefix btc-updown-5m- --max-cycles 10 --config configs/strategy.yaml --output-dir artifacts/live/polymarket_btc_10cycles --dashboard-refresh-seconds 1 --starting-cash 1000
-```
-
-### 单独抓取 websocket 事件流
-
-```bash
-python scripts/capture_polymarket_ws_events.py --slug-prefix btc-updown-5m- --max-cycles 10 --output-dir artifacts/live/ws_capture_btc_10cycles
-```
-
-后台抓取（长时间任务）：
-
-```bash
-python scripts/capture_polymarket_ws_events.py --daemonize --slug-prefix btc-updown-5m- --max-cycles 300 --start-buffer-seconds 2 --output-dir artifacts/live/ws_capture_btc_300cycles
-```
-
-### 抓取流水线一键管理
-
-```bash
-python scripts/manage_capture_pipeline.py start --output-dir artifacts/live/ws_capture_btc_300cycles --slug-prefix btc-updown-5m- --max-cycles 300 --start-buffer-seconds 2
-python scripts/manage_capture_pipeline.py status --output-dir artifacts/live/ws_capture_btc_300cycles
-python scripts/manage_capture_pipeline.py run-full --output-dir artifacts/live/ws_capture_btc_10cycles --slug-prefix btc-updown-5m- --max-cycles 10 --config configs/strategy.yaml --starting-cash 100
-python scripts/manage_capture_pipeline.py stop --output-dir artifacts/live/ws_capture_btc_300cycles
-```
-
-### 回放已记录事件流
-
-单周期：
-
-```bash
-python scripts/replay_recorded_trade_events.py --input artifacts/live/ws_capture_btc_10cycles/<cycle_slug>/ws_trade_events.ndjson --config configs/strategy.yaml --starting-cash 100 --output artifacts/replays/<cycle_slug>_recorded_event_replay.xlsx
-```
-
-批量：
-
-```bash
-python scripts/batch_replay_recorded_trade_events.py --input-dir artifacts/live/ws_capture_btc_10cycles --config configs/strategy.yaml --starting-cash 100
-```
-
-仅重建中文绩效报告：
-
-```bash
-python scripts/build_batch_replay_performance_report.py --input-dir artifacts/live/ws_capture_btc_10cycles
-```
-
-### 单周期复盘（可选真实下单）
-
-```bash
-python scripts/run_polymarket_cycle_review.py --config configs/strategy.yaml --output-dir artifacts/live/polymarket_cycle_review --slug-prefix btc-updown-5m- --account-index 2 --dashboard-refresh-seconds 1 --status-every 25 --start-buffer-seconds 2
-```
-
-需要真实下单时再加 `--real-trading`，并先确认 `env-file`、账户索引与风控参数。
+直接用 `./record.sh chart` 打开对比图；若需要先生成 v5 累积份数 Excel，可先跑 `./record.sh excel-v5`。
 
 ## 主要脚本说明
 

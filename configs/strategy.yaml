@@ -4,6 +4,7 @@ cycle:
 opening_entry:
   enabled: true
   window_seconds: 30
+  min_market_trades: 1
   vwap_epsilon: 0.01
   range_low_fraction: 0.35
   min_range_width: 0.02
@@ -13,7 +14,7 @@ order_sizing:
   buy:
     base_order_size: 5.0
     min_order_size: 5.0
-    max_order_size: 45.0
+    max_order_size: 65.0  # 增加至65；原为45
     volatility_order_scale: 5
   sell:
     min_order_size: 5.0
@@ -21,21 +22,23 @@ order_sizing:
     # 仅当可卖剩余仓位本身低于最小下单量时，允许低于最小值强制平仓
     allow_close_below_min_order_size: true
 capital:
-  max_cash_utilization: 0.85
-  min_cash_buffer: 12.0
+  max_cash_utilization: 0.95
+  min_cash_buffer: 25.0
 exposure:
-  max_abs_exposure_value: 40.0
-  hedge_trigger_value: 20.0
+  max_abs_exposure_value: 80.0  # 增加至80；原为40；允许更大的敞口
+  hedge_trigger_value: 60.0    # 增加至60；原为20；降低对冲频率
   hedge_scale: 0.05
-  max_grid_net_position: 10
+  max_grid_net_position: 20    # 增加至20；原为10
   max_strategy_trades_per_cycle: 40
 trend:
   min_trend_strength: 0.5
   trend_price_edge: 0.03
   trend_scale: 0.05
+  max_trend_order_size: 80.0
 grid:
   grid_low_percentile: 0.45
   grid_high_percentile: 0.95
+  grid_exit_fraction: 0.25
   # 周期剩余时间（秒）<= 该值时禁用网格买卖；不配置则仅受 is_last_minute 等对入场的限制
   disable_within_seconds_before_end: 50
 mean_reversion:
@@ -44,6 +47,7 @@ mean_reversion:
   down_buy_deviation: 0.1
   mean_reversion_sell_up_deviation: 0.2
   mean_reversion_sell_down_deviation: 0.2
+  mean_reversion_sell_fraction: 0.40
   deviation_scale: 45
   # 周期剩余时间（秒）<= 该值时禁用均值回归买卖（80 即最后一分 20 秒起停止）
   disable_within_seconds_before_end: 80
@@ -52,8 +56,10 @@ profit_taking:
   take_profit_down_deviation: 0.2
   take_profit_fraction: 0.2
 stop_loss:
-  stop_loss_cycle_loss: 18.0
+  stop_loss_cycle_loss: 8.0      # 降低至8；原为18；更激进的止损
   stop_loss_fraction: 0.5
+  stop_loss_pct: 0.02             # 新增：亏损2%立即止损；原为0.05
+  high_vol_stop_loss_pct: 0.01   # 新增：高波动时1%止损
 last_minute:
   last_minute_min_confidence: 0.87
   tail_profit_scale: 0.35
@@ -66,6 +72,12 @@ execution:
   slippage_bps: 5
   min_seconds_between_orders: 4.5
   min_same_outcome_price_move_ratio: 0.03
+
+# 【新增】每日风险管理参数
+daily_limits:
+  daily_loss_limit: 50.0          # 单日亏损限制：$50
+  daily_loss_pause_trading: true  # 达到每日限额时暂停交易
+  warning_threshold_ratio: 0.7    # 达到限额70%时警告
   market_limits:
     # 优先使用 orderbook.min_order_size 作为市场硬约束；无该字段时回退 fallback
     use_orderbook_min_order_size: true
@@ -91,9 +103,9 @@ priorities:
   risk: 10
   last_minute: 20
   take_profit: 40
-  hedge: 30
-  opening: 52
-  trend: 60
-  mean_reversion: 70
-  grid: 80
-  stop_loss: 90
+  hedge: 35               # 降低(原30)：执行率低，效能差
+  opening: 50             # 降低(原52)：增加敏感度
+  stop_loss: 85           # 提高(原90)：激进止损防极端亏损
+  trend: 65               # 提高(原60)：趋势跟随高效
+  grid: 70                # 提高(原80)：网格策略有效
+  mean_reversion: 75      # 提高(原70)：均值回归有效
