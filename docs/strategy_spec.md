@@ -117,7 +117,7 @@
 - 触发条件：
   - 对应方向未实现收益为正
   - `up_deviation >= take_profit_up_deviation` 时卖出 `up`
-  - `down_deviation <= -take_profit_down_deviation` 时卖出 `down`
+  - `down_deviation >= take_profit_down_deviation` 时卖出 `down`
 - 输出动作：
   - 分批减仓，默认卖出 `take_profit_fraction * 当前持仓`
 
@@ -151,7 +151,7 @@
 
 - 触发条件：
   - `up_deviation >= mean_reversion_sell_up_deviation` 且持有 `up`
-  - `down_deviation <= -mean_reversion_sell_down_deviation` 且持有 `down`
+  - `down_deviation >= mean_reversion_sell_down_deviation` 且持有 `down`
 - 输出动作：
   - 按偏离程度卖出对应方向仓位
 

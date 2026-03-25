@@ -36,7 +36,7 @@ def take_profit_exits(features: FeatureSnapshot, config: StrategyConfig) -> list
                 priority=int(config.priorities.get("take_profit", 50)),
             )
         )
-    if features.unrealized_down_pnl > 0 and features.down_deviation <= -float(
+    if features.unrealized_down_pnl > 0 and features.down_deviation >= float(
         config.get("profit_taking.take_profit_down_deviation", 0.20)
     ):
         intents.append(
@@ -201,7 +201,7 @@ def mean_reversion_exits(features: FeatureSnapshot, config: StrategyConfig) -> l
                 priority=int(config.priorities.get("mean_reversion", 70)),
             )
         )
-    if _held_down(features) > 0 and features.down_deviation <= -float(
+    if _held_down(features) > 0 and features.down_deviation >= float(
         config.get("mean_reversion.mean_reversion_sell_down_deviation", 0.20)
     ):
         intents.append(

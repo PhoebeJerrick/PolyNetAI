@@ -530,8 +530,8 @@ def _build_dashboard_config_param_meta() -> dict[str, dict[str, str]]:
             "detail": "与 take_profit_fraction 配合决定「赚多少卖多少」。",
         },
         "profit_taking.take_profit_down_deviation": {
-            "example": "0.12 — Down 侧止盈触发偏离",
-            "detail": "两侧可不对称，以匹配历史波动或持仓结构。",
+            "example": "0.12 — Down 价格高于其均价约 12 分时触发止盈评估",
+            "detail": "当前策略中 Down 与 Up 一致，均以「高于各自均价」作为止盈触发方向。",
         },
         "profit_taking.take_profit_fraction": {
             "example": "0.35 — 每次止盈卖出当前该腿持仓的 35%",
@@ -989,7 +989,7 @@ def build_dashboard_html(
             description: "与 strategy.yaml 的 profit_taking 一致。",
             fields: [
               {{ path: "profit_taking.take_profit_up_deviation", label: "Up 止盈偏离阈值", hint: "触发止盈所需偏离度。", type: "number", ui: "range", min: 0.01, max: 0.60, step: 0.01, risk: "low" }},
-              {{ path: "profit_taking.take_profit_down_deviation", label: "Down 止盈偏离阈值", hint: "触发止盈所需偏离度。", type: "number", ui: "range", min: 0.01, max: 0.60, step: 0.01, risk: "low" }},
+              {{ path: "profit_taking.take_profit_down_deviation", label: "Down 止盈偏离阈值", hint: "Down 价格高于其均价达到该偏离度时触发止盈。", type: "number", ui: "range", min: 0.01, max: 0.60, step: 0.01, risk: "low" }},
               {{ path: "profit_taking.take_profit_fraction", label: "止盈卖出比例", hint: "每次止盈卖出持仓的比例。", type: "number", ui: "range", min: 0.05, max: 1.00, step: 0.05, risk: "medium" }},
             ],
           }},

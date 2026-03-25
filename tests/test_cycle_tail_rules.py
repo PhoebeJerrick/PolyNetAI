@@ -5,7 +5,7 @@ from datetime import datetime
 from polynet_ai.domain.models import FeatureSnapshot
 from polynet_ai.strategy.cycle_windows import cycle_seconds_remaining, rule_disabled_in_cycle_tail
 from polynet_ai.strategy.entry_rules import grid_entries, mean_reversion_entries
-from polynet_ai.strategy.exit_rules import grid_exits, mean_reversion_exits
+from polynet_ai.strategy.exit_rules import grid_exits, mean_reversion_exits, take_profit_exits
 from polynet_ai.strategy.spec import StrategyConfig
 
 _BASE = dict(
@@ -110,3 +110,65 @@ def test_mean_reversion_suppressed_when_more_than_last_minute_left() -> None:
     f = FeatureSnapshot(**{**_BASE, "cycle_elapsed_seconds": 220.0})
     assert mean_reversion_entries(f, cfg) == []
     assert mean_reversion_exits(f, cfg) == []
+
+
+def test_mean_reversion_down_sell_triggers_on_positive_deviation() -> None:
+    cfg = _cfg()
+    f = FeatureSnapshot(
+        **{
+            **_BASE,
+            "cycle_elapsed_seconds": 100.0,
+            "up_held": 0.0,
+            "down_held": 10.0,
+            "down_deviation": 0.25,
+        }
+    )
+    intents = mean_reversion_exits(f, cfg)
+    assert any(intent.outcome == "down" and intent.action == "sell" for intent in intents)
+
+
+def test_mean_reversion_down_sell_not_triggered_on_negative_deviation() -> None:
+    cfg = _cfg()
+    f = FeatureSnapshot(
+        **{
+            **_BASE,
+            "cycle_elapsed_seconds": 100.0,
+            "up_held": 0.0,
+            "down_held": 10.0,
+            "down_deviation": -0.25,
+        }
+    )
+    intents = mean_reversion_exits(f, cfg)
+    assert not any(intent.outcome == "down" and intent.action == "sell" for intent in intents)
+
+
+def test_take_profit_down_sell_triggers_on_positive_deviation() -> None:
+    cfg = _cfg()
+    f = FeatureSnapshot(
+        **{
+            **_BASE,
+            "cycle_elapsed_seconds": 100.0,
+            "up_held": 0.0,
+            "down_held": 10.0,
+            "down_deviation": 0.25,
+            "unrealized_down_pnl": 1.0,
+        }
+    )
+    intents = take_profit_exits(f, cfg)
+    assert any(intent.outcome == "down" and intent.action == "sell" for intent in intents)
+
+
+def test_take_profit_down_sell_not_triggered_on_negative_deviation() -> None:
+    cfg = _cfg()
+    f = FeatureSnapshot(
+        **{
+            **_BASE,
+            "cycle_elapsed_seconds": 100.0,
+            "up_held": 0.0,
+            "down_held": 10.0,
+            "down_deviation": -0.25,
+            "unrealized_down_pnl": 1.0,
+        }
+    )
+    intents = take_profit_exits(f, cfg)
+    assert not any(intent.outcome == "down" and intent.action == "sell" for intent in intents)
