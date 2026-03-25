@@ -68,7 +68,7 @@ python scripts/build_tracker_position_compare_chart.py --input data/processed/po
 python scripts/build_tracker_position_compare_chart.py --input data/processed/polymarket_tracker_collection_with_accumulated_shares_v5.xlsx --sheet BTC --output artifacts/charts/tracker_position_compare.html
 ```
 
-输出文件为交互式 HTML，包含 6 条持仓相关折线，并将 `投注份数` 的 Up/Down 方向点用不同颜色标记，便于对比。
+输出文件为交互式 HTML，上图包含持仓相关折线（含 `Up方向投注总价值`、`Down方向投注总价值`、`当前持仓投注总价值`、`净持仓价值`），并将 `投注份数` 的 Up/Down 方向点用不同颜色标记，便于对比。
 图中会提供 `时间周期` 下拉框（默认第一个周期），并在下方提供每条曲线对应的 checkbox。勾选状态在切换周期后保持一致，可持续按指标过滤。页面下方会同步显示同周期的 `Up价格`/`Down价格` 折线图，两张图在切换周期时同时刷新，横轴均为单周期内秒数。
 
 ### 本地事件流准实时回放（对应“模拟下单测试”）

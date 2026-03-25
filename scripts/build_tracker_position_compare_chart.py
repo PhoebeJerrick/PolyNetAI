@@ -16,7 +16,9 @@ REQUIRED_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
     "投注份数": ("投注份数", "份数", "成交份数", "成交数量", "数量", "shares", "size", "qty", "amount"),
     "结果代币类型": ("结果代币类型", "方向", "结果", "币种方向", "Outcome", "outcome", "token", "token_side"),
     "Up积累份数": ("Up积累份数",),
+    "Up加权均价": ("Up的加权均价", "Up加权均价"),
     "Down积累份数": ("Down积累份数",),
+    "Down加权均价": ("Down加权均价", "Down的加权均价"),
     "当前总持仓份数": ("当前总持仓份数", "当前总持有份数"),
     "净持仓份数": ("净持仓份数",),
     "净持仓价值": ("净持仓价值",),
@@ -137,16 +139,23 @@ def _build_cycle_payload(cycle_df: pd.DataFrame, cols: dict[str, str]) -> dict[s
     qty_col = cols["投注份数"]
     outcome_col = cols["结果代币类型"]
     price_col = cols["成交价格"]
+    up_qty_col = cols["Up积累份数"]
+    down_qty_col = cols["Down积累份数"]
+    up_avg_col = cols["Up加权均价"]
+    down_avg_col = cols["Down加权均价"]
 
     metric_pairs = [
         ("投注份数", qty_col),
-        ("Up积累份数", cols["Up积累份数"]),
-        ("Down积累份数", cols["Down积累份数"]),
+        ("Up积累份数", up_qty_col),
+        ("Down积累份数", down_qty_col),
         ("当前总持仓份数", cols["当前总持仓份数"]),
         ("净持仓份数", cols["净持仓份数"]),
+        ("Up方向投注总价值", "__up_total_value__"),
+        ("Down方向投注总价值", "__down_total_value__"),
+        ("当前持仓投注总价值", "__holding_total_value__"),
         ("净持仓价值", cols["净持仓价值"]),
     ]
-    metric_cols = [src_col for _, src_col in metric_pairs]
+    metric_cols = [qty_col, up_qty_col, down_qty_col, cols["当前总持仓份数"], cols["净持仓份数"], cols["净持仓价值"], up_avg_col, down_avg_col]
 
     work = remove_subtotal_rows(cycle_df)
     work = to_numeric_columns(work, metric_cols)
@@ -162,16 +171,51 @@ def _build_cycle_payload(cycle_df: pd.DataFrame, cols: dict[str, str]) -> dict[s
     up_custom = up_points[metric_hover].where(pd.notna(up_points[metric_hover]), None).values.tolist()
     down_custom = down_points[metric_hover].where(pd.notna(down_points[metric_hover]), None).values.tolist()
 
+    up_total_value: list[object] = []
+    down_total_value: list[object] = []
+    holding_total_value: list[object] = []
+    for _, row in work.iterrows():
+        uq = row[up_qty_col]
+        dq = row[down_qty_col]
+        ua = row[up_avg_col]
+        da = row[down_avg_col]
+        up_val = 0.0 if pd.isna(uq) or pd.isna(ua) else float(uq) * float(ua)
+        down_val = 0.0 if pd.isna(dq) or pd.isna(da) else float(dq) * float(da)
+        up_total_value.append(up_val)
+        down_total_value.append(down_val)
+        holding_total_value.append(up_val + down_val)
+
+    extra_series_values: dict[str, list[object]] = {
+        "__up_total_value__": up_total_value,
+        "__down_total_value__": down_total_value,
+        "__holding_total_value__": holding_total_value,
+    }
+    series_colors = {
+        "投注份数": "#1f77b4",
+        "Up积累份数": "#ff7f0e",
+        "Down积累份数": "#9467bd",
+        "当前总持仓份数": "#8c564b",
+        "净持仓份数": "#e377c2",
+        "Up方向投注总价值": "#17becf",
+        "Down方向投注总价值": "#bcbd22",
+        "当前持仓投注总价值": "#1a9850",
+        "净持仓价值": "#7f7f7f",
+    }
+
     position_traces: list[dict[str, object]] = []
     for display_name, source_col in metric_pairs:
+        if source_col in extra_series_values:
+            series_values = extra_series_values[source_col]
+        else:
+            series_values = work[source_col].where(pd.notna(work[source_col]), None).tolist()
         position_traces.append(
             {
                 "type": "scatter",
                 "x": x_values,
-                "y": work[source_col].where(pd.notna(work[source_col]), None).tolist(),
+                "y": series_values,
                 "mode": "lines",
                 "name": display_name,
-                "line": {"width": 2},
+                "line": {"width": 2, "color": series_colors.get(display_name)},
             }
         )
 
@@ -316,11 +360,20 @@ def build_dropdown_chart(df: pd.DataFrame, cols: dict[str, str], output_file: Pa
         "    let selectedCycleIdx = 0;\n"
         "    const visibleSeries = new Set(seriesNames);\n"
         "    function colorForName(name){\n"
-        "      if(name === '投注份数(Up点)') return '#2ca02c';\n"
-        "      if(name === '投注份数(Down点)') return '#d62728';\n"
-        "      const palette = ['#1f77b4','#ff7f0e','#9467bd','#8c564b','#e377c2','#17becf'];\n"
-        "      const idx = Math.max(seriesNames.indexOf(name), 0);\n"
-        "      return palette[idx % palette.length];\n"
+        "      const colorMap = {\n"
+        "        '投注份数': '#1f77b4',\n"
+        "        'Up积累份数': '#ff7f0e',\n"
+        "        'Down积累份数': '#9467bd',\n"
+        "        '当前总持仓份数': '#8c564b',\n"
+        "        '净持仓份数': '#e377c2',\n"
+        "        'Up方向投注总价值': '#17becf',\n"
+        "        'Down方向投注总价值': '#bcbd22',\n"
+        "        '当前持仓投注总价值': '#1a9850',\n"
+        "        '净持仓价值': '#7f7f7f',\n"
+        "        '投注份数(Up点)': '#2ca02c',\n"
+        "        '投注份数(Down点)': '#d62728'\n"
+        "      };\n"
+        "      return colorMap[name] || '#636efa';\n"
         "    }\n"
         "    function renderCheckboxes(){\n"
         "      filterRow.innerHTML = '';\n"
