@@ -91,9 +91,27 @@ def _set_option(command: list[str], flag: str, value: Any) -> list[str]:
     return updated
 
 
+def _set_checkbox_flag(command: list[str], flag: str, enabled: bool) -> list[str]:
+    updated = [part for part in command if part != flag]
+    if enabled:
+        updated.append(flag)
+    return updated
+
+
 def _coerce_override(field: LaunchField, raw_value: Any) -> Any:
     if raw_value is None or raw_value == "":
         return field.default
+    if field.kind == "checkbox":
+        if isinstance(raw_value, bool):
+            return raw_value
+        if isinstance(raw_value, (int, float)):
+            return bool(raw_value)
+        text = str(raw_value).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        raise ValueError(f"{field.label} 必须是布尔值")
     if field.kind == "number":
         number = float(raw_value)
         if field.step is not None and float(field.step).is_integer():
@@ -132,6 +150,9 @@ def apply_profile_overrides(profile: LaunchProfile, overrides: dict[str, Any] | 
         if launch_field.name not in resolved:
             continue
         value = resolved[launch_field.name]
+        if launch_field.kind == "checkbox":
+            updated_command = _set_checkbox_flag(updated_command, launch_field.cli_flag, bool(value))
+            continue
         updated_command = _set_option(updated_command, launch_field.cli_flag, value)
     return LaunchProfile(
         name=profile.name,
@@ -227,6 +248,16 @@ def build_launch_profiles(
                     step=1,
                     example="10 表示只回放最早的 10 个 btc-updown-5m-* 周期目录",
                     detail="用于快速验证参数而不必跑完整历史；设大一些可做更长区间模拟。",
+                ),
+                LaunchField(
+                    name="include_trade_process",
+                    label="生成交易流水 Excel",
+                    kind="checkbox",
+                    default=False,
+                    description="是否额外生成交易过程详细 Excel",
+                    cli_flag="--include-trade-process",
+                    example="勾选此项生成交易流水",
+                    detail="不勾选只生成性能报告；勾选时会额外生成交易流水表，耗时较长。",
                 ),
             ],
         ),
@@ -352,7 +383,7 @@ def build_project_help_text(
             "说明：",
             "  - sim-paper: 使用本地 record_job 事件流做准实时模拟下单测试。",
             "  - market-paper: 接真实 Polymarket 行情做实盘验证，但仍是 paper 模式，不会真实下单。",
-            "  - dashboard 控制台负责可视化改参数、查看状态，并可一键启动/停止上面两个运行档案。",
+            "  - dashboard 控制台负责可视化改参数、查看状态，并可一键启动/停止上述运行档案。",
         ]
     )
     return "\n".join(lines) + "\n"

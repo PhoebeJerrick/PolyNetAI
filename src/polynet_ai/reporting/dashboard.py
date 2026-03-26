@@ -1438,6 +1438,10 @@ def build_dashboard_html(
         }}).join("");
         return `<div class="config-row">${{labelRow}}<select class="config-select" data-launch-profile="${{profileName}}" data-launch-field="${{fieldName}}">${{options}}</select>${{desc}}</div>`;
       }}
+      if (field.kind === "checkbox") {{
+        const checked = draftValue === true || draftValue === "true" || draftValue === 1 ? "checked" : "";
+        return `<div class="config-row">${{labelRow}}<input class="config-checkbox" type="checkbox" ${{checked}} data-launch-profile="${{profileName}}" data-launch-field="${{fieldName}}">${{desc}}</div>`;
+      }}
       if (field.kind === "number") {{
         // 用 type="text" 避免浏览器对 type="number"（min/max/step）的一些强校验导致你无法稳定输入。
         return `<div class="config-row">${{labelRow}}<input class="config-input" type="text" inputmode="numeric" autocomplete="off" value="${{configEscapeHtml(draftValue)}}" data-launch-profile="${{profileName}}" data-launch-field="${{fieldName}}">${{buildRangeHint(field)}}${{desc}}</div>`;
@@ -1449,7 +1453,8 @@ def build_dashboard_html(
       document.querySelectorAll(`[data-launch-profile="${{profileName}}"][data-launch-field]`).forEach((node) => {{
         const fieldName = node.getAttribute("data-launch-field");
         if (!fieldName) return;
-        overrides[fieldName] = node.value;
+        // 对于 checkbox，使用 .checked；否则用 .value
+        overrides[fieldName] = node.type === "checkbox" ? node.checked : node.value;
       }});
       return overrides;
     }}
@@ -1566,7 +1571,18 @@ def build_dashboard_html(
           const profileName = target.getAttribute("data-launch-profile");
           const fieldName = target.getAttribute("data-launch-field");
           if (!profileName || !fieldName) return;
-          updateLauncherDraft(profileName, fieldName, target.value);
+          // 处理 checkbox 的 .checked，其他类型用 .value
+          const value = target.type === "checkbox" ? target.checked : target.value;
+          updateLauncherDraft(profileName, fieldName, value);
+        }});
+        // 为 checkbox 添加 change 事件监听，确保 checkbox 状态改变时也能被捕获
+        profilesNode.addEventListener("change", function(event) {{
+          const target = event.target;
+          if (!target || target.type !== "checkbox") return;
+          const profileName = target.getAttribute("data-launch-profile");
+          const fieldName = target.getAttribute("data-launch-field");
+          if (!profileName || !fieldName) return;
+          updateLauncherDraft(profileName, fieldName, target.checked);
         }});
         profilesNode.addEventListener("click", async function(event) {{
           const target = event.target;

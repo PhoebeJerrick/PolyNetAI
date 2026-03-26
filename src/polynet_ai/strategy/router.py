@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from polynet_ai.domain.models import DecisionOutcome, FeatureSnapshot, OrderIntent, Outcome
@@ -89,32 +90,47 @@ class StrategyRouter:
 
     def route(self, features: FeatureSnapshot, strategy_trades: int = 0) -> DecisionOutcome:
         self._reset_feed_context(features)
+        
+        # 优化 #4：并行化规则评估，11个规则可独立并行执行
+        # 定义所有规则及其对应的路径配置
+        rule_specs = [
+            (build_last_minute_candidate, ("last_minute",)),
+            (stop_loss_exits, ("exits", "stop_loss")),
+            (hedge_exits, ("exits", "hedge")),
+            (take_profit_exits, ("exits", "take_profit")),
+            (grid_exits, ("exits", "grid")),
+            (mean_reversion_exits, ("exits", "mean_reversion")),
+            (opening_entries, ("entries", "opening")),
+            (hedge_entries, ("entries", "hedge")),
+            (grid_entries, ("entries", "grid")),
+            (mean_reversion_entries, ("entries", "mean_reversion")),
+            (trend_entries, ("entries", "trend")),
+        ]
+        
         candidates: list[OrderIntent] = []
-
-        candidates.extend(
-            build_last_minute_candidate(self._snapshot_for_rule(features, ("last_minute",)), self.config)
-        )
-        candidates.extend(
-            stop_loss_exits(self._snapshot_for_rule(features, ("exits", "stop_loss")), self.config)
-        )
-        candidates.extend(hedge_exits(self._snapshot_for_rule(features, ("exits", "hedge")), self.config))
-        candidates.extend(
-            take_profit_exits(self._snapshot_for_rule(features, ("exits", "take_profit")), self.config)
-        )
-        candidates.extend(grid_exits(self._snapshot_for_rule(features, ("exits", "grid")), self.config))
-        candidates.extend(
-            mean_reversion_exits(self._snapshot_for_rule(features, ("exits", "mean_reversion")), self.config)
-        )
-
-        candidates.extend(
-            opening_entries(self._snapshot_for_rule(features, ("entries", "opening")), self.config)
-        )
-        candidates.extend(hedge_entries(self._snapshot_for_rule(features, ("entries", "hedge")), self.config))
-        candidates.extend(grid_entries(self._snapshot_for_rule(features, ("entries", "grid")), self.config))
-        candidates.extend(
-            mean_reversion_entries(self._snapshot_for_rule(features, ("entries", "mean_reversion")), self.config)
-        )
-        candidates.extend(trend_entries(self._snapshot_for_rule(features, ("entries", "trend")), self.config))
+        
+        # 使用线程池并行执行所有规则（受GIL影响较小，主要是I/O和数据处理）
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {
+                executor.submit(
+                    rule_func,
+                    self._snapshot_for_rule(features, path),
+                    self.config
+                ): rule_func
+                for rule_func, path in rule_specs
+            }
+            
+            # 按完成顺序收集结果（不一定是提交顺序）
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if result:
+                        candidates.extend(result)
+                except Exception as e:
+                    # 如果规则执行错误，记录但继续处理其他规则
+                    import sys
+                    print(f"警告: 规则执行失败: {e}", file=sys.stderr)
+                    continue
 
         for candidate in candidates:
             candidate.metadata["strategy_trades"] = strategy_trades

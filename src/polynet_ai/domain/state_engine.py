@@ -42,11 +42,13 @@ class StateEngine:
     market_tape: deque[TradeEvent] = field(default_factory=lambda: deque(maxlen=200))
     strategy_fills: deque[FillEvent] = field(default_factory=lambda: deque(maxlen=200))
     state: CycleState | None = None
+    _snapshot_cache: StateSnapshot | None = field(default=None, init=False, repr=False)
 
     def start_cycle(self, market_id: str, cycle_id: str, timestamp: datetime) -> CycleState:
         self.market_tape.clear()
         self.strategy_fills.clear()
         self.state = CycleState(market_id=market_id, cycle_id=cycle_id, cycle_start=timestamp)
+        self._snapshot_cache = None  # Invalidate cache on new cycle
         return self.state
 
     def ensure_cycle(self, event: TradeEvent | FillEvent) -> CycleState:
@@ -70,6 +72,7 @@ class StateEngine:
         self.market_tape.append(trade)
         self._update_consecutive(state, trade.outcome, trade.action)
         self._update_exposure(state)
+        self._snapshot_cache = None  # Invalidate cache after state change
         return state
 
     def apply_strategy_fill(self, fill: FillEvent) -> CycleState:
@@ -83,13 +86,19 @@ class StateEngine:
         self.strategy_fills.append(fill)
         self._update_consecutive(state, fill.outcome, fill.action)
         self._update_exposure(state)
+        self._snapshot_cache = None  # Invalidate cache after state change
         return state
 
     def snapshot(self) -> StateSnapshot:
         if self.state is None:
             raise RuntimeError("cycle state is not initialized")
+        
+        # Return cached snapshot if available to avoid redundant calculations
+        if self._snapshot_cache is not None:
+            return self._snapshot_cache
+        
         summary = settlement_summary(self.state)
-        return StateSnapshot(
+        self._snapshot_cache = StateSnapshot(
             timestamp=self.state.last_event_timestamp or self.state.cycle_start or datetime.utcnow(),
             market_id=self.state.market_id,
             cycle_id=self.state.cycle_id,
@@ -115,6 +124,7 @@ class StateEngine:
             market_trades=self.state.market_trades,
             strategy_trades=self.state.strategy_trades,
         )
+        return self._snapshot_cache
 
     @staticmethod
     def _update_balances(

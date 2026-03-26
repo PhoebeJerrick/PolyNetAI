@@ -47,6 +47,9 @@ class ReplayEngine:
         broker: object | None = None,
     ) -> None:
         self.config = config
+        # 优化 #1：缓存配置参数，避免每事件都做 dict lookup
+        self.cycle_seconds = int(config.get("cycle.cycle_seconds", 300))
+        self.last_minute_seconds = int(config.get("cycle.last_minute_seconds", 60))
         self.state_engine = StateEngine()
         self.router = StrategyRouter(config)
         self.account = Account(starting_cash=starting_cash)
@@ -100,8 +103,8 @@ class ReplayEngine:
         self.state_engine.apply_market_trade(event)
         features = build_feature_snapshot(
             self.state_engine,
-            cycle_seconds=int(self.config.get("cycle.cycle_seconds", 300)),
-            last_minute_seconds=int(self.config.get("cycle.last_minute_seconds", 60)),
+            cycle_seconds=self.cycle_seconds,
+            last_minute_seconds=self.last_minute_seconds,
         )
         decision = self.router.route(features, strategy_trades=self.state_engine.state.strategy_trades)
         row: dict[str, object] = {

@@ -52,6 +52,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overrides", default=None, help="可选 JSON 覆盖参数，例如 trial_022 的 overrides.json")
     parser.add_argument("--starting-cash", type=float, default=100.0)
     parser.add_argument("--output-dir", default=None, help="默认输出到 <input-dir>/batch_replay_outputs")
+    parser.add_argument(
+        "--include-trade-process",
+        action="store_true",
+        default=False,
+        help="是否生成交易过程详细 Excel（batch_replay_trade_process_zh_*.xlsx）",
+    )
     return parser.parse_args()
 
 
@@ -138,12 +144,16 @@ def main() -> int:
     cycle_df = pd.concat(cycle_parts, ignore_index=True) if cycle_parts else pd.DataFrame()
     decision_df = pd.concat(decision_parts, ignore_index=True) if decision_parts else pd.DataFrame()
 
-    trade_xlsx = write_batch_trade_process_zh(
-        input_dir=input_dir,
-        cycle_df=cycle_df,
-        decision_df=decision_df,
-        output_path=output_dir,
-    )
+    # 根据参数决定是否生成交易过程 Excel
+    trade_xlsx: Path | None = None
+    if args.include_trade_process:
+        trade_xlsx = write_batch_trade_process_zh(
+            input_dir=input_dir,
+            cycle_df=cycle_df,
+            decision_df=decision_df,
+            output_path=output_dir,
+        )
+
     xlsx_report = build_performance_report_zh(
         resolved_batch_dir=output_dir,
         summary_df=summary_df,
@@ -155,7 +165,8 @@ def main() -> int:
     _cleanup_batch_replay_markdown(output_dir)
 
     print(f"批量回放完成，共 {len(summary_df)} 个周期")
-    print(f"交易过程 (Excel): {trade_xlsx}")
+    if trade_xlsx:
+        print(f"交易过程 (Excel): {trade_xlsx}")
     print(f"总绩效报告 (Excel): {xlsx_report}")
     if not xlsx_report.exists():
         print(

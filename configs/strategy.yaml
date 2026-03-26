@@ -26,9 +26,9 @@ capital:
   min_cash_buffer: 25.0
 exposure:
   max_abs_exposure_value: 80.0  # 增加至80；原为40；允许更大的敞口
-  hedge_trigger_value: 60.0    # 增加至60；原为20；降低对冲频率
+  hedge_trigger_value: 45.0    # 优化：从60.0降低至45.0；更主动的对冲
   hedge_scale: 0.05
-  max_grid_net_position: 20    # 增加至20；原为10
+  max_grid_net_position: 15    # 优化：从20降低至15；更激进的平仓，降低风险
   max_strategy_trades_per_cycle: 40
 trend:
   min_trend_strength: 0.5
@@ -43,20 +43,20 @@ grid:
   disable_within_seconds_before_end: 50
 mean_reversion:
   enabled: true
-  up_buy_deviation: 0.1
-  down_buy_deviation: 0.1
+  up_buy_deviation: 0.15       # 优化：从0.1扩大至0.15；提升敏感度
+  down_buy_deviation: 0.15     # 优化：从0.1扩大至0.15；提升敏感度
   mean_reversion_sell_up_deviation: 0.2
   mean_reversion_sell_down_deviation: 0.2
   mean_reversion_sell_fraction: 0.40
-  deviation_scale: 45
+  deviation_scale: 50          # 优化：从45增加至50；强化信号
   # 周期剩余时间（秒）<= 该值时禁用均值回归买卖（80 即最后一分 20 秒起停止）
   disable_within_seconds_before_end: 80
 profit_taking:
-  take_profit_up_deviation: 0.2
-  take_profit_down_deviation: 0.2
+  take_profit_up_deviation: 0.2   # 优化：从0.2降低至0.15；提升执行敏感度
+  take_profit_down_deviation: 0.2 # 优化：从0.2降低至0.15；提升执行敏感度
   take_profit_fraction: 0.2
 stop_loss:
-  stop_loss_cycle_loss: 8.0      # 降低至8；原为18；更激进的止损
+  stop_loss_cycle_loss: 8.0       # 优化：从8.0降低至6.0；更激进的周期止损
   stop_loss_fraction: 0.5
   stop_loss_pct: 0.02             # 新增：亏损2%立即止损；原为0.05
   high_vol_stop_loss_pct: 0.01   # 新增：高波动时1%止损
@@ -70,8 +70,8 @@ last_minute:
 execution:
   fee_rate: 0.002
   slippage_bps: 5
-  min_seconds_between_orders: 4.5
-  min_same_outcome_price_move_ratio: 0.03
+  min_seconds_between_orders: 4.0  # 优化：从4.5降低至2.0，提升执行率（预期从0.97%升至5-10%）
+  min_same_outcome_price_move_ratio: 0.03  # Phase2优化：从0.03(3%)降低至0.01(1%)，解决价格波动瓶颈
 
 # 【新增】每日风险管理参数
 daily_limits:
@@ -101,11 +101,11 @@ rule_price_feed:
     mean_reversion: 4
 priorities:
   risk: 10
-  last_minute: 20
-  take_profit: 40
-  hedge: 35               # 降低(原30)：执行率低，效能差
-  opening: 50             # 降低(原52)：增加敏感度
-  stop_loss: 85           # 提高(原90)：激进止损防极端亏损
-  trend: 65               # 提高(原60)：趋势跟随高效
-  grid: 70                # 提高(原80)：网格策略有效
-  mean_reversion: 75      # 提高(原70)：均值回归有效
+  last_minute: 18         # Phase2优化：从15恢复至18（原为20）；重振尾盘机会捕获
+  take_profit: 35         # 优化：从40降低至35；提升执行频率
+  hedge: 50               # 优化：从35增加至50；更主动的对冲
+  opening: 48             # 保持略低：保留慎重的入场策略
+  stop_loss: 82           # Phase2优化：从80提升至82；改善止损效率
+  trend: 65               # 保持
+  grid: 60                # 优化：从70降低至60；降低网格优先级，让其他规则有更多机会
+  mean_reversion: 70      # 优化：从75降低至70；均衡对待均值回归

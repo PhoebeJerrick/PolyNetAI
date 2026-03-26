@@ -51,6 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--status-every", type=int, default=100)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--dashboard-refresh-seconds", type=float, default=1.0)
+    parser.add_argument("--include-trade-process", action="store_true", default=False, help="是否生成交易过程详细 Excel")
     return parser.parse_args()
 
 
@@ -252,10 +253,11 @@ def main() -> int:
         args.output_dir,
         refresh_seconds=max(1.0, args.dashboard_refresh_seconds) if args.dashboard_refresh_seconds > 0 else 1.0,
     )
-    performance_xlsx, trade_process_xlsx = _write_sim_batch_reports(args.output_dir, result)
-    print(f"准实时回放完成: {args.output_dir}")
-    print(f"总绩效报告 (Excel): {performance_xlsx}")
-    print(f"交易过程 (Excel): {trade_process_xlsx}")
+    if args.include_trade_process:
+        performance_xlsx, trade_process_xlsx = _write_sim_batch_reports(args.output_dir, result)
+        print(f"准实时回放完成: {args.output_dir}")
+        print(f"总绩效报告 (Excel): {performance_xlsx}")
+        print(f"交易过程 (Excel): {trade_process_xlsx}")
     print(result.replay_result.metrics_df.to_string(index=False))
     return 0
 
