@@ -616,6 +616,7 @@ def build_performance_report_zh(
     cycle_range: str = "",
     cycle_count: int = 0,
     report_source: str = "",
+    report_name_prefix: str = "",
 ) -> Path:
     direction_df = _summarize_direction_distribution(decision_df)
     winner_df = _value_counts_frame(cycle_df.get("winner", pd.Series(dtype=object)), "winner")
@@ -646,10 +647,15 @@ def build_performance_report_zh(
             enriched_summary["estimated_cash_from_cum"] = first_start_cash + enriched_summary["cumulative_profit"]
 
     suffix = _today_suffix()
+    base_name = "batch_replay_performance_report_zh"
+    if report_name_prefix:
+        safe_prefix = str(report_name_prefix).strip().replace(" ", "_")
+        if safe_prefix:
+            base_name = f"{safe_prefix}_{base_name}"
     if cycle_count > 0:
-        report_xlsx = output_path / f"batch_replay_performance_report_zh_{cycle_count}_{suffix}.xlsx"
+        report_xlsx = output_path / f"{base_name}_{cycle_count}_{suffix}.xlsx"
     else:
-        report_xlsx = output_path / f"batch_replay_performance_report_zh_{suffix}.xlsx"
+        report_xlsx = output_path / f"{base_name}_{suffix}.xlsx"
     shown_dir = display_batch_dir or resolved_batch_dir
 
     tail_per_cycle, tail_overview = summarize_tail_window_executions(

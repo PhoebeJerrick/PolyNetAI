@@ -182,6 +182,7 @@ def _write_sim_batch_reports(output_dir: str | Path, result: LiveRunnerResult) -
         output_path=out_dir,
         display_batch_dir=out_dir,
         report_source="模拟下单测试",
+        report_name_prefix="simulation",
     )
     _cleanup_batch_replay_markdown(out_dir)
     return perf_xlsx, trade_xlsx

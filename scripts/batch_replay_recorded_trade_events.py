@@ -94,6 +94,7 @@ def run_batch_replay(
     cycle_count: int = 0,
     report_source: str = "",
     max_cycles: int | None = None,
+    report_name_prefix: str = "",
 ) -> Path | None:
     """核心 batch replay 逻辑，可被外部脚本调用。返回 Excel 绩效报告路径。"""
     input_resolved = _resolve_existing_path("输入目录", input_dir)
@@ -212,6 +213,7 @@ def run_batch_replay(
         cycle_range=cycle_range,
         cycle_count=cycle_count,
         report_source=report_source,
+        report_name_prefix=report_name_prefix,
     )
     _cleanup_batch_replay_markdown(output_resolved)
 

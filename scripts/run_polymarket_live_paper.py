@@ -357,6 +357,7 @@ def main() -> int:
                     include_trade_process=False,
                     cycle_count=len(new_cycle_files),
                     report_source="实盘行情验证",
+                    report_name_prefix="real",
                 )
                 report_elapsed = (datetime.now() - report_start).total_seconds()
                 stage_times["6_report"] = report_elapsed
@@ -401,6 +402,7 @@ def main() -> int:
                     display_batch_dir=cycle_record_dir,
                     cycle_count=n_live_cycles,
                     report_source="实盘行情（流式处理）",
+                    report_name_prefix="simulation",
                 )
                 if sim_report_path and sim_report_path.exists():
                     print(f"  ✓ 流式处理绩效报告: {sim_report_path.name}")
