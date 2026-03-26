@@ -50,11 +50,18 @@ python scripts/run_dashboard_console.py --dashboard-dir artifacts/live/record_jo
 > - Linux：可直接 `./record.sh ds10`
 > - Windows（PowerShell）：建议用 `bash -lc "./record.sh ds10"`（否则可能出现“没反应/没输出”，因为 `record.sh` 是 `bash` 脚本，PowerShell 不会自动按 bash 解释）。
 
+> 云服务器做 dashboard 实盘验证：
+> - Linux：可直接 `RECORD_DASHBOARD_HOST=0.0.0.0 ./record.sh dmb10`
+> - 然后浏览器访问 `http://43.167.171.148:8765/dashboard.html`
+
 ## record.sh 一键入口（推荐）
 ```bash
 ./record.sh help
 ./record.sh d                  # 启动 dashboard 控制台
 ./record.sh ds<N>             # dashboard + 模拟下单回放 N 个 5m 周期
+./record.sh dm<N>             # dashboard + 实盘行情验证 N 个 5m 周期（paper）
+./record.sh dmb<N>            # dashboard + 实盘行情验证 N 个 5m 周期（paper，后台）
+./record.sh pm                # 查看后台实盘验证状态与最近日志
 ./record.sh chart              # 打开 artifacts/charts/tracker_position_compare.html
 ./record.sh excel-v5          # 生成/更新 data/processed/..._with_accumulated_shares_v5.xlsx
 
@@ -62,7 +69,7 @@ python scripts/run_dashboard_console.py --dashboard-dir artifacts/live/record_jo
 ./record.sh r<N>              # 前台抓取并回放 N 个周期（直到生成业绩报告）
 ./record.sh rb<N>             # 后台抓取并回放 N 个周期（直到生成业绩报告）
 ./record.sh p                 # 查看后台状态和进度
-./record.sh x                 # 停止后台任务
+./record.sh x                 # 停止后台任务（含后台实盘验证）
 ```
 
 ## 常用命令（按场景）

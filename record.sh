@@ -20,6 +20,9 @@ print_help() {
     "用法（子命令）:" \
     "  ./record.sh d                 启动 dashboard 控制台（前台）" \
     "  ./record.sh ds<N>            dashboard + 模拟下单回放 N 个 5m 周期" \
+    "  ./record.sh dm<N>            dashboard + 实盘行情验证 N 个 5m 周期（paper）" \
+    "  ./record.sh dmb<N>           dashboard + 实盘行情验证 N 个 5m 周期（paper，后台）" \
+    "  ./record.sh pm               查看后台实盘验证状态与最近日志" \
     "  ./record.sh chart             打开 artifacts/charts/tracker_position_compare.html" \
     "  ./record.sh excel-v5          生成 data/processed/..._with_accumulated_shares_v5.xlsx" \
     "" \
@@ -27,7 +30,7 @@ print_help() {
     "  ./record.sh r<N>              前台抓取并回放 N 个周期（直到生成业绩报告）" \
     "  ./record.sh rb<N>             后台抓取并回放 N 个周期（直到生成业绩报告）" \
     "  ./record.sh p                查看后台状态和进度" \
-    "  ./record.sh x                一键停止后台任务" \
+    "  ./record.sh x                一键停止后台任务（含后台实盘验证）" \
     "" \
     "可选参数（通用）:" \
     "  N              例如 ds10 / r10 / rb300" \
@@ -38,7 +41,13 @@ print_help() {
     "  -k CASH        自定义 starting cash（用于模拟下单）" \
     "" \
     "环境变量（可选）:" \
-    "  RECORD_OPEN_DASHBOARD_EDGE=0   关闭 record.sh d 后自动用 Edge 打开网页"
+    "  RECORD_OPEN_DASHBOARD_EDGE=0   关闭 record.sh d 后自动用 Edge 打开网页" \
+    "  RECORD_DASHBOARD_HOST=0.0.0.0  dashboard 监听地址（云服务器可设 0.0.0.0）" \
+    "  RECORD_DASHBOARD_PORT=8765     dashboard 监听端口" \
+    "" \
+    "Linux 云服务器推荐：" \
+    "  RECORD_DASHBOARD_HOST=0.0.0.0 ./record.sh dmb10" \
+    "  浏览器访问: http://43.167.171.148:8765/dashboard.html"
 }
 
 COMMAND="${1:-h}"
@@ -63,6 +72,12 @@ elif [[ "$COMMAND" =~ ^(s|start|r|run)([0-9]+)$ ]]; then
 elif [[ "$COMMAND" =~ ^ds([0-9]+)$ ]]; then
   COMMAND="ds"
   CYCLES="${BASH_REMATCH[1]}"
+elif [[ "$COMMAND" =~ ^dmb([0-9]+)$ ]]; then
+  COMMAND="dmb"
+  CYCLES="${BASH_REMATCH[1]}"
+elif [[ "$COMMAND" =~ ^(dm|dashboard-market)([0-9]+)$ ]]; then
+  COMMAND="dm"
+  CYCLES="${BASH_REMATCH[2]}"
 fi
 
 while [[ $# -gt 0 ]]; do
@@ -111,6 +126,25 @@ fi
 
 run_manage() {
   "$PYTHON_BIN" scripts/manage_capture_pipeline.py "$@"
+}
+
+stop_pid_file() {
+  local pid_file="$1"
+  local label="$2"
+  if [[ ! -f "$pid_file" ]]; then
+    return 0
+  fi
+  local pid
+  pid=$(cat "$pid_file" 2>/dev/null | tr -d '[:space:]')
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    echo "$label 已停止 (pid=$pid)"
+  fi
+  rm -f "$pid_file"
 }
 
 case "$COMMAND" in
@@ -237,6 +271,160 @@ except Exception:
       --dashboard-refresh-seconds 1 \
       --starting-cash "$DS_STARTING_CASH"
     ;;
+  dm)
+    DASHBOARD_DIR="$OUTPUT_DIR/polymarket_live_outputs"
+    mkdir -p "$DASHBOARD_DIR"
+    "$PYTHON_BIN" scripts/run_dashboard_report.py --html-only --output-dir "$DASHBOARD_DIR" --title "Polynet AI Live Monitoring Dashboard"
+
+    DASHBOARD_LOG="$DASHBOARD_DIR/dashboard_console.log"
+    DASHBOARD_HOST="${RECORD_DASHBOARD_HOST:-127.0.0.1}"
+    DASHBOARD_PORT="${RECORD_DASHBOARD_PORT:-8765}"
+    DASHBOARD_URL="http://$DASHBOARD_HOST:$DASHBOARD_PORT/dashboard.html"
+    DASHBOARD_PID_FILE="$OUTPUT_DIR/dashboard_console.pid"
+    DASHBOARD_ALIVE="0"
+    if "$PYTHON_BIN" -c "import urllib.request; urllib.request.urlopen('$DASHBOARD_URL', timeout=1).read(1)" >/dev/null 2>&1; then
+      DASHBOARD_ALIVE="1"
+    fi
+    if [[ "$DASHBOARD_ALIVE" != "1" ]]; then
+      nohup "$PYTHON_BIN" scripts/run_dashboard_console.py --dashboard-dir "$DASHBOARD_DIR" --host "$DASHBOARD_HOST" --port "$DASHBOARD_PORT" --pid-file "$DASHBOARD_PID_FILE" > "$DASHBOARD_LOG" 2>&1 &
+      disown 2>/dev/null || true
+    fi
+
+    DM_STARTING_CASH="$STARTING_CASH"
+    if [[ "$STARTING_CASH_SET" != "true" ]]; then
+      DM_STARTING_CASH="1000"
+    fi
+
+    "$PYTHON_BIN" scripts/run_polymarket_live_paper.py \
+      --robot-mode \
+      --slug-prefix "$SLUG_PREFIX" \
+      --max-cycles "$CYCLES" \
+      --config "$CONFIG_PATH" \
+      --output-dir "$DASHBOARD_DIR" \
+      --record-events-dir "$OUTPUT_DIR/record_job_market" \
+      --dashboard-refresh-seconds 1 \
+      --starting-cash "$DM_STARTING_CASH" \
+      --env-file "$DEFAULT_ENV_FILE" \
+      --account-index "$DEFAULT_ACCOUNT_INDEX"
+    ;;
+  dmb)
+    DASHBOARD_DIR="$OUTPUT_DIR/polymarket_live_outputs"
+    mkdir -p "$DASHBOARD_DIR"
+    "$PYTHON_BIN" scripts/run_dashboard_report.py --html-only --output-dir "$DASHBOARD_DIR" --title "Polynet AI Live Monitoring Dashboard"
+
+    DASHBOARD_LOG="$DASHBOARD_DIR/dashboard_console.log"
+    DASHBOARD_HOST="${RECORD_DASHBOARD_HOST:-127.0.0.1}"
+    DASHBOARD_PORT="${RECORD_DASHBOARD_PORT:-8765}"
+    DASHBOARD_URL="http://$DASHBOARD_HOST:$DASHBOARD_PORT/dashboard.html"
+    DASHBOARD_PID_FILE="$OUTPUT_DIR/dashboard_console.pid"
+    MARKET_PID_FILE="$OUTPUT_DIR/market_paper.pid"
+    MARKET_LOG="$DASHBOARD_DIR/market_paper.log"
+    DASHBOARD_ALIVE="0"
+    if "$PYTHON_BIN" -c "import urllib.request; urllib.request.urlopen('$DASHBOARD_URL', timeout=1).read(1)" >/dev/null 2>&1; then
+      DASHBOARD_ALIVE="1"
+    fi
+    if [[ "$DASHBOARD_ALIVE" != "1" ]]; then
+      nohup "$PYTHON_BIN" scripts/run_dashboard_console.py --dashboard-dir "$DASHBOARD_DIR" --host "$DASHBOARD_HOST" --port "$DASHBOARD_PORT" --pid-file "$DASHBOARD_PID_FILE" > "$DASHBOARD_LOG" 2>&1 &
+      disown 2>/dev/null || true
+    fi
+
+    DM_STARTING_CASH="$STARTING_CASH"
+    if [[ "$STARTING_CASH_SET" != "true" ]]; then
+      DM_STARTING_CASH="1000"
+    fi
+
+    if [[ -f "$MARKET_PID_FILE" ]]; then
+      OLD_MARKET_PID=$(cat "$MARKET_PID_FILE" 2>/dev/null | tr -d '[:space:]')
+      if [[ -n "$OLD_MARKET_PID" ]] && kill -0 "$OLD_MARKET_PID" 2>/dev/null; then
+        echo "检测到已有后台实盘验证任务在运行 (pid=$OLD_MARKET_PID)，请先执行 ./record.sh x 或手动停止。"
+        exit 1
+      fi
+      rm -f "$MARKET_PID_FILE"
+    fi
+
+    nohup bash -lc 'echo $$ > "$0"; exec "$1" scripts/run_polymarket_live_paper.py --robot-mode --slug-prefix "$2" --max-cycles "$3" --config "$4" --output-dir "$5" --record-events-dir "$6" --dashboard-refresh-seconds 1 --starting-cash "$7" --env-file "$8" --account-index "$9"' \
+      "$MARKET_PID_FILE" \
+      "$PYTHON_BIN" \
+      "$SLUG_PREFIX" \
+      "$CYCLES" \
+      "$CONFIG_PATH" \
+      "$DASHBOARD_DIR" \
+      "$OUTPUT_DIR/record_job_market" \
+      "$DM_STARTING_CASH" \
+      "$DEFAULT_ENV_FILE" \
+      "$DEFAULT_ACCOUNT_INDEX" \
+      > "$MARKET_LOG" 2>&1 &
+    disown 2>/dev/null || true
+
+    MARKET_PID=""
+    for _ in {1..20}; do
+      if [[ -f "$MARKET_PID_FILE" ]]; then
+        MARKET_PID=$(cat "$MARKET_PID_FILE" 2>/dev/null | tr -d '[:space:]')
+        if [[ -n "$MARKET_PID" ]]; then
+          break
+        fi
+      fi
+      sleep 0.2
+    done
+
+    echo "Dashboard 控制台已启动: $DASHBOARD_URL"
+    echo "后台实盘验证已启动 (pid=${MARKET_PID:-未知})"
+    echo "Dashboard 日志: $DASHBOARD_LOG"
+    echo "实盘验证日志: $MARKET_LOG"
+    echo "Dashboard PID 文件: $DASHBOARD_PID_FILE"
+    echo "实盘验证 PID 文件: $MARKET_PID_FILE"
+    echo "浏览器访问: http://43.167.171.148:${DASHBOARD_PORT}/dashboard.html"
+    ;;
+  pm|paper-market|paper-market-status)
+    DASHBOARD_DIR="$OUTPUT_DIR/polymarket_live_outputs"
+    DASHBOARD_PID_FILE="$OUTPUT_DIR/dashboard_console.pid"
+    MARKET_PID_FILE="$OUTPUT_DIR/market_paper.pid"
+    DASHBOARD_LOG="$DASHBOARD_DIR/dashboard_console.log"
+    MARKET_LOG="$DASHBOARD_DIR/market_paper.log"
+
+    echo "## 后台实盘验证状态"
+    echo "- 输出目录: $OUTPUT_DIR"
+    echo "- Dashboard 目录: $DASHBOARD_DIR"
+
+    if [[ -f "$DASHBOARD_PID_FILE" ]]; then
+      DASHBOARD_PID=$(cat "$DASHBOARD_PID_FILE" 2>/dev/null | tr -d '[:space:]')
+      if [[ -n "$DASHBOARD_PID" ]] && kill -0 "$DASHBOARD_PID" 2>/dev/null; then
+        echo "- Dashboard 控制台: 运行中 (pid=$DASHBOARD_PID)"
+      else
+        echo "- Dashboard 控制台: 未运行"
+      fi
+    else
+      echo "- Dashboard 控制台: 未运行"
+    fi
+
+    if [[ -f "$MARKET_PID_FILE" ]]; then
+      MARKET_PID=$(cat "$MARKET_PID_FILE" 2>/dev/null | tr -d '[:space:]')
+      if [[ -n "$MARKET_PID" ]] && kill -0 "$MARKET_PID" 2>/dev/null; then
+        echo "- 实盘验证任务: 运行中 (pid=$MARKET_PID)"
+      else
+        echo "- 实盘验证任务: 未运行"
+      fi
+    else
+      echo "- 实盘验证任务: 未运行"
+    fi
+
+    if [[ -f "$DASHBOARD_LOG" ]]; then
+      echo "- Dashboard 日志: $DASHBOARD_LOG"
+    fi
+    if [[ -f "$MARKET_LOG" ]]; then
+      echo "- 实盘验证日志: $MARKET_LOG"
+    fi
+
+    if [[ -f "$MARKET_LOG" ]]; then
+      echo ""
+      echo "## 实盘验证最近日志"
+      tail -n 20 "$MARKET_LOG" || true
+    elif [[ -f "$DASHBOARD_LOG" ]]; then
+      echo ""
+      echo "## Dashboard 最近日志"
+      tail -n 20 "$DASHBOARD_LOG" || true
+    fi
+    ;;
   chart)
     DASHBOARD_CHART_PATH="artifacts/charts/tracker_position_compare.html"
     if [[ ! -f "$DASHBOARD_CHART_PATH" ]]; then
@@ -292,6 +480,7 @@ except Exception:
       --starting-cash "$STARTING_CASH"
     ;;
   x|stop|kill)
+    stop_pid_file "$OUTPUT_DIR/market_paper.pid" "后台实盘验证任务"
     run_manage stop \
       --output-dir "$OUTPUT_DIR" \
       --dashboard-pid-file "$OUTPUT_DIR/dashboard_console.pid"
