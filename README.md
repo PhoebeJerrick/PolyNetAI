@@ -61,7 +61,8 @@ python scripts/run_dashboard_console.py --dashboard-dir artifacts/live/record_jo
 ./record.sh ds<N>             # dashboard + 模拟下单回放 N 个 5m 周期
 ./record.sh dm<N>             # dashboard + 实盘行情验证 N 个 5m 周期（paper）
 ./record.sh dmb<N>            # dashboard + 实盘行情验证 N 个 5m 周期（paper，后台）
-./record.sh pm                # 查看后台实盘验证状态与最近日志
+./record.sh pm                # 查看后台实盘验证状态与最近日志（默认 tail 20）
+./record.sh pm100             # 查看后台实盘验证状态与最近日志（tail 100）
 ./record.sh chart              # 打开 artifacts/charts/tracker_position_compare.html
 ./record.sh excel-v5          # 生成/更新 data/processed/..._with_accumulated_shares_v5.xlsx
 

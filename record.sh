@@ -22,7 +22,7 @@ print_help() {
     "  ./record.sh ds<N>            dashboard + 模拟下单回放 N 个 5m 周期" \
     "  ./record.sh dm<N>            dashboard + 实盘行情验证 N 个 5m 周期（paper）" \
     "  ./record.sh dmb<N>           dashboard + 实盘行情验证 N 个 5m 周期（paper，后台）" \
-    "  ./record.sh pm               查看后台实盘验证状态与最近日志" \
+    "  ./record.sh pm[LINES]        查看后台实盘验证状态与最近日志（默认 20 行）" \
     "  ./record.sh chart             打开 artifacts/charts/tracker_position_compare.html" \
     "  ./record.sh excel-v5          生成 data/processed/..._with_accumulated_shares_v5.xlsx" \
     "" \
@@ -62,6 +62,7 @@ CONFIG_PATH="$DEFAULT_CONFIG"
 OVERRIDES_PATH="$DEFAULT_OVERRIDES"
 STARTING_CASH="$DEFAULT_STARTING_CASH"
 STARTING_CASH_SET="false"
+PM_TAIL_LINES="20"
 
 if [[ "$COMMAND" =~ ^(rb|runb|run-bg)([0-9]+)$ ]]; then
   COMMAND="rb"
@@ -78,12 +79,19 @@ elif [[ "$COMMAND" =~ ^dmb([0-9]+)$ ]]; then
 elif [[ "$COMMAND" =~ ^(dm|dashboard-market)([0-9]+)$ ]]; then
   COMMAND="dm"
   CYCLES="${BASH_REMATCH[2]}"
+elif [[ "$COMMAND" =~ ^pm([0-9]+)$ ]]; then
+  COMMAND="pm"
+  PM_TAIL_LINES="${BASH_REMATCH[1]}"
 fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -[0-9]*)
-      CYCLES="${1#-}"
+      if [[ "$COMMAND" == "pm" ]]; then
+        PM_TAIL_LINES="${1#-}"
+      else
+        CYCLES="${1#-}"
+      fi
       shift
       ;;
     -o)
@@ -257,7 +265,7 @@ except Exception:
     DS_STARTING_CASH="$STARTING_CASH"
     # 如果用户没显式指定 -k，则让模拟下单默认更贴近 launcher.py 里的配置（通常 1000）。
     if [[ "$STARTING_CASH_SET" != "true" ]]; then
-      DS_STARTING_CASH="1000"
+      DS_STARTING_CASH="100"
     fi
 
     "$PYTHON_BIN" scripts/run_recorded_live_paper.py \
@@ -292,7 +300,7 @@ except Exception:
 
     DM_STARTING_CASH="$STARTING_CASH"
     if [[ "$STARTING_CASH_SET" != "true" ]]; then
-      DM_STARTING_CASH="1000"
+      DM_STARTING_CASH="100"
     fi
 
     "$PYTHON_BIN" scripts/run_polymarket_live_paper.py \
@@ -330,7 +338,7 @@ except Exception:
 
     DM_STARTING_CASH="$STARTING_CASH"
     if [[ "$STARTING_CASH_SET" != "true" ]]; then
-      DM_STARTING_CASH="1000"
+      DM_STARTING_CASH="100"
     fi
 
     if [[ -f "$MARKET_PID_FILE" ]]; then
@@ -417,12 +425,12 @@ except Exception:
 
     if [[ -f "$MARKET_LOG" ]]; then
       echo ""
-      echo "## 实盘验证最近日志"
-      tail -n 20 "$MARKET_LOG" || true
+      echo "## 实盘验证最近日志 (tail ${PM_TAIL_LINES})"
+      tail -n "$PM_TAIL_LINES" "$MARKET_LOG" || true
     elif [[ -f "$DASHBOARD_LOG" ]]; then
       echo ""
-      echo "## Dashboard 最近日志"
-      tail -n 20 "$DASHBOARD_LOG" || true
+      echo "## Dashboard 最近日志 (tail ${PM_TAIL_LINES})"
+      tail -n "$PM_TAIL_LINES" "$DASHBOARD_LOG" || true
     fi
     ;;
   chart)

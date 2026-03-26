@@ -116,7 +116,7 @@ def test_resolve_profile_values_uses_defaults_for_missing_fields(tmp_path: Path)
 
     assert resolved["slug_prefix"] == "eth-updown-5m-"
     assert resolved["max_cycles"] == 10
-    assert resolved["starting_cash"] == 1000
+    assert resolved["starting_cash"] == 100
 
 
 def test_resolve_profile_values_coerces_checkbox_strings(tmp_path: Path) -> None:

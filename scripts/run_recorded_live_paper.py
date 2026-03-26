@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-cycles", type=int, default=10)
     parser.add_argument("--config", default="configs/strategy.yaml")
     parser.add_argument("--output-dir", default="artifacts/live/record_job/batch_replay_outputs")
-    parser.add_argument("--starting-cash", type=float, default=1000.0)
+    parser.add_argument("--starting-cash", type=float, default=100.0)
     parser.add_argument("--pace-factor", type=float, default=20.0)
     parser.add_argument("--max-sleep-seconds", type=float, default=0.25)
     parser.add_argument("--status-every", type=int, default=100)

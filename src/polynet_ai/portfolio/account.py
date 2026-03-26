@@ -7,8 +7,8 @@ from polynet_ai.domain.models import FillEvent
 
 @dataclass(slots=True)
 class Account:
-    starting_cash: float = 1000.0
-    cash: float = 1000.0
+    starting_cash: float = 100.0
+    cash: float = 100.0
     reserved_cash: float = 0.0
     fees_paid: float = 0.0
     fills: list[FillEvent] = field(default_factory=list)

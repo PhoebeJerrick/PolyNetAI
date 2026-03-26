@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default="configs/strategy.yaml")
     parser.add_argument("--optimize", default="configs/optimize.yaml")
     parser.add_argument("--output-dir", default="artifacts/optimization/optimize_outputs")
-    parser.add_argument("--starting-cash", type=float, default=1000.0)
+    parser.add_argument("--starting-cash", type=float, default=100.0)
     parser.add_argument("--trials", type=int, default=None)
     return parser.parse_args()
 

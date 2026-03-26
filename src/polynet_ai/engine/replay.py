@@ -43,7 +43,7 @@ class ReplayEngine:
     def __init__(
         self,
         config: StrategyConfig,
-        starting_cash: float = 1000.0,
+        starting_cash: float = 100.0,
         broker: object | None = None,
     ) -> None:
         self.config = config
@@ -69,7 +69,7 @@ class ReplayEngine:
         self._last_strategy_fill_price_down = None
 
     @classmethod
-    def from_yaml(cls, path: str | Path, starting_cash: float = 1000.0) -> "ReplayEngine":
+    def from_yaml(cls, path: str | Path, starting_cash: float = 100.0) -> "ReplayEngine":
         return cls(load_strategy_config(path), starting_cash=starting_cash)
 
     def run(self, events: list[TradeEvent]) -> ReplayResult:
