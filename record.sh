@@ -124,24 +124,68 @@ case "$COMMAND" in
     DASHBOARD_HOST="${RECORD_DASHBOARD_HOST:-127.0.0.1}"
     DASHBOARD_PORT="${RECORD_DASHBOARD_PORT:-8765}"
     DASHBOARD_URL="http://$DASHBOARD_HOST:$DASHBOARD_PORT/dashboard.html"
+    DASHBOARD_PID_FILE="$OUTPUT_DIR/dashboard_console.pid"
 
-    # 用 nohup/disown 让控制台脱离当前 bash 生命周期，避免 bash/pty 结束后导致控制台被杀。
-    # 如果端口已在监听，避免重复启动导致状态混乱。
+    # 检查旧的 dashboard 控制台进程
+    OLD_DASHBOARD_PID=""
+    if [[ -f "$DASHBOARD_PID_FILE" ]]; then
+      OLD_DASHBOARD_PID=$(cat "$DASHBOARD_PID_FILE" 2>/dev/null | tr -d '[:space:]')
+    fi
+    OLD_DASHBOARD_ALIVE="0"
+    if [[ -n "$OLD_DASHBOARD_PID" ]] && kill -0 "$OLD_DASHBOARD_PID" 2>/dev/null; then
+      OLD_DASHBOARD_ALIVE="1"
+    fi
+
+    # 如果端口在监听 或 PID 文件记录的旧进程仍在运行，则提示并杀掉旧进程后重启
     DASHBOARD_ALIVE="0"
     if "$PYTHON_BIN" -c "import urllib.request; urllib.request.urlopen('$DASHBOARD_URL', timeout=1).read(1)" >/dev/null 2>&1; then
       DASHBOARD_ALIVE="1"
     fi
 
-    if [[ "$DASHBOARD_ALIVE" != "1" ]]; then
-      nohup "$PYTHON_BIN" scripts/run_dashboard_console.py --dashboard-dir "$DASHBOARD_DIR" --host "$DASHBOARD_HOST" --port "$DASHBOARD_PORT" > "$DASHBOARD_LOG" 2>&1 &
-      DASHBOARD_PID=$!
-      disown "$DASHBOARD_PID" 2>/dev/null || true
-      echo "Dashboard 控制台已启动: $DASHBOARD_URL"
-      echo "运行日志: $DASHBOARD_LOG"
-    else
-      echo "Dashboard 控制台已在运行: $DASHBOARD_URL"
-      echo "运行日志: $DASHBOARD_LOG"
+    if [[ "$DASHBOARD_ALIVE" == "1" ]] || [[ "$OLD_DASHBOARD_ALIVE" == "1" ]]; then
+      echo "检测到旧的 Dashboard 控制台仍在运行 (pid=${OLD_DASHBOARD_PID:-未知})，正在停止并重启..."
+      # 优先用 PID 文件记录的进程号杀，兜底用端口查找
+      if [[ "$OLD_DASHBOARD_ALIVE" == "1" ]]; then
+        kill "$OLD_DASHBOARD_PID" 2>/dev/null || true
+        sleep 1
+      fi
+      # 如果端口仍然在监听（PID 文件可能已失效），通过端口查找并杀掉
+      if "$PYTHON_BIN" -c "import urllib.request; urllib.request.urlopen('$DASHBOARD_URL', timeout=0.5).read(1)" >/dev/null 2>&1; then
+        "$PYTHON_BIN" -c "
+import socket, os, signal, sys
+try:
+    import subprocess
+    result = subprocess.run(['netstat', '-ano'], capture_output=True, text=True)
+    for line in result.stdout.splitlines():
+        if ':$DASHBOARD_PORT' in line and 'LISTENING' in line:
+            pid = line.strip().split()[-1]
+            if pid.isdigit():
+                os.kill(int(pid), signal.SIGTERM)
+except Exception:
+    pass
+" 2>/dev/null || true
+        sleep 1
+      fi
+      rm -f "$DASHBOARD_PID_FILE"
     fi
+
+    # 启动新的 dashboard 控制台（由 Python 进程自己写入操作系统原生 PID）
+    nohup "$PYTHON_BIN" scripts/run_dashboard_console.py --dashboard-dir "$DASHBOARD_DIR" --host "$DASHBOARD_HOST" --port "$DASHBOARD_PORT" --pid-file "$DASHBOARD_PID_FILE" > "$DASHBOARD_LOG" 2>&1 &
+    disown 2>/dev/null || true
+    # 等待 PID 文件写入
+    for _ in {1..20}; do
+      if [[ -f "$DASHBOARD_PID_FILE" ]]; then
+        break
+      fi
+      sleep 0.2
+    done
+    DASHBOARD_PID=""
+    if [[ -f "$DASHBOARD_PID_FILE" ]]; then
+      DASHBOARD_PID=$(cat "$DASHBOARD_PID_FILE" 2>/dev/null | tr -d '[:space:]')
+    fi
+    echo "Dashboard 控制台已启动: $DASHBOARD_URL (pid=${DASHBOARD_PID:-未知})"
+    echo "运行日志: $DASHBOARD_LOG"
+    echo "PID 文件: $DASHBOARD_PID_FILE"
 
     if [[ "${OPEN_EDGE_ON_DASHBOARD}" == "1" ]]; then
       # 等待服务就绪，避免浏览器打开后发现页面还没开始监听
@@ -168,11 +212,12 @@ case "$COMMAND" in
     DASHBOARD_LOG="$DASHBOARD_DIR/dashboard_console.log"
     DASHBOARD_ALIVE="0"
     DASHBOARD_URL="http://127.0.0.1:8765/dashboard.html"
+    DASHBOARD_PID_FILE="$OUTPUT_DIR/dashboard_console.pid"
     if "$PYTHON_BIN" -c "import urllib.request; urllib.request.urlopen('$DASHBOARD_URL', timeout=1).read(1)" >/dev/null 2>&1; then
       DASHBOARD_ALIVE="1"
     fi
     if [[ "$DASHBOARD_ALIVE" != "1" ]]; then
-      "$PYTHON_BIN" scripts/run_dashboard_console.py --dashboard-dir "$DASHBOARD_DIR" > "$DASHBOARD_LOG" 2>&1 &
+      "$PYTHON_BIN" scripts/run_dashboard_console.py --dashboard-dir "$DASHBOARD_DIR" --pid-file "$DASHBOARD_PID_FILE" > "$DASHBOARD_LOG" 2>&1 &
     fi
 
     DS_STARTING_CASH="$STARTING_CASH"
@@ -218,7 +263,8 @@ case "$COMMAND" in
     ;;
   p|ps|status)
     run_manage status \
-      --output-dir "$OUTPUT_DIR"
+      --output-dir "$OUTPUT_DIR" \
+      --dashboard-pid-file "$OUTPUT_DIR/dashboard_console.pid"
     ;;
   r|run)
     run_manage run-full \
@@ -247,7 +293,8 @@ case "$COMMAND" in
     ;;
   x|stop|kill)
     run_manage stop \
-      --output-dir "$OUTPUT_DIR"
+      --output-dir "$OUTPUT_DIR" \
+      --dashboard-pid-file "$OUTPUT_DIR/dashboard_console.pid"
     ;;
   h|help|"")
     print_help

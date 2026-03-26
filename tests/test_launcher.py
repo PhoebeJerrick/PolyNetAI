@@ -80,6 +80,28 @@ def test_apply_profile_overrides_updates_sim_profile_command(tmp_path: Path) -> 
     assert "25" in updated.command
 
 
+def test_apply_profile_overrides_handles_checkbox_flags(tmp_path: Path) -> None:
+    profiles = build_launch_profiles(
+        root=Path("D:/PassiveIncome/Quantification/Projects/PolyMkt/PolyNetAI"),
+        dashboard_dir=tmp_path,
+        python_executable="python",
+    )
+
+    enabled = apply_profile_overrides(
+        profiles["sim-paper"],
+        {"include_trade_process": True},
+    )
+    disabled = apply_profile_overrides(
+        profiles["sim-paper"],
+        {"include_trade_process": False},
+    )
+
+    assert "--include-trade-process" in enabled.command
+    assert "--include-trade-process" not in disabled.command
+    assert "False" not in enabled.command
+    assert "False" not in disabled.command
+
+
 def test_resolve_profile_values_uses_defaults_for_missing_fields(tmp_path: Path) -> None:
     profiles = build_launch_profiles(
         root=Path("D:/PassiveIncome/Quantification/Projects/PolyMkt/PolyNetAI"),
@@ -95,3 +117,23 @@ def test_resolve_profile_values_uses_defaults_for_missing_fields(tmp_path: Path)
     assert resolved["slug_prefix"] == "eth-updown-5m-"
     assert resolved["max_cycles"] == 10
     assert resolved["starting_cash"] == 1000
+
+
+def test_resolve_profile_values_coerces_checkbox_strings(tmp_path: Path) -> None:
+    profiles = build_launch_profiles(
+        root=Path("D:/PassiveIncome/Quantification/Projects/PolyMkt/PolyNetAI"),
+        dashboard_dir=tmp_path,
+        python_executable="python",
+    )
+
+    resolved_false = resolve_profile_values(
+        profiles["sim-paper"],
+        {"include_trade_process": "False"},
+    )
+    resolved_true = resolve_profile_values(
+        profiles["sim-paper"],
+        {"include_trade_process": "true"},
+    )
+
+    assert resolved_false["include_trade_process"] is False
+    assert resolved_true["include_trade_process"] is True

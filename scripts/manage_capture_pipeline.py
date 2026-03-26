@@ -229,8 +229,13 @@ def _print_status(args: argparse.Namespace) -> int:
     total_events = sum(int(row.get("event_count", 0) or 0) for row in manifest_rows)
     last_cycle = manifest_rows[-1] if manifest_rows else None
 
+    dashboard_pid_path = Path(args.dashboard_pid_file) if getattr(args, "dashboard_pid_file", None) else None
+    dashboard_pid = _read_pid(dashboard_pid_path) if dashboard_pid_path else None
+    dashboard_running = bool(dashboard_pid and _is_process_running(dashboard_pid))
+
     print("## 任务状态")
     print(f"- 输出目录: {output_dir}")
+    print(f"- Dashboard 控制台: {'运行中' if dashboard_running else '未运行'}" + (f" (pid={dashboard_pid})" if dashboard_pid else ""))
     print(f"- 抓取进程: {'运行中' if capture_running else '未运行'}" + (f" (pid={capture_pid})" if capture_pid else ""))
     print(f"- 流水线进程: {'运行中' if pipeline_running else '未运行'}" + (f" (pid={pipeline_pid})" if pipeline_pid else ""))
 
@@ -333,12 +338,16 @@ def _stop_jobs(args: argparse.Namespace) -> int:
     stopped_any = False
     failures: list[str] = []
 
+    dashboard_pid_path = Path(args.dashboard_pid_file) if getattr(args, "dashboard_pid_file", None) else None
     targets = [
+        ("Dashboard 控制台", dashboard_pid_path),
         ("流水线", output_dir / "pipeline.pid"),
         ("抓取", output_dir / "capture.pid"),
     ]
 
     for label, pid_path in targets:
+        if pid_path is None:
+            continue
         pid = _read_pid(pid_path)
         if not pid:
             continue
@@ -395,10 +404,12 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser = subparsers.add_parser("status", help="查看后台运行状态和进度")
     status_parser.add_argument("--output-dir", required=True)
     status_parser.add_argument("--tail-lines", type=int, default=5)
+    status_parser.add_argument("--dashboard-pid-file", default=None, help="Dashboard 控制台 PID 文件路径")
 
     stop_parser = subparsers.add_parser("stop", help="一键停止进程")
     stop_parser.add_argument("--output-dir", required=True)
     stop_parser.add_argument("--timeout-seconds", type=float, default=10.0)
+    stop_parser.add_argument("--dashboard-pid-file", default=None, help="Dashboard 控制台 PID 文件路径")
 
     run_full_parser = subparsers.add_parser("run-full", help="一键抓取并直到生成业绩报告")
     add_capture_args(run_full_parser)

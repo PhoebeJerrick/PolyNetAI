@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from polynet_ai.adapters.trade_event_store import (
+    CycleTradeEventRecorder,
     TradeEventRecorder,
     export_recorded_trade_events_csv,
     load_recorded_trade_events,
@@ -64,3 +65,36 @@ def test_export_recorded_trade_events_csv_writes_flat_file(tmp_path) -> None:
     text = output.read_text(encoding="utf-8-sig")
     assert "market_id,cycle_id,timestamp,price,shares,outcome,action,source,metadata" in text
     assert '{""source_id"": ""abc""}' in text
+
+
+def test_cycle_trade_event_recorder_splits_by_cycle(tmp_path) -> None:
+    with CycleTradeEventRecorder(tmp_path) as recorder:
+        recorder.record(
+            TradeEvent(
+                market_id="BTC",
+                cycle_id="btc-updown-5m-1",
+                timestamp=datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc),
+                price=0.45,
+                shares=10.0,
+                outcome="up",
+                action="buy",
+            )
+        )
+        recorder.record(
+            TradeEvent(
+                market_id="BTC",
+                cycle_id="btc-updown-5m-2",
+                timestamp=datetime(2026, 3, 20, 12, 5, 0, tzinfo=timezone.utc),
+                price=0.55,
+                shares=8.0,
+                outcome="down",
+                action="sell",
+            )
+        )
+
+    first = tmp_path / "btc-updown-5m-1" / "ws_trade_events.ndjson"
+    second = tmp_path / "btc-updown-5m-2" / "ws_trade_events.ndjson"
+    assert first.exists()
+    assert second.exists()
+    assert len(load_recorded_trade_events(first)) == 1
+    assert len(load_recorded_trade_events(second)) == 1

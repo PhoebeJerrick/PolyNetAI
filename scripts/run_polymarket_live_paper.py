@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
+from contextlib import nullcontext
+from datetime import datetime
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -19,6 +24,7 @@ from polynet_ai.adapters.polymarket_live import (  # noqa: E402
     select_account_env,
 )
 from polynet_ai.adapters.trade_event_store import (  # noqa: E402
+    CycleTradeEventRecorder,
     TradeEventRecorder,
     export_recorded_trade_events_csv,
 )
@@ -27,6 +33,19 @@ from polynet_ai.engine.live import LivePaperRunner, LiveRunnerResult, export_liv
 from polynet_ai.engine.replay import ReplayEngine  # noqa: E402
 from polynet_ai.strategy.router import StrategyRouter  # noqa: E402
 from polynet_ai.strategy.spec import load_strategy_config  # noqa: E402
+
+try:
+    from scripts.batch_replay_recorded_trade_events import run_batch_replay  # noqa: E402
+    from scripts.build_batch_replay_performance_report import (  # noqa: E402
+        build_comparison_report_zh,
+        build_performance_report_zh,
+    )
+except ImportError:
+    from batch_replay_recorded_trade_events import run_batch_replay  # type: ignore
+    from build_batch_replay_performance_report import (  # type: ignore
+        build_comparison_report_zh,
+        build_performance_report_zh,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,6 +67,11 @@ def parse_args() -> argparse.Namespace:
         help="API 配置文件路径。当前实时仿真只做读取校验，不使用私钥下真实单。",
     )
     parser.add_argument("--account-index", type=int, default=2, help="账号编号（默认 2）；会优先读取 PURSE_ADDRESS_2 等后缀键。")
+    parser.add_argument(
+        "--record-events-dir",
+        default=None,
+        help="可选：按周期目录额外落盘实时事件流，输出结构兼容 record_job/<cycle_slug>/ws_trade_events.ndjson。",
+    )
     return parser.parse_args()
 
 
@@ -89,30 +113,117 @@ def _wrap_event_stream_with_config_reload(
         yield event
 
 
+def _build_summary_from_live_result(
+    replay_result,
+    new_cycle_slugs: list[str],
+):
+    """从 LivePaperRunner 的流式处理结果中构建与批量回放兼容的 summary_df / cycle_df / decision_df。
+
+    与批量回放的区别:
+    - 流式处理使用单一引擎实例，账户资金在周期间连续累积
+    - 批量回放每个周期独立创建引擎，资金每次重置
+    对比这两者可暴露状态累积带来的差异（如跨周期下单时间门控、资金差异等）。
+    """
+    import pandas as pd
+
+    cycle_df = replay_result.cycle_df.copy()
+    decision_df = replay_result.decision_df.copy()
+
+    # 补齐 cycle_slug 列（与批量回放输出格式对齐）
+    if "cycle_slug" not in cycle_df.columns and "cycle_id" in cycle_df.columns:
+        cycle_df["cycle_slug"] = cycle_df["cycle_id"]
+    if "cycle_slug" not in decision_df.columns and "cycle_id" in decision_df.columns:
+        decision_df["cycle_slug"] = decision_df["cycle_id"]
+
+    # 只保留本次新采集的周期
+    if new_cycle_slugs:
+        cycle_df = cycle_df[cycle_df["cycle_slug"].isin(new_cycle_slugs)].copy()
+        decision_df = decision_df[decision_df["cycle_slug"].isin(new_cycle_slugs)].copy()
+
+    summary_rows: list[dict] = []
+    for _, crow in cycle_df.iterrows():
+        slug = crow["cycle_slug"]
+        cdec = decision_df[decision_df["cycle_slug"] == slug]
+
+        executed = int(cdec["executed"].sum()) if "executed" in cdec.columns else 0
+        risk_col = cdec["risk_status"] if "risk_status" in cdec.columns else pd.Series(dtype=str)
+        accepted = int((risk_col == "accepted").sum())
+        blocked = int((risk_col == "blocked").sum())
+        fees = float(cdec["fill_fee"].sum()) if "fill_fee" in cdec.columns else 0.0
+        net_profit = float(crow.get("cycle_net_profit", 0.0))
+
+        summary_rows.append({
+            "cycle_slug": slug,
+            "event_count": len(cdec),
+            "executed_trades": executed,
+            "accepted_signals": accepted,
+            "blocked_signals": blocked,
+            "total_net_profit": net_profit,
+            "total_fees": fees,
+            "win_rate": 1.0 if net_profit > 0 else 0.0,
+            "winner": crow.get("winner", ""),
+            "account_cash": crow.get("account_cash", None),
+        })
+
+    summary_df = pd.DataFrame(summary_rows)
+    if not summary_df.empty:
+        summary_df = summary_df.sort_values("cycle_slug").reset_index(drop=True)
+
+    return summary_df, cycle_df, decision_df
+
+
 def main() -> int:
     args = parse_args()
+    start_time = datetime.now()
+    print("\n" + "="*70)
+    print(f"[实盘行情验证] 开始于 {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print("="*70)
+    
     market_slugs = _load_market_slugs(args)
     dashboard_title = "Polynet AI Live Monitoring Dashboard"
+    
+    # 用于追踪各阶段的耗时
+    stage_times = {}
 
+    stage_1_start = datetime.now()
+    print(f"\n[1/7] 初始化环境配置...")
     if Path(args.env_file).exists():
         env_values = load_api_env(args.env_file)
         selected_env = select_account_env(env_values, account_index=args.account_index)
         applied = apply_proxy_env_from_dict(selected_env)
         purse = get_account_env_value(env_values, "PURSE_ADDRESS", account_index=args.account_index)
-        print(f"检测到 API 配置文件: {Path(args.env_file)}")
-        print(f"已读取 {len(env_values)} 个键；当前仿真仅使用公开行情，不会真实下单。")
-        print(f"默认账号: {args.account_index}" + (f" (PURSE_ADDRESS={purse})" if purse else ""))
+        print(f"  ✓ API 配置已加载，账号: {args.account_index}")
         if applied:
-            print(f"已从配置文件应用代理环境变量: {', '.join(applied)}")
+            print(f"  ✓ 代理配置已应用: {', '.join(applied)}")
+    stage_times["1_init_env"] = (datetime.now() - stage_1_start).total_seconds()
 
+    stage_2_start = datetime.now()
+    print(f"\n[2/7] 初始化回放引擎...")
     engine = ReplayEngine.from_yaml(args.config, starting_cash=args.starting_cash)
     runner = LivePaperRunner(engine)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"  ✓ 引擎已初始化，初始资金: {args.starting_cash} USDT")
+    print(f"  ✓ 输出目录: {args.output_dir}")
+    stage_times["2_init_engine"] = (datetime.now() - stage_2_start).total_seconds()
+    
+    cycle_record_dir = Path(args.record_events_dir) if args.record_events_dir else None
+    run_start_timestamp = datetime.now()
+    old_cycle_dirs = set()
+    if cycle_record_dir is not None:
+        print(f"  ℹ 实时事件落盘目录: {cycle_record_dir}")
+        cycle_record_dir.mkdir(parents=True, exist_ok=True)
+        # 记录现有周期，以便后续识别新周期
+        old_cycle_dirs = set(d.name for d in cycle_record_dir.glob("btc-updown-5m-*") if d.is_dir())
+        if old_cycle_dirs:
+            print(f"  ℹ 发现 {len(old_cycle_dirs)} 个历史周期目录（将保留）")
+    
+    stage_3_start = datetime.now()
+    print(f"\n[3/7] 建立 Polymarket 实时行情订阅...")
     event_stream = None
     if args.robot_mode:
         if market_slugs:
-            print("已提供 --market-slugs，机器人模式将按显式列表执行，不做自动发现。")
+            print("  ℹ 机器人模式：将按显式列表执行，不做自动发现")
             specs = build_market_specs(
                 market_slugs=market_slugs,
                 slug_prefix=args.slug_prefix,
@@ -120,17 +231,15 @@ def main() -> int:
             )
             if not specs:
                 raise RuntimeError("没有可用的实时市场可供订阅。")
-            print("本次将跟踪以下周期:")
-            for spec in specs:
-                print(f"  - {spec.slug}")
+            print(f"  ✓ 将跟踪 {len(specs)} 个周期")
             event_stream = iter_polymarket_trade_events(specs, log_fn=print)
         elif not args.slug_prefix:
             raise ValueError("机器人模式需要提供 --slug-prefix（例如 btc-updown-5m-）。")
         else:
             print(
-                f"机器人模式已启用：将按前缀 `{args.slug_prefix}` 自动发现并切换窗口，"
-                f"目标窗口数: {args.max_cycles}。"
+                f"  ℹ 机器人模式：按前缀 `{args.slug_prefix}` 自动发现并切换窗口"
             )
+            print(f"  ℹ 目标周期数: {args.max_cycles}")
             event_stream = iter_polymarket_trade_events_robot(
                 slug_prefix=args.slug_prefix,
                 max_cycles=args.max_cycles,
@@ -145,9 +254,7 @@ def main() -> int:
         )
         if not specs:
             raise RuntimeError("没有可用的实时市场可供订阅。")
-        print("本次将跟踪以下周期:")
-        for spec in specs:
-            print(f"  - {spec.slug}")
+        print(f"  ✓ 发现 {len(specs)} 个市场")
         event_stream = iter_polymarket_trade_events(specs, log_fn=print)
 
     event_stream = _wrap_event_stream_with_config_reload(
@@ -155,10 +262,11 @@ def main() -> int:
         config_path=args.config,
         engine=engine,
     )
+    stage_times["3_subscribe"] = (datetime.now() - stage_3_start).total_seconds()
 
     progress_callback = None
     if args.dashboard_refresh_seconds > 0:
-        print(f"实时 dashboard 已启用：每 {args.dashboard_refresh_seconds:.1f}s 写盘一次。")
+        print(f"  ✓ 实时 dashboard：每 {args.dashboard_refresh_seconds:.1f}s 刷新")
 
         def _flush_progress(result: LiveRunnerResult) -> None:
             export_live_result(
@@ -173,14 +281,38 @@ def main() -> int:
 
     recorded_events_path = output_dir / "ws_trade_events.ndjson"
     recorded_events_csv_path = output_dir / "ws_trade_events.csv"
-    with TradeEventRecorder(recorded_events_path) as event_recorder:
+    if cycle_record_dir is not None:
+        print(f"  ✓ 实时事件落盘目录: {cycle_record_dir}")
+
+    def _record_event(event) -> None:
+        event_recorder.record(event)
+        if cycle_event_recorder is not None:
+            cycle_event_recorder.record(event)
+
+    stage_4_start = datetime.now()
+    print(f"\n[4/7] 开始实时行情回放...")
+    print(f"  ℹ 请稍候，连接中...")
+    run_start_time = datetime.now()
+    
+    with TradeEventRecorder(recorded_events_path) as event_recorder, (
+        CycleTradeEventRecorder(cycle_record_dir) if cycle_record_dir is not None else nullcontext()
+    ) as cycle_event_recorder:
         result = runner.run_stream(
             event_stream,
             status_every=args.status_every,
-            on_event=event_recorder.record,
+            on_event=_record_event,
             on_progress=progress_callback,
             progress_interval_seconds=max(0.0, args.dashboard_refresh_seconds),
         )
+    run_elapsed = (datetime.now() - run_start_time).total_seconds()
+    stage_times["4_replay"] = run_elapsed
+    
+    cycle_count = len(result.replay_result.cycle_df)
+    print(f"  ✓ 行情回放完成 (耗时 {run_elapsed:.1f}s)")
+    print(f"  ✓ 已处理周期: {cycle_count} 个")
+    
+    stage_5_start = datetime.now()
+    print(f"\n[5/7] 导出结果数据...")
     export_recorded_trade_events_csv(recorded_events_path, recorded_events_csv_path)
     export_live_result(
         result,
@@ -189,11 +321,131 @@ def main() -> int:
         refresh_seconds=max(1.0, args.dashboard_refresh_seconds) if args.dashboard_refresh_seconds > 0 else 1.0,
         write_excel=True,
     )
+    print(f"  ✓ 数据已导出")
+    stage_times["5_export"] = (datetime.now() - stage_5_start).total_seconds()
 
-    cycle_count = len(result.replay_result.cycle_df)
-    print(f"实时仿真完成，已落盘到: {args.output_dir}")
-    print(f"完成周期数: {cycle_count}")
+    stage_6_start = datetime.now()
+    live_report_path: Path | None = None
+    new_cycle_slugs: list[str] = []
+    if cycle_record_dir is not None and cycle_record_dir.exists():
+        all_cycle_dirs = list(cycle_record_dir.glob("btc-updown-5m-*"))
+        new_cycle_dirs = [d for d in all_cycle_dirs if d.name not in old_cycle_dirs]
+        new_cycle_files = [d / "ws_trade_events.ndjson" for d in new_cycle_dirs if (d / "ws_trade_events.ndjson").exists()]
+        
+        if new_cycle_files:
+            print(f"\n[6/7] 生成实盘验证绩效报告...")
+            print(f"  ℹ 发现 {len(new_cycle_files)} 个新周期的实时事件流，正在回放分析...")
+            report_start = datetime.now()
+            try:
+                # 创建临时目录用于仅放新周期数据
+                temp_replay_dir = cycle_record_dir / f"replay_new_cycles_{run_start_timestamp.strftime('%Y%m%d_%H%M%S')}"
+                temp_replay_dir.mkdir(exist_ok=True)
+                
+                # 复制新周期数据到临时目录
+                for cycle_dir in new_cycle_dirs:
+                    temp_cycle_dir = temp_replay_dir / cycle_dir.name
+                    if not temp_cycle_dir.exists():
+                        shutil.copytree(cycle_dir, temp_cycle_dir)
+                
+                new_cycle_slugs = sorted([d.name for d in new_cycle_dirs])
+                
+                live_report_path = run_batch_replay(
+                    input_dir=temp_replay_dir,
+                    config_path=args.config,
+                    output_dir=cycle_record_dir / "batch_replay_outputs",
+                    starting_cash=args.starting_cash,
+                    include_trade_process=False,
+                    cycle_count=len(new_cycle_files),
+                    report_source="实盘行情验证",
+                )
+                report_elapsed = (datetime.now() - report_start).total_seconds()
+                stage_times["6_report"] = report_elapsed
+                print(f"  ✓ 实盘验证绩效报告已生成 (耗时 {report_elapsed:.1f}s)")
+                if live_report_path and live_report_path.exists():
+                    print(f"  ✓ 报告位置: {live_report_path}")
+                    print(f"  ℹ 新周期数: {len(new_cycle_files)}")
+                else:
+                    print(f"  ⚠ 警告: 实盘验证报告生成可能失败，请检查输出目录")
+            except Exception as e:
+                print(f"  ✗ 实盘验证报告生成失败: {e}", file=sys.stderr)
+        else:
+            stage_times["6_report"] = (datetime.now() - stage_6_start).total_seconds()
+            if all_cycle_dirs:
+                print(f"\n[6/7] 无新周期数据（共 {len(all_cycle_dirs)} 个历史周期保留）")
+            else:
+                print(f"\n[6/7] 无周期数据（未启用周期事件落盘或无新数据）")
+    else:
+        stage_times["6_report"] = (datetime.now() - stage_6_start).total_seconds()
+
+    # --- [7/7] 流式处理 vs 批量回放 对比报告 ---
+    # 对比 step-4 流式处理结果（引擎跨周期连续运行）与 step-6 批量回放结果
+    # （每周期独立引擎），同一份行情数据，检验两种执行方式的一致性。
+    stage_7_start = datetime.now()
+    if live_report_path and live_report_path.exists():
+        comparison_output_dir = cycle_record_dir / "batch_replay_outputs" if cycle_record_dir else Path("artifacts/live/record_job_market/batch_replay_outputs")
+        n_live_cycles = len(new_cycle_slugs) if new_cycle_slugs else 0
+        if n_live_cycles > 0:
+            print(f"\n[7/7] 生成「流式处理 vs 批量回放」对比报告...")
+            print(f"  ℹ 流式处理结果（引擎跨周期连续状态）与批量回放（每周期独立引擎）对比")
+            print(f"  ℹ 周期数: {n_live_cycles}")
+            try:
+                summary_df, sim_cycle_df, sim_decision_df = _build_summary_from_live_result(
+                    result.replay_result, new_cycle_slugs,
+                )
+                sim_report_path = build_performance_report_zh(
+                    resolved_batch_dir=comparison_output_dir,
+                    summary_df=summary_df,
+                    cycle_df=sim_cycle_df,
+                    decision_df=sim_decision_df,
+                    output_path=comparison_output_dir,
+                    display_batch_dir=cycle_record_dir,
+                    cycle_count=n_live_cycles,
+                    report_source="实盘行情（流式处理）",
+                )
+                if sim_report_path and sim_report_path.exists():
+                    print(f"  ✓ 流式处理绩效报告: {sim_report_path.name}")
+                    comparison_path = build_comparison_report_zh(
+                        sim_report_path=sim_report_path,
+                        live_report_path=live_report_path,
+                        output_path=comparison_output_dir,
+                    )
+                    compare_elapsed = (datetime.now() - stage_7_start).total_seconds()
+                    stage_times["7_comparison"] = compare_elapsed
+                    print(f"  ✓ 对比报告已生成 (耗时 {compare_elapsed:.1f}s)")
+                    print(f"  ✓ 对比报告位置: {comparison_path}")
+                else:
+                    print(f"  ⚠ 流式处理绩效报告生成失败，跳过对比")
+                    stage_times["7_comparison"] = (datetime.now() - stage_7_start).total_seconds()
+            except Exception as e:
+                print(f"  ✗ 对比报告生成失败: {e}", file=sys.stderr)
+                import traceback
+                traceback.print_exc()
+                stage_times["7_comparison"] = (datetime.now() - stage_7_start).total_seconds()
+        else:
+            print(f"\n[7/7] 无新周期数据，跳过对比")
+            stage_times["7_comparison"] = (datetime.now() - stage_7_start).total_seconds()
+    else:
+        stage_times["7_comparison"] = (datetime.now() - stage_7_start).total_seconds()
+    
+    total_elapsed = (datetime.now() - start_time).total_seconds()
+    print(f"\n{'='*70}")
+    print("[进度汇总]")
+    print(f"  [1/7] 初始化环境:     {stage_times.get('1_init_env', 0):.2f}s")
+    print(f"  [2/7] 初始化引擎:     {stage_times.get('2_init_engine', 0):.2f}s")
+    print(f"  [3/7] 建立订阅:       {stage_times.get('3_subscribe', 0):.2f}s")
+    print(f"  [4/7] 实时回放:       {stage_times.get('4_replay', 0):.2f}s  【处理 {cycle_count} 个周期】")
+    print(f"  [5/7] 导出数据:       {stage_times.get('5_export', 0):.2f}s")
+    if stage_times.get('6_report', 0) > 0:
+        print(f"  [6/7] 实盘报告:       {stage_times.get('6_report', 0):.2f}s")
+    if stage_times.get('7_comparison', 0) > 0:
+        print(f"  [7/7] 对比报告:       {stage_times.get('7_comparison', 0):.2f}s")
+    print(f"  {'-'*66}")
+    print(f"  总耗时:              {total_elapsed:.2f}s  (共 {int(total_elapsed//60)}分 {total_elapsed%60:.0f}秒)")
+    print(f"{'='*70}")
+    print(f"\n关键指标汇总:")
     print(result.replay_result.metrics_df.to_string(index=False))
+    print()
+
     return 0
 
 

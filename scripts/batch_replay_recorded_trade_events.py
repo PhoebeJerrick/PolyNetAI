@@ -83,59 +83,107 @@ def _discover_cycle_event_files(input_dir: Path) -> list[Path]:
     return files
 
 
-def main() -> int:
-    args = parse_args()
-    input_dir = _resolve_existing_path("输入目录", args.input_dir)
+def run_batch_replay(
+    input_dir: str | Path,
+    config_path: str | Path = "configs/strategy.yaml",
+    overrides_path: str | Path | None = None,
+    output_dir: str | Path | None = None,
+    starting_cash: float = 100.0,
+    include_trade_process: bool = False,
+    cycle_range: str = "",
+    cycle_count: int = 0,
+    report_source: str = "",
+    max_cycles: int | None = None,
+) -> Path | None:
+    """核心 batch replay 逻辑，可被外部脚本调用。返回 Excel 绩效报告路径。"""
+    input_resolved = _resolve_existing_path("输入目录", input_dir)
+    output_resolved = Path(output_dir) if output_dir else input_resolved / "batch_replay_outputs"
+    output_resolved.mkdir(parents=True, exist_ok=True)
 
-    output_dir = Path(args.output_dir) if args.output_dir else input_dir / "batch_replay_outputs"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    config = _load_config(args.config, args.overrides)
-    event_files = _discover_cycle_event_files(input_dir)
+    config = _load_config(config_path, overrides_path)
+    event_files = _discover_cycle_event_files(input_resolved)
     if not event_files:
-        raise RuntimeError(f"未在目录下找到任何 `<cycle_slug>/ws_trade_events.ndjson`: {input_dir}")
+        raise RuntimeError(f"未在目录下找到任何 `<cycle_slug>/ws_trade_events.ndjson`: {input_resolved}")
+    if max_cycles is not None and max_cycles > 0:
+        event_files = event_files[-max_cycles:]
+    
+    total_files = len(event_files)
+    print(f"  ℹ 共需回放 {total_files} 个周期文件")
 
     summary_rows: list[dict[str, object]] = []
     cycle_parts: list[pd.DataFrame] = []
     decision_parts: list[pd.DataFrame] = []
 
-    for event_file in event_files:
+    # 使用单一引擎跨周期连续运行，与实盘验证保持一致：
+    # 账户资金累积、下单时间门控等状态在周期间持续。
+    engine = ReplayEngine(config, starting_cash=starting_cash)
+    all_finalized_cycle_rows: list[dict[str, object]] = []
+    per_cycle_meta: dict[str, dict] = {}  # cycle_slug -> {event_count, decision_rows}
+
+    for idx, event_file in enumerate(event_files, 1):
         cycle_slug = event_file.parent.name
         events = load_recorded_trade_events(event_file)
         if not events:
             print(f"[skip] {cycle_slug}: 事件文件为空")
             continue
 
-        engine = ReplayEngine(config, starting_cash=args.starting_cash)
-        result = engine.run(events)
+        sorted_events = sorted(events, key=lambda e: (e.market_id, e.cycle_id, e.timestamp))
+        cycle_decisions: list[dict[str, object]] = []
 
-        cdf = result.cycle_df.copy()
-        cdf["cycle_slug"] = cycle_slug
-        ddf = result.decision_df.copy()
-        ddf["cycle_slug"] = cycle_slug
+        for event in sorted_events:
+            step = engine.process_event(event)
+            if step.finalized_cycle_row is not None:
+                all_finalized_cycle_rows.append(step.finalized_cycle_row)
+            cycle_decisions.append(step.decision_row)
+
+        per_cycle_meta[cycle_slug] = {
+            "event_count": len(events),
+            "decision_rows": cycle_decisions,
+        }
+
+        executed = sum(1 for d in cycle_decisions if d.get("executed"))
+        net_profit = float(cycle_decisions[-1].get("cycle_net_profit", 0.0)) if cycle_decisions else 0.0
+        print(
+            f"    [{idx}/{total_files}] {cycle_slug}: "
+            f"events={len(events)} | profit={net_profit:.4f} | "
+            f"executed={executed}"
+        )
+
+    # 最后一个周期尚未被下一周期的事件触发结算，手动结算
+    pending = engine.finalize_pending_cycle()
+    if pending is not None:
+        all_finalized_cycle_rows.append(pending)
+
+    # 从结算行和决策行构建每周期汇总
+    for cycle_row in all_finalized_cycle_rows:
+        slug = str(cycle_row.get("cycle_id", ""))
+        meta = per_cycle_meta.get(slug, {})
+        decisions = meta.get("decision_rows", [])
+
+        cdf = pd.DataFrame([cycle_row])
+        cdf["cycle_slug"] = slug
         cycle_parts.append(cdf)
-        decision_parts.append(ddf)
 
-        metrics_row = result.metrics_df.iloc[0].to_dict()
-        cycle_row = result.cycle_df.iloc[0].to_dict() if not result.cycle_df.empty else {}
+        if decisions:
+            ddf = pd.DataFrame(decisions)
+            ddf["cycle_slug"] = slug
+            decision_parts.append(ddf)
+
+        total_fees = sum(float(d.get("fill_fee", 0)) for d in decisions)
+        net_profit = float(cycle_row.get("cycle_net_profit", 0.0))
         summary_rows.append(
             {
-                "cycle_slug": cycle_slug,
-                "event_count": len(events),
-                "executed_trades": metrics_row.get("executed_trades", 0),
-                "accepted_signals": metrics_row.get("accepted_signals", 0),
-                "blocked_signals": metrics_row.get("blocked_signals", 0),
-                "total_net_profit": metrics_row.get("total_net_profit", 0.0),
-                "total_fees": metrics_row.get("total_fees", 0.0),
-                "win_rate": metrics_row.get("win_rate", 0.0),
+                "cycle_slug": slug,
+                "event_count": meta.get("event_count", 0),
+                "executed_trades": sum(1 for d in decisions if d.get("executed")),
+                "accepted_signals": sum(1 for d in decisions if d.get("risk_status") == "accepted"),
+                "blocked_signals": sum(1 for d in decisions if d.get("risk_status") == "blocked"),
+                "total_net_profit": net_profit,
+                "total_fees": total_fees,
+                "win_rate": 1.0 if net_profit > 0 else 0.0,
                 "winner": cycle_row.get("winner", ""),
                 "account_cash": cycle_row.get("account_cash", None),
             }
-        )
-        print(
-            f"[done] {cycle_slug}: events={len(events)} "
-            f"net_profit={float(metrics_row.get('total_net_profit', 0.0)):.6f} "
-            f"executed={metrics_row.get('executed_trades', 0)}"
         )
 
     summary_df = pd.DataFrame(summary_rows)
@@ -146,33 +194,59 @@ def main() -> int:
 
     # 根据参数决定是否生成交易过程 Excel
     trade_xlsx: Path | None = None
-    if args.include_trade_process:
+    if include_trade_process:
         trade_xlsx = write_batch_trade_process_zh(
-            input_dir=input_dir,
+            input_dir=input_resolved,
             cycle_df=cycle_df,
             decision_df=decision_df,
-            output_path=output_dir,
+            output_path=output_resolved,
         )
 
     xlsx_report = build_performance_report_zh(
-        resolved_batch_dir=output_dir,
+        resolved_batch_dir=output_resolved,
         summary_df=summary_df,
         cycle_df=cycle_df,
         decision_df=decision_df,
-        output_path=output_dir,
-        display_batch_dir=input_dir,
+        output_path=output_resolved,
+        display_batch_dir=input_resolved,
+        cycle_range=cycle_range,
+        cycle_count=cycle_count,
+        report_source=report_source,
     )
-    _cleanup_batch_replay_markdown(output_dir)
+    _cleanup_batch_replay_markdown(output_resolved)
 
-    print(f"批量回放完成，共 {len(summary_df)} 个周期")
-    if trade_xlsx:
-        print(f"交易过程 (Excel): {trade_xlsx}")
-    print(f"总绩效报告 (Excel): {xlsx_report}")
-    if not xlsx_report.exists():
+    print(f"  ✓ 回放完成，共 {len(summary_df)} 个周期")
+    
+    # 验证报告文件是否存在
+    if xlsx_report.exists():
+        print(f"  ✓ 绩效报告: {xlsx_report}")
+        return xlsx_report
+    else:
         print(
-            "警告: 未找到 Excel 总绩效文件。请确认已使用包含 batch_replay_performance_report_zh.xlsx 生成的最新代码。",
+            f"  ✗ 警告: 未找到生成的 Excel 报告文件: {xlsx_report}\n"
+            f"     请检查 {output_resolved} 目录是否包含文件。",
             file=sys.stderr,
         )
+        # 列出输出目录中的文件供调试
+        if output_resolved.exists():
+            files = list(output_resolved.glob("*.xlsx"))
+            if files:
+                print(f"  ℹ 输出目录中找到的 Excel 文件:", file=sys.stderr)
+                for f in files:
+                    print(f"     - {f.name}", file=sys.stderr)
+        return None
+
+
+def main() -> int:
+    args = parse_args()
+    xlsx_report = run_batch_replay(
+        input_dir=args.input_dir,
+        config_path=args.config,
+        overrides_path=args.overrides,
+        output_dir=args.output_dir,
+        starting_cash=args.starting_cash,
+        include_trade_process=args.include_trade_process,
+    )
     return 0
 
 

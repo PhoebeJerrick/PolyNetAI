@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -29,6 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--python-executable", default=sys.executable)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--pid-file", default=None, help="将本进程 PID 写入此文件，便于外部管理")
     return parser.parse_args()
 
 
@@ -415,6 +417,13 @@ def main() -> int:
         )
 
     server = ThreadingHTTPServer((args.host, args.port), _handler)
+
+    # 写入 PID 文件（使用 os.getpid() 保证是操作系统原生 PID）
+    pid_file_path = Path(args.pid_file) if args.pid_file else None
+    if pid_file_path is not None:
+        pid_file_path.parent.mkdir(parents=True, exist_ok=True)
+        pid_file_path.write_text(str(os.getpid()), encoding="utf-8")
+
     print(f"Dashboard 控制台已启动: http://{args.host}:{args.port}/dashboard.html")
     print(f"服务目录: {dashboard_dir}")
     for name, path in config_paths.items():
@@ -427,6 +436,14 @@ def main() -> int:
     finally:
         run_manager.shutdown()
         server.server_close()
+        # 仅在 PID 文件内容仍记录的是自己时才删除，避免新进程的 PID 文件被旧进程 finally 误删
+        if pid_file_path is not None:
+            try:
+                stored = pid_file_path.read_text(encoding="utf-8").strip()
+                if stored == str(os.getpid()):
+                    pid_file_path.unlink(missing_ok=True)
+            except (OSError, ValueError):
+                pass
     return 0
 
 

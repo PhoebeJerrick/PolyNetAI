@@ -4,6 +4,7 @@ import argparse
 import re
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -180,6 +181,7 @@ def _write_sim_batch_reports(output_dir: str | Path, result: LiveRunnerResult) -
         decision_df=decision_df,
         output_path=out_dir,
         display_batch_dir=out_dir,
+        report_source="模拟下单测试",
     )
     _cleanup_batch_replay_markdown(out_dir)
     return perf_xlsx, trade_xlsx
@@ -187,7 +189,12 @@ def _write_sim_batch_reports(output_dir: str | Path, result: LiveRunnerResult) -
 
 def main() -> int:
     args = parse_args()
+    start_time = datetime.now()
+    print("\n" + "="*70)
+    print(f"[模拟下单测试] 开始于 {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print("="*70)
 
+    print(f"\n[1/5] 加载输入数据...")
     input_dir_parts = _parse_input_dirs(args.input_dirs)
     if input_dir_parts:
         input_dirs = [_resolve_input_dir(ROOT, raw) for raw in input_dir_parts]
@@ -197,12 +204,14 @@ def main() -> int:
     missing = [p for p in input_dirs if not p.exists()]
     if missing:
         raise FileNotFoundError(f"输入目录不存在: {', '.join(str(p) for p in missing)}")
+    print(f"  ✓ 输入目录已验证: {', '.join(str(p.name) for p in input_dirs)}")
 
     max_cycles = args.max_cycles if args.max_cycles and args.max_cycles > 0 else None
 
     cycle_dirs = sorted(_load_cycle_dirs_from_input_dirs(input_dirs, args.cycle_glob), key=_cycle_sort_key)
     if max_cycles is not None and max_cycles > 0:
         cycle_dirs = cycle_dirs[:max_cycles]
+    print(f"  ✓ 发现 {len(cycle_dirs)} 个周期目录，正在加载事件流...")
 
     events = []
     for cycle_dir in cycle_dirs:
@@ -218,11 +227,16 @@ def main() -> int:
             f"\n- 周期匹配: {args.cycle_glob}"
             f"\n- 成交流文件: {args.event_file_name}"
         )
+    print(f"  ✓ 已加载 {len(events)} 条成交事件")
     if args.limit is not None:
         events = events[: args.limit]
+        print(f"  ✓ 事件限制: 使用前 {len(events)} 条")
 
+    print(f"\n[2/5] 初始化回放引擎...")
     engine = ReplayEngine.from_yaml(args.config, starting_cash=args.starting_cash)
     runner = LivePaperRunner(engine)
+    print(f"  ✓ 引擎已初始化，初始资金: {args.starting_cash} USDT")
+    
     event_stream = iter_events_with_pacing(
         events,
         pace_factor=args.pace_factor,
@@ -230,7 +244,7 @@ def main() -> int:
     )
     progress_callback = None
     if args.dashboard_refresh_seconds > 0:
-        print(f"实时 dashboard 已启用：每 {args.dashboard_refresh_seconds:.1f}s 写盘一次。")
+        print(f"  ✓ 实时 dashboard 已启用：每 {args.dashboard_refresh_seconds:.1f}s 写盘一次")
 
         def _flush_progress(result: LiveRunnerResult) -> None:
             export_live_result(
@@ -242,23 +256,41 @@ def main() -> int:
 
         progress_callback = _flush_progress
 
+    print(f"\n[3/5] 开始回放事件流（{len(events)} 条事件，速度x{args.pace_factor}）...")
+    run_start_time = datetime.now()
     result = runner.run_stream(
         event_stream,
         status_every=args.status_every,
         on_progress=progress_callback,
         progress_interval_seconds=max(0.0, args.dashboard_refresh_seconds),
     )
+    run_elapsed = (datetime.now() - run_start_time).total_seconds()
+    print(f"  ✓ 回放完成 (耗时 {run_elapsed:.1f}s)")
+    
+    print(f"\n[4/5] 导出结果数据...")
     export_live_result(
         result,
         args.output_dir,
         refresh_seconds=max(1.0, args.dashboard_refresh_seconds) if args.dashboard_refresh_seconds > 0 else 1.0,
     )
+    print(f"  ✓ 数据已导出到: {args.output_dir}")
+    print(f"\n[5/5] 生成总绩效报告...")
     if args.include_trade_process:
         performance_xlsx, trade_process_xlsx = _write_sim_batch_reports(args.output_dir, result)
-        print(f"准实时回放完成: {args.output_dir}")
-        print(f"总绩效报告 (Excel): {performance_xlsx}")
-        print(f"交易过程 (Excel): {trade_process_xlsx}")
+        print(f"  ✓ 总绩效报告 (Excel): {performance_xlsx}")
+        print(f"  ✓ 交易过程 (Excel): {trade_process_xlsx}")
+    else:
+        print(f"  ✓ 报告文件已生成在: {args.output_dir}")
+    
+    total_elapsed = (datetime.now() - start_time).total_seconds()
+    cycle_count = len(result.replay_result.cycle_df)
+    print(f"\n{'='*70}")
+    print(f"[完成] 模拟下单测试完成 | 周期数: {cycle_count}")
+    print(f"      总耗时: {int(total_elapsed//60)}分 {total_elapsed%60:.0f}秒")
+    print(f"{'='*70}")
+    print(f"\n关键指标汇总:")
     print(result.replay_result.metrics_df.to_string(index=False))
+    print()
     return 0
 
 

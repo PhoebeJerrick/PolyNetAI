@@ -60,6 +60,37 @@ class TradeEventRecorder:
         self.close()
 
 
+class CycleTradeEventRecorder:
+    def __init__(self, output_dir: str | Path) -> None:
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._cycle_recorders: dict[str, TradeEventRecorder] = {}
+        self._finalized = False
+
+    def _cycle_path(self, cycle_id: str) -> Path:
+        return self.output_dir / cycle_id / "ws_trade_events.ndjson"
+
+    def record(self, event: TradeEvent) -> None:
+        recorder = self._cycle_recorders.get(event.cycle_id)
+        if recorder is None:
+            recorder = TradeEventRecorder(self._cycle_path(event.cycle_id))
+            self._cycle_recorders[event.cycle_id] = recorder
+        recorder.record(event)
+
+    def close(self) -> None:
+        if self._finalized:
+            return
+        for recorder in self._cycle_recorders.values():
+            recorder.close()
+        self._finalized = True
+
+    def __enter__(self) -> "CycleTradeEventRecorder":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+
 def load_recorded_trade_events(path: str | Path) -> list[TradeEvent]:
     records_path = Path(path)
     events: list[TradeEvent] = []

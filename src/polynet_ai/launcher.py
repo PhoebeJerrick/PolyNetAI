@@ -263,8 +263,8 @@ def build_launch_profiles(
         ),
         "market-paper": LaunchProfile(
             name="market-paper",
-            title="实盘行情验证",
-            description="连接 Polymarket 实时公开行情做 robot-mode paper 验证，不会真实发单。",
+            title="实盘行情验证（含自动对比）",
+            description="连接 Polymarket 实时公开行情做 robot-mode paper 验证，完成后自动生成对比报告。不会真实发单。",
             mode="market_validation",
             command=[
                 python_cmd,
@@ -279,12 +279,25 @@ def build_launch_profiles(
                 "configs/strategy.yaml",
                 "--output-dir",
                 dashboard_output,
+                "--record-events-dir",
+                "artifacts/live/record_job_market",
                 "--dashboard-refresh-seconds",
                 "1",
                 "--starting-cash",
                 "1000",
             ],
             fields=[
+                LaunchField(
+                    name="record_events_dir",
+                    label="实时事件落盘目录",
+                    kind="text",
+                    default="artifacts/live/record_job_market",
+                    description="可选：把实时行情流按周期目录落盘，结构兼容 record_job，便于离线回放对比。",
+                    cli_flag="--record-events-dir",
+                    required=False,
+                    example="artifacts/live/record_job_market",
+                    detail="目录下会生成 btc-updown-5m-*/ws_trade_events.ndjson，可直接和模拟下单测试的数据源做同结构对比。",
+                ),
                 LaunchField(
                     name="slug_prefix",
                     label="市场前缀",

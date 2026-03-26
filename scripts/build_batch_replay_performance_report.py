@@ -525,8 +525,12 @@ def _write_performance_report_xlsx(
     decision_df: pd.DataFrame,
     tail_per_cycle_df: pd.DataFrame | None = None,
     tail_overview_rows: list[tuple[str, object]] | None = None,
+    report_source: str = "",
 ) -> None:
-    overview_rows: list[tuple[str, object]] = [
+    overview_rows: list[tuple[str, object]] = []
+    if report_source:
+        overview_rows.append(("数据来源", report_source))
+    overview_rows += [
         ("回放目录", str(shown_dir.as_posix())),
         ("周期数", int(total_cycles)),
         ("总净利润", float(total_profit)),
@@ -609,6 +613,9 @@ def build_performance_report_zh(
     output_path: Path,
     *,
     display_batch_dir: Path | None = None,
+    cycle_range: str = "",
+    cycle_count: int = 0,
+    report_source: str = "",
 ) -> Path:
     direction_df = _summarize_direction_distribution(decision_df)
     winner_df = _value_counts_frame(cycle_df.get("winner", pd.Series(dtype=object)), "winner")
@@ -638,7 +645,11 @@ def build_performance_report_zh(
             first_start_cash = implied_start_cash.dropna().iloc[0] if implied_start_cash.notna().any() else 0.0
             enriched_summary["estimated_cash_from_cum"] = first_start_cash + enriched_summary["cumulative_profit"]
 
-    report_xlsx = output_path / f"batch_replay_performance_report_zh_{_today_suffix()}.xlsx"
+    suffix = _today_suffix()
+    if cycle_count > 0:
+        report_xlsx = output_path / f"batch_replay_performance_report_zh_{cycle_count}_{suffix}.xlsx"
+    else:
+        report_xlsx = output_path / f"batch_replay_performance_report_zh_{suffix}.xlsx"
     shown_dir = display_batch_dir or resolved_batch_dir
 
     tail_per_cycle, tail_overview = summarize_tail_window_executions(
@@ -665,8 +676,95 @@ def build_performance_report_zh(
         decision_df=decision_df,
         tail_per_cycle_df=tail_per_cycle,
         tail_overview_rows=tail_overview,
+        report_source=report_source,
     )
 
+    return report_xlsx
+
+
+def _find_latest_report(report_dir: Path) -> Path | None:
+    """在目录中查找最新的绩效报告 xlsx 文件。"""
+    candidates = sorted(
+        report_dir.glob("batch_replay_performance_report_zh_*.xlsx"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def build_comparison_report_zh(
+    sim_report_path: Path,
+    live_report_path: Path,
+    output_path: Path,
+) -> Path:
+    """生成「模拟下单测试 vs 实盘行情验证」对比报告。
+
+    从两份绩效报告中提取概览数据和分周期数据，生成一份对比 Excel。
+    """
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # --- 读取两份报告的概览 sheet ---
+    sim_overview = pd.read_excel(sim_report_path, sheet_name="概览")
+    live_overview = pd.read_excel(live_report_path, sheet_name="概览")
+
+    # 构建并排对比行
+    comparison_rows: list[dict[str, object]] = []
+    sim_map: dict[str, object] = dict(zip(sim_overview["项目"], sim_overview["值"]))
+    live_map: dict[str, object] = dict(zip(live_overview["项目"], live_overview["值"]))
+    all_keys = list(dict.fromkeys(list(sim_map.keys()) + list(live_map.keys())))
+    # 过滤掉纯路径 / 来源标识行
+    skip_keys = {"回放目录", "数据来源"}
+    for key in all_keys:
+        if key in skip_keys:
+            continue
+        sim_val = sim_map.get(key, "—")
+        live_val = live_map.get(key, "—")
+        diff = ""
+        try:
+            sv = float(sim_val)  # type: ignore[arg-type]
+            lv = float(live_val)  # type: ignore[arg-type]
+            diff_val = lv - sv
+            diff = f"{diff_val:+.6f}"
+        except (ValueError, TypeError):
+            pass
+        comparison_rows.append({
+            "指标": key,
+            "模拟下单": sim_val,
+            "实盘验证": live_val,
+            "差异 (实盘-模拟)": diff,
+        })
+
+    comparison_df = pd.DataFrame(comparison_rows)
+
+    # --- 元信息 ---
+    meta_rows = [
+        ("生成时间", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        ("模拟报告", str(sim_report_path.name)),
+        ("实盘报告", str(live_report_path.name)),
+    ]
+    meta_df = pd.DataFrame(meta_rows, columns=["项目", "值"])
+
+    # --- 读取分周期数据 ---
+    try:
+        sim_cycles = pd.read_excel(sim_report_path, sheet_name="分周期累计盈亏")
+    except Exception:
+        sim_cycles = pd.DataFrame()
+    try:
+        live_cycles = pd.read_excel(live_report_path, sheet_name="分周期累计盈亏")
+    except Exception:
+        live_cycles = pd.DataFrame()
+
+    # --- 写出 ---
+    report_name = f"sim_vs_live_comparison_zh_{_today_suffix()}.xlsx"
+    report_xlsx = output_path / report_name
+    with pd.ExcelWriter(report_xlsx, engine="openpyxl") as writer:
+        meta_df.to_excel(writer, sheet_name="报告信息", index=False)
+        comparison_df.to_excel(writer, sheet_name="对比概览", index=False)
+        if not sim_cycles.empty:
+            sim_cycles.to_excel(writer, sheet_name="模拟下单_分周期", index=False)
+        if not live_cycles.empty:
+            live_cycles.to_excel(writer, sheet_name="实盘验证_分周期", index=False)
+    _finalize_xlsx_workbook(report_xlsx)
     return report_xlsx
 
 
