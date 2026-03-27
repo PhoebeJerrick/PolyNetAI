@@ -6,6 +6,7 @@ import pandas as pd
 
 from scripts.build_batch_replay_performance_report import (
     TRACKER_STYLE_SHEET,
+    build_performance_report_zh,
     build_report,
     _compute_max_drawdown,
 )
@@ -143,3 +144,52 @@ def test_build_report_writes_xlsx_and_trade_process(tmp_path) -> None:
     assert "决策流水" in txl.sheet_names
     assert not (batch_dir / "batch_replay_direction_distribution.csv").exists()
     assert not (batch_dir / "batch_replay_summary_enriched.csv").exists()
+
+
+def test_build_performance_report_fixed_mode_implied_start_cash(tmp_path) -> None:
+    output_dir = tmp_path / "report_out"
+    output_dir.mkdir(parents=True)
+
+    summary_df = pd.DataFrame(
+        [
+            {"cycle_slug": "c1", "total_net_profit": -28.232, "total_fees": 0.0, "executed_trades": 2, "account_cash": 71.768},
+            {"cycle_slug": "c2", "total_net_profit": 9.572, "total_fees": 0.0, "executed_trades": 2, "account_cash": 81.34},
+            {"cycle_slug": "c3", "total_net_profit": 10.428, "total_fees": 0.0, "executed_trades": 2, "account_cash": 91.768},
+        ]
+    )
+    cycle_df = pd.DataFrame(
+        [
+            {"market_id": "btc-up-or-down-5m", "cycle_id": "c1", "winner": "down", "net_direction": "down"},
+            {"market_id": "btc-up-or-down-5m", "cycle_id": "c2", "winner": "up", "net_direction": "up"},
+            {"market_id": "btc-up-or-down-5m", "cycle_id": "c3", "winner": "up", "net_direction": "up"},
+        ]
+    )
+    decision_df = pd.DataFrame(
+        [
+            {"market_id": "btc-up-or-down-5m", "cycle_id": "c1", "cycle_slug": "c1", "timestamp": datetime(2026, 3, 27, 10, 0, 0), "selected_action": "buy", "selected_outcome": "up", "selected_shares": 1.0, "executed": True, "fill_price": 0.5, "fill_fee": 0.0},
+            {"market_id": "btc-up-or-down-5m", "cycle_id": "c2", "cycle_slug": "c2", "timestamp": datetime(2026, 3, 27, 10, 5, 0), "selected_action": "buy", "selected_outcome": "up", "selected_shares": 1.0, "executed": True, "fill_price": 0.5, "fill_fee": 0.0},
+            {"market_id": "btc-up-or-down-5m", "cycle_id": "c3", "cycle_slug": "c3", "timestamp": datetime(2026, 3, 27, 10, 10, 0), "selected_action": "buy", "selected_outcome": "up", "selected_shares": 1.0, "executed": True, "fill_price": 0.5, "fill_fee": 0.0},
+        ]
+    )
+
+    report_path = build_performance_report_zh(
+        resolved_batch_dir=output_dir,
+        summary_df=summary_df,
+        cycle_df=cycle_df,
+        decision_df=decision_df,
+        output_path=output_dir,
+        display_batch_dir=output_dir,
+        capital_reset_mode="fixed",
+        starting_cash=100.0,
+    )
+
+    xl = pd.ExcelFile(report_path)
+    enriched = None
+    for sheet_name in xl.sheet_names:
+        candidate = pd.read_excel(report_path, sheet_name=sheet_name)
+        if {"implied_start_cash", "estimated_cash_from_cum"}.issubset(set(candidate.columns)):
+            enriched = candidate
+            break
+    assert enriched is not None
+    implied = pd.to_numeric(enriched["implied_start_cash"], errors="coerce").dropna().tolist()
+    assert implied == [100.0, 100.0, 100.0]

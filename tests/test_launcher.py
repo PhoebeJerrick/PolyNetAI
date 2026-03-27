@@ -137,3 +137,51 @@ def test_resolve_profile_values_coerces_checkbox_strings(tmp_path: Path) -> None
 
     assert resolved_false["include_trade_process"] is False
     assert resolved_true["include_trade_process"] is True
+
+
+def test_capital_reset_mode_field_exists_with_default_fixed(tmp_path: Path) -> None:
+    profiles = build_launch_profiles(
+        root=Path("D:/PassiveIncome/Quantification/Projects/PolyMkt/PolyNetAI"),
+        dashboard_dir=tmp_path,
+        python_executable="python",
+    )
+
+    # Check field exists in both profiles
+    sim_profile = profiles["sim-paper"]
+    market_profile = profiles["market-paper"]
+    
+    sim_field = next((f for f in sim_profile.fields if f.name == "capital_reset_mode"), None)
+    market_field = next((f for f in market_profile.fields if f.name == "capital_reset_mode"), None)
+    
+    assert sim_field is not None, "capital_reset_mode field missing from sim-paper profile"
+    assert market_field is not None, "capital_reset_mode field missing from market-paper profile"
+    
+    # Check defaults and options
+    assert sim_field.default == "fixed"
+    assert market_field.default == "fixed"
+    assert "fixed" in sim_field.options
+    assert "cumulative" in sim_field.options
+
+
+def test_capital_reset_mode_override_in_commands(tmp_path: Path) -> None:
+    profiles = build_launch_profiles(
+        root=Path("D:/PassiveIncome/Quantification/Projects/PolyMkt/PolyNetAI"),
+        dashboard_dir=tmp_path,
+        python_executable="python",
+    )
+    
+    # Test sim-paper with cumulative mode
+    updated_sim = apply_profile_overrides(
+        profiles["sim-paper"],
+        {"capital_reset_mode": "cumulative"},
+    )
+    assert "--capital-reset-mode" in updated_sim.command
+    assert "cumulative" in updated_sim.command
+    
+    # Test market-paper with fixed mode (default)
+    updated_market = apply_profile_overrides(
+        profiles["market-paper"],
+        {"slug_prefix": "btc-updown-5m-"},
+    )
+    assert "--capital-reset-mode" in updated_market.command
+    assert "fixed" in updated_market.command

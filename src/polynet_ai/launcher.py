@@ -22,6 +22,7 @@ class LaunchField:
     required: bool = False
     example: str = ""
     detail: str = ""
+    show_when: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -38,6 +39,7 @@ class LaunchField:
             "required": self.required,
             "example": self.example,
             "detail": self.detail,
+            "show_when": dict(self.show_when),
         }
 
 
@@ -153,6 +155,8 @@ def apply_profile_overrides(profile: LaunchProfile, overrides: dict[str, Any] | 
         if launch_field.kind == "checkbox":
             updated_command = _set_checkbox_flag(updated_command, launch_field.cli_flag, bool(value))
             continue
+        if value is None:
+            continue
         updated_command = _set_option(updated_command, launch_field.cli_flag, value)
     return LaunchProfile(
         name=profile.name,
@@ -199,6 +203,10 @@ def build_launch_profiles(
                 "1",
                 "--starting-cash",
                 "100",
+                "--capital-reset-mode",
+                "fixed",
+                "--per-cycle-cash",
+                "100",
             ],
             fields=[
                 LaunchField(
@@ -228,13 +236,38 @@ def build_launch_profiles(
                     label="起始本金",
                     kind="number",
                     default=100,
-                    description="模拟账户初始资金，影响可下单规模和资金曲线。",
+                    description="资金曲线起始本金。",
                     cli_flag="--starting-cash",
                     min_value=10,
                     max_value=1000000,
                     step=10,
-                    example="100 表示用 100 USDC 等名义资金开跑",
-                    detail="仅影响 paper 账户规模与曲线刻度；与实盘资金无关。过小可能导致频繁因资金不足拒单。",
+                    example="1000 表示资金曲线从 1000 开始",
+                    detail="fixed 模式下，资金曲线从该值起步；每周期实际投注额由“每周期固定投注资金”决定。cumulative 模式下，账户从该值起步并跨周期滚动。",
+                ),
+                LaunchField(
+                    name="capital_reset_mode",
+                    label="周期资金处理模式",
+                    kind="select",
+                    default="fixed",
+                    description="多周期测试中，是否每个周期重置资金为固定投注额。",
+                    cli_flag="--capital-reset-mode",
+                    options=["fixed", "cumulative"],
+                    example="fixed — 每周期投注金额固定，盈亏累计到曲线",
+                    detail="fixed: 每周期投注本金固定，周期盈亏累计到资金曲线；cumulative: 账户资金跨周期连续滚动。",
+                ),
+                LaunchField(
+                    name="per_cycle_cash",
+                    label="每周期固定投注资金",
+                    kind="number",
+                    default=100,
+                    description="fixed 模式下每周期分配给策略的实际投注本金。",
+                    cli_flag="--per-cycle-cash",
+                    min_value=1,
+                    max_value=1000000,
+                    step=10,
+                    example="100 — 起始本金=1000时，每周期投注100，曲线仍从1000起算",
+                    detail="不填则默认等于起始本金。",
+                    show_when={"capital_reset_mode": "fixed"},
                 ),
                 LaunchField(
                     name="max_cycles",
@@ -285,6 +318,10 @@ def build_launch_profiles(
                 "1",
                 "--starting-cash",
                 "100",
+                "--capital-reset-mode",
+                "fixed",
+                "--per-cycle-cash",
+                "100",
             ],
             fields=[
                 LaunchField(
@@ -333,7 +370,32 @@ def build_launch_profiles(
                     max_value=1000000,
                     step=10,
                     example="100 — 与模拟下单、资金曲线展示一致",
-                    detail="robot-mode 下仍为模拟资金；与 Polymarket 账户余额无自动关联。",
+                    detail="fixed 模式下，资金曲线从该值起步；每周期实际投注额由“每周期固定投注资金”决定。cumulative 模式下，账户从该值起步并跨周期滚动。",
+                ),
+                LaunchField(
+                    name="capital_reset_mode",
+                    label="周期资金处理模式",
+                    kind="select",
+                    default="fixed",
+                    description="多周期行情验证中，是否每个周期重置资金。",
+                    cli_flag="--capital-reset-mode",
+                    options=["fixed", "cumulative"],
+                    example="fixed — 每个周期用相同初始金额开始",
+                    detail="fixed: 每周期投注本金固定为起始值，但周期盈亏会累计到资金曲线；cumulative: 账户资金跨周期连续滚动。",
+                ),
+                LaunchField(
+                    name="per_cycle_cash",
+                    label="每周期固定投注资金",
+                    kind="number",
+                    default=100,
+                    description="fixed 模式下每周期分配给策略的实际投注本金。",
+                    cli_flag="--per-cycle-cash",
+                    min_value=1,
+                    max_value=1000000,
+                    step=10,
+                    example="100 — 起始本金=1000时，每周期投注100，曲线仍从1000起算",
+                    detail="不填则默认等于起始本金。",
+                    show_when={"capital_reset_mode": "fixed"},
                 ),
             ],
         ),

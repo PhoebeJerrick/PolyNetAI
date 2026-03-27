@@ -10,6 +10,7 @@ DEFAULT_SLUG_PREFIX="${RECORD_SLUG_PREFIX:-btc-updown-5m-}"
 DEFAULT_CONFIG="${RECORD_CONFIG:-configs/strategy.yaml}"
 DEFAULT_OVERRIDES="${RECORD_OVERRIDES:-artifacts/trial_022/overrides.json}"
 DEFAULT_STARTING_CASH="${RECORD_STARTING_CASH:-100}"
+DEFAULT_PER_CYCLE_CASH="${RECORD_PER_CYCLE_CASH:-}"
 DEFAULT_ENV_FILE="${RECORD_ENV_FILE:-../APIs/ApiConfig.env}"
 DEFAULT_ACCOUNT_INDEX="${RECORD_ACCOUNT_INDEX:-2}"
 DEFAULT_START_BUFFER_SECONDS="${RECORD_START_BUFFER_SECONDS:-2}"
@@ -39,11 +40,13 @@ print_help() {
     "  -u PREFIX      自定义 slug 前缀，默认 btc-updown-5m-" \
     "  -c FILE        自定义 config，默认 configs/strategy.yaml" \
     "  -k CASH        自定义 starting cash（用于模拟下单）" \
+    "  -K CASH        自定义每周期固定投注资金（仅 dm/dmb；透传 --per-cycle-cash）" \
     "" \
     "环境变量（可选）:" \
     "  RECORD_OPEN_DASHBOARD_EDGE=0   关闭 record.sh d 后自动用 Edge 打开网页" \
     "  RECORD_DASHBOARD_HOST=0.0.0.0  dashboard 监听地址（云服务器可设 0.0.0.0）" \
     "  RECORD_DASHBOARD_PORT=8765     dashboard 监听端口" \
+    "  RECORD_PER_CYCLE_CASH=100      dm/dmb 默认每周期固定投注资金" \
     "" \
     "Linux 云服务器推荐：" \
     "  RECORD_DASHBOARD_HOST=0.0.0.0 ./record.sh dmb10" \
@@ -62,6 +65,11 @@ CONFIG_PATH="$DEFAULT_CONFIG"
 OVERRIDES_PATH="$DEFAULT_OVERRIDES"
 STARTING_CASH="$DEFAULT_STARTING_CASH"
 STARTING_CASH_SET="false"
+PER_CYCLE_CASH="$DEFAULT_PER_CYCLE_CASH"
+PER_CYCLE_CASH_SET="false"
+if [[ -n "$DEFAULT_PER_CYCLE_CASH" ]]; then
+  PER_CYCLE_CASH_SET="true"
+fi
 PM_TAIL_LINES="20"
 
 if [[ "$COMMAND" =~ ^(rb|runb|run-bg)([0-9]+)$ ]]; then
@@ -113,6 +121,11 @@ while [[ $# -gt 0 ]]; do
     -k)
       STARTING_CASH="$2"
       STARTING_CASH_SET="true"
+      shift 2
+      ;;
+    -K|--per-cycle-cash)
+      PER_CYCLE_CASH="$2"
+      PER_CYCLE_CASH_SET="true"
       shift 2
       ;;
     -h|--help|h|help)
@@ -302,18 +315,25 @@ except Exception:
     if [[ "$STARTING_CASH_SET" != "true" ]]; then
       DM_STARTING_CASH="100"
     fi
+    DM_PER_CYCLE_CASH="$PER_CYCLE_CASH"
 
-    "$PYTHON_BIN" scripts/run_polymarket_live_paper.py \
-      --robot-mode \
-      --slug-prefix "$SLUG_PREFIX" \
-      --max-cycles "$CYCLES" \
-      --config "$CONFIG_PATH" \
-      --output-dir "$DASHBOARD_DIR" \
-      --record-events-dir "$OUTPUT_DIR/record_job_market" \
-      --dashboard-refresh-seconds 1 \
-      --starting-cash "$DM_STARTING_CASH" \
-      --env-file "$DEFAULT_ENV_FILE" \
+    DM_ARGS=(
+      --robot-mode
+      --slug-prefix "$SLUG_PREFIX"
+      --max-cycles "$CYCLES"
+      --config "$CONFIG_PATH"
+      --output-dir "$DASHBOARD_DIR"
+      --record-events-dir "$OUTPUT_DIR/record_job_market"
+      --dashboard-refresh-seconds 1
+      --starting-cash "$DM_STARTING_CASH"
+      --env-file "$DEFAULT_ENV_FILE"
       --account-index "$DEFAULT_ACCOUNT_INDEX"
+    )
+    if [[ "$PER_CYCLE_CASH_SET" == "true" && -n "$DM_PER_CYCLE_CASH" ]]; then
+      DM_ARGS+=(--per-cycle-cash "$DM_PER_CYCLE_CASH")
+    fi
+
+    "$PYTHON_BIN" scripts/run_polymarket_live_paper.py "${DM_ARGS[@]}"
     ;;
   dmb)
     DASHBOARD_DIR="$OUTPUT_DIR/polymarket_live_outputs"
@@ -340,6 +360,7 @@ except Exception:
     if [[ "$STARTING_CASH_SET" != "true" ]]; then
       DM_STARTING_CASH="100"
     fi
+    DM_PER_CYCLE_CASH="$PER_CYCLE_CASH"
 
     if [[ -f "$MARKET_PID_FILE" ]]; then
       OLD_MARKET_PID=$(cat "$MARKET_PID_FILE" 2>/dev/null | tr -d '[:space:]')
@@ -350,7 +371,7 @@ except Exception:
       rm -f "$MARKET_PID_FILE"
     fi
 
-    nohup bash -lc 'echo $$ > "$0"; exec "$1" scripts/run_polymarket_live_paper.py --robot-mode --slug-prefix "$2" --max-cycles "$3" --config "$4" --output-dir "$5" --record-events-dir "$6" --dashboard-refresh-seconds 1 --starting-cash "$7" --env-file "$8" --account-index "$9"' \
+    nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_polymarket_live_paper.py --robot-mode --slug-prefix "$2" --max-cycles "$3" --config "$4" --output-dir "$5" --record-events-dir "$6" --dashboard-refresh-seconds 1 --starting-cash "$7" --env-file "$8" --account-index "$9"); if [[ -n "${10}" ]]; then cmd+=(--per-cycle-cash "${10}"); fi; exec "${cmd[@]}"' \
       "$MARKET_PID_FILE" \
       "$PYTHON_BIN" \
       "$SLUG_PREFIX" \
@@ -361,6 +382,7 @@ except Exception:
       "$DM_STARTING_CASH" \
       "$DEFAULT_ENV_FILE" \
       "$DEFAULT_ACCOUNT_INDEX" \
+      "$DM_PER_CYCLE_CASH" \
       > "$MARKET_LOG" 2>&1 &
     disown 2>/dev/null || true
 

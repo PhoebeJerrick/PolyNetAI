@@ -117,7 +117,7 @@ class LivePaperRunner:
 
             snapshot_row = asdict(step.snapshot)
             snapshot_row["event_index"] = index
-            snapshot_row["account_cash"] = self.engine.account.cash
+            snapshot_row["account_cash"] = self.engine.display_cash(step.snapshot.cycle_net_profit)
             snapshot_row["available_cash"] = self.engine.account.available_cash
             snapshot_rows.append(snapshot_row)
 

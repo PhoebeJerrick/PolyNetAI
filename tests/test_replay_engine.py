@@ -170,3 +170,45 @@ def test_replay_engine_confirms_submitted_order_without_blocking_loop() -> None:
     assert third.decision_row["executed"] is False
     assert engine.state_engine.state is not None
     assert engine.state_engine.state.strategy_trades >= 1
+
+
+def test_fixed_mode_keeps_curve_but_resets_betting_cash_per_cycle() -> None:
+    engine = ReplayEngine(build_config(), starting_cash=100.0, capital_reset_mode="fixed")
+    t0 = datetime(2026, 3, 20, 12, 0, 0)
+
+    # cycle-a: 买入 up@0.4，winner=up，预期正收益。
+    engine.state_engine.apply_market_trade(
+        TradeEvent("BTC", "cycle-a", t0, price=0.8, shares=10, outcome="up", action="buy")
+    )
+    fill_a = FillEvent("BTC", "cycle-a", t0 + timedelta(seconds=5), price=0.4, shares=10, outcome="up", action="buy")
+    engine.state_engine.apply_strategy_fill(fill_a)
+    engine.account.apply_fill(fill_a)
+    row_a = engine.finalize_pending_cycle()
+    assert row_a is not None
+    pnl_a = float(row_a["cycle_net_profit"])
+    assert round(float(row_a["account_cash"]), 3) == round(100.0 + pnl_a, 3)
+    # fixed 模式下，下一周期下注本金应回到 starting_cash。
+    assert round(engine.account.cash, 3) == 100.0
+
+    # cycle-b: 买入 up@0.4，winner=down，预期负收益；资金曲线应在上个周期基础上继续累计。
+    engine.state_engine.apply_market_trade(
+        TradeEvent("BTC", "cycle-b", t0 + timedelta(minutes=5), price=0.2, shares=10, outcome="up", action="buy")
+    )
+    fill_b = FillEvent(
+        "BTC",
+        "cycle-b",
+        t0 + timedelta(minutes=5, seconds=5),
+        price=0.4,
+        shares=10,
+        outcome="up",
+        action="buy",
+    )
+    engine.state_engine.apply_strategy_fill(fill_b)
+    engine.account.apply_fill(fill_b)
+    row_b = engine.finalize_pending_cycle()
+    assert row_b is not None
+    pnl_b = float(row_b["cycle_net_profit"])
+    expected_curve_cash = 100.0 + pnl_a + pnl_b
+    assert round(float(row_b["account_cash"]), 3) == round(expected_curve_cash, 3)
+    # 每周期投注本金仍保持固定值。
+    assert round(engine.account.cash, 3) == 100.0

@@ -1410,6 +1410,19 @@ def build_dashboard_html(
       }}
       return fallbackValue;
     }}
+    function launcherFieldVisible(profile, field) {{
+      const conditions = field && field.show_when && typeof field.show_when === "object" ? field.show_when : null;
+      if (!conditions) return true;
+      const profileName = profile && profile.name ? String(profile.name) : "";
+      const entries = Object.entries(conditions);
+      for (const [depField, expected] of entries) {{
+        const depValue = getLauncherDraftValue(profileName, depField, null);
+        if (String(depValue) !== String(expected)) {{
+          return false;
+        }}
+      }}
+      return true;
+    }}
     function renderLauncherField(profile, field) {{
       const profileName = configEscapeHtml(profile.name || "");
       const fieldName = configEscapeHtml(field.name || "");
@@ -1492,7 +1505,8 @@ def build_dashboard_html(
       const running = Boolean(status && status.running);
       container.innerHTML = (profiles || []).map((profile) => {{
         const disabled = running ? "disabled" : "";
-        const fieldHtml = (profile.fields || []).map((field) => renderLauncherField(profile, field)).join("");
+        const visibleFields = (profile.fields || []).filter((field) => launcherFieldVisible(profile, field));
+        const fieldHtml = visibleFields.map((field) => renderLauncherField(profile, field)).join("");
         return `<div class="launcher-card">
           <div class="launcher-title">${{configEscapeHtml(profile.title || profile.name || "")}}</div>
           <div class="launcher-desc">${{configEscapeHtml(profile.description || "")}}</div>
@@ -1574,6 +1588,9 @@ def build_dashboard_html(
           // 处理 checkbox 的 .checked，其他类型用 .value
           const value = target.type === "checkbox" ? target.checked : target.value;
           updateLauncherDraft(profileName, fieldName, value);
+          if (fieldName === "capital_reset_mode") {{
+            renderLauncherProfiles(launcherState.profiles, {{ running: launcherState.runningSnapshot }});
+          }}
         }});
         // 为 checkbox 添加 change 事件监听，确保 checkbox 状态改变时也能被捕获
         profilesNode.addEventListener("change", function(event) {{

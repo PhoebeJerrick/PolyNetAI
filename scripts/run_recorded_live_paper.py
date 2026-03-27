@@ -47,6 +47,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default="configs/strategy.yaml")
     parser.add_argument("--output-dir", default="artifacts/live/record_job/batch_replay_outputs")
     parser.add_argument("--starting-cash", type=float, default=100.0)
+    parser.add_argument("--per-cycle-cash", type=float, default=None,
+                        help="固定模式下每周期实际投注资金；不设置则与 --starting-cash 相同")
+    parser.add_argument(
+        "--capital-reset-mode",
+        type=str,
+        choices=["fixed", "cumulative"],
+        default="fixed",
+        help="周期资金处理模式：fixed=每周期固定本金并累计盈亏曲线，cumulative=跨周期累积资金",
+    )
     parser.add_argument("--pace-factor", type=float, default=20.0)
     parser.add_argument("--max-sleep-seconds", type=float, default=0.25)
     parser.add_argument("--status-every", type=int, default=100)
@@ -156,7 +165,13 @@ def _build_summary_df(cycle_df: pd.DataFrame, decision_df: pd.DataFrame) -> pd.D
     return pd.DataFrame(rows)
 
 
-def _write_sim_batch_reports(output_dir: str | Path, result: LiveRunnerResult) -> tuple[Path, Path]:
+def _write_sim_batch_reports(
+    output_dir: str | Path,
+    result: LiveRunnerResult,
+    *,
+    capital_reset_mode: str,
+    starting_cash: float,
+) -> tuple[Path, Path]:
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -183,6 +198,8 @@ def _write_sim_batch_reports(output_dir: str | Path, result: LiveRunnerResult) -
         display_batch_dir=out_dir,
         report_source="模拟下单测试",
         report_name_prefix="simulation",
+        capital_reset_mode=capital_reset_mode,
+        starting_cash=starting_cash,
     )
     _cleanup_batch_replay_markdown(out_dir)
     return perf_xlsx, trade_xlsx
@@ -234,9 +251,17 @@ def main() -> int:
         print(f"  ✓ 事件限制: 使用前 {len(events)} 条")
 
     print(f"\n[2/5] 初始化回放引擎...")
-    engine = ReplayEngine.from_yaml(args.config, starting_cash=args.starting_cash)
+    engine = ReplayEngine.from_yaml(
+        args.config,
+        starting_cash=args.starting_cash,
+        capital_reset_mode=args.capital_reset_mode,
+        per_cycle_cash=args.per_cycle_cash,
+    )
     runner = LivePaperRunner(engine)
-    print(f"  ✓ 引擎已初始化，初始资金: {args.starting_cash} USDT")
+    print(
+        f"  ✓ 引擎已初始化，初始资金: {args.starting_cash} USDT | "
+        f"资金模式: {args.capital_reset_mode}"
+    )
     
     event_stream = iter_events_with_pacing(
         events,
@@ -277,7 +302,12 @@ def main() -> int:
     print(f"  ✓ 数据已导出到: {args.output_dir}")
     print(f"\n[5/5] 生成总绩效报告...")
     if args.include_trade_process:
-        performance_xlsx, trade_process_xlsx = _write_sim_batch_reports(args.output_dir, result)
+        performance_xlsx, trade_process_xlsx = _write_sim_batch_reports(
+            args.output_dir,
+            result,
+            capital_reset_mode=args.capital_reset_mode,
+            starting_cash=args.starting_cash,
+        )
         print(f"  ✓ 总绩效报告 (Excel): {performance_xlsx}")
         print(f"  ✓ 交易过程 (Excel): {trade_process_xlsx}")
     else:

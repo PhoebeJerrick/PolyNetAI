@@ -44,7 +44,9 @@ class ReplayEngine:
         self,
         config: StrategyConfig,
         starting_cash: float = 100.0,
+        capital_reset_mode: str = "cumulative",
         broker: object | None = None,
+        per_cycle_cash: float | None = None,
     ) -> None:
         self.config = config
         # 优化 #1：缓存配置参数，避免每事件都做 dict lookup
@@ -52,7 +54,16 @@ class ReplayEngine:
         self.last_minute_seconds = int(config.get("cycle.last_minute_seconds", 60))
         self.state_engine = StateEngine()
         self.router = StrategyRouter(config)
-        self.account = Account(starting_cash=starting_cash)
+        self.capital_reset_mode = str(capital_reset_mode).strip().lower() or "cumulative"
+        if self.capital_reset_mode not in {"fixed", "cumulative"}:
+            raise ValueError("capital_reset_mode must be 'fixed' or 'cumulative'")
+        # fixed 模式下，_equity_baseline 是资金曲线的起始锚点（总权益基准）；
+        # _per_cycle_cash 是每周期分配给策略的实际投注资金（账户重置目标值）。
+        # cumulative 模式下两者设为相同值，account.cash 自然累积。
+        self._equity_baseline = float(starting_cash)
+        self._per_cycle_cash = float(per_cycle_cash) if per_cycle_cash is not None else float(starting_cash)
+        self.account = Account(starting_cash=self._per_cycle_cash)
+        self._closed_cycle_net_profit = 0.0
         self.broker = broker or PaperBroker(
             fee_rate=float(config.get("execution.fee_rate", 0.002)),
             slippage_bps=float(config.get("execution.slippage_bps", 10)),
@@ -63,14 +74,31 @@ class ReplayEngine:
 
     def reset(self) -> None:
         self.state_engine = StateEngine()
-        self.account = Account(starting_cash=self.account.starting_cash)
+        self.account = Account(starting_cash=self._per_cycle_cash)
+        self._closed_cycle_net_profit = 0.0
         self._last_strategy_fill_at = None
         self._last_strategy_fill_price_up = None
         self._last_strategy_fill_price_down = None
 
     @classmethod
-    def from_yaml(cls, path: str | Path, starting_cash: float = 100.0) -> "ReplayEngine":
-        return cls(load_strategy_config(path), starting_cash=starting_cash)
+    def from_yaml(
+        cls,
+        path: str | Path,
+        starting_cash: float = 100.0,
+        capital_reset_mode: str = "cumulative",
+        per_cycle_cash: float | None = None,
+    ) -> "ReplayEngine":
+        return cls(
+            load_strategy_config(path),
+            starting_cash=starting_cash,
+            capital_reset_mode=capital_reset_mode,
+            per_cycle_cash=per_cycle_cash,
+        )
+
+    def display_cash(self, current_cycle_net_profit: float = 0.0) -> float:
+        if self.capital_reset_mode == "fixed":
+            return self._equity_baseline + self._closed_cycle_net_profit + float(current_cycle_net_profit)
+        return self.account.cash
 
     def run(self, events: list[TradeEvent]) -> ReplayResult:
         cycle_rows: list[dict[str, object]] = []
@@ -127,7 +155,7 @@ class ReplayEngine:
             "fill_price": 0.0,
             "fill_fee": 0.0,
             "cycle_net_profit": features.cycle_net_profit,
-            "account_cash": self.account.cash,
+            "account_cash": self.display_cash(features.cycle_net_profit),
             "available_cash": self.account.available_cash,
         }
         if decision.selected is not None:
@@ -169,7 +197,7 @@ class ReplayEngine:
                         row["confirmed"] = True
                         row["fill_price"] = execution.fill.price
                         row["fill_fee"] = execution.fill.fee
-                        row["account_cash"] = self.account.cash
+                        row["account_cash"] = self.display_cash(features.cycle_net_profit)
                         row["available_cash"] = self.account.available_cash
                     elif execution.status != "filled":
                         self._sync_account_reservations()
@@ -268,6 +296,9 @@ class ReplayEngine:
         elif summary.winner == "down":
             settlement_cash = state.down_position.held
         self.account.cash += settlement_cash
+        if self.capital_reset_mode == "fixed":
+            self._closed_cycle_net_profit += float(summary.cycle_net_profit)
+        cycle_account_cash = self.display_cash()
         row = {
             "market_id": state.market_id,
             "cycle_id": state.cycle_id,
@@ -291,9 +322,15 @@ class ReplayEngine:
             "market_trades": state.market_trades,
             "strategy_trades": state.strategy_trades,
             "max_abs_net_exposure": state.max_abs_net_exposure,
-            "account_cash": self.account.cash,
+            "account_cash": cycle_account_cash,
         }
         self.state_engine.state = None
         self.state_engine.market_tape.clear()
         self.state_engine.strategy_fills.clear()
+        if self.capital_reset_mode == "fixed":
+            self.account.cash = self._per_cycle_cash
+            self.account.reserved_cash = 0.0
+            self._last_strategy_fill_at = None
+            self._last_strategy_fill_price_up = None
+            self._last_strategy_fill_price_down = None
         return row

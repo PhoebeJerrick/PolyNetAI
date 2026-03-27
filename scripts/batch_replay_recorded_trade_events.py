@@ -51,6 +51,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default="configs/strategy.yaml")
     parser.add_argument("--overrides", default=None, help="可选 JSON 覆盖参数，例如 trial_022 的 overrides.json")
     parser.add_argument("--starting-cash", type=float, default=100.0)
+    parser.add_argument("--per-cycle-cash", type=float, default=None,
+                        help="固定模式下每周期实际投注资金；不设置则与 --starting-cash 相同")
+    parser.add_argument(
+        "--capital-reset-mode",
+        type=str,
+        choices=["fixed", "cumulative"],
+        default="fixed",
+        help="周期资金处理模式：fixed=每周期重置，cumulative=跨周期累积",
+    )
     parser.add_argument("--output-dir", default=None, help="默认输出到 <input-dir>/batch_replay_outputs")
     parser.add_argument(
         "--include-trade-process",
@@ -89,6 +98,8 @@ def run_batch_replay(
     overrides_path: str | Path | None = None,
     output_dir: str | Path | None = None,
     starting_cash: float = 100.0,
+    capital_reset_mode: str = "fixed",
+    per_cycle_cash: float | None = None,
     include_trade_process: bool = False,
     cycle_range: str = "",
     cycle_count: int = 0,
@@ -115,14 +126,20 @@ def run_batch_replay(
     cycle_parts: list[pd.DataFrame] = []
     decision_parts: list[pd.DataFrame] = []
 
-    # 使用单一引擎跨周期连续运行，与实盘验证保持一致：
-    # 账户资金累积、下单时间门控等状态在周期间持续。
-    engine = ReplayEngine(config, starting_cash=starting_cash)
+    # 引擎内部根据 capital_reset_mode 处理周期资金：
+    # fixed: 每周期固定投注本金，但保留累计盈亏曲线；cumulative: 账户资金跨周期连续累积。
+    engine = ReplayEngine(
+        config,
+        starting_cash=starting_cash,
+        capital_reset_mode=capital_reset_mode,
+        per_cycle_cash=per_cycle_cash,
+    )
     all_finalized_cycle_rows: list[dict[str, object]] = []
     per_cycle_meta: dict[str, dict] = {}  # cycle_slug -> {event_count, decision_rows}
 
     for idx, event_file in enumerate(event_files, 1):
         cycle_slug = event_file.parent.name
+
         events = load_recorded_trade_events(event_file)
         if not events:
             print(f"[skip] {cycle_slug}: 事件文件为空")
@@ -214,6 +231,8 @@ def run_batch_replay(
         cycle_count=cycle_count,
         report_source=report_source,
         report_name_prefix=report_name_prefix,
+        capital_reset_mode=capital_reset_mode,
+        starting_cash=starting_cash,
     )
     _cleanup_batch_replay_markdown(output_resolved)
 
@@ -247,6 +266,8 @@ def main() -> int:
         overrides_path=args.overrides,
         output_dir=args.output_dir,
         starting_cash=args.starting_cash,
+        capital_reset_mode=args.capital_reset_mode,
+        per_cycle_cash=args.per_cycle_cash,
         include_trade_process=args.include_trade_process,
     )
     return 0

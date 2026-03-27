@@ -617,6 +617,8 @@ def build_performance_report_zh(
     cycle_count: int = 0,
     report_source: str = "",
     report_name_prefix: str = "",
+    capital_reset_mode: str = "cumulative",
+    starting_cash: float | None = None,
 ) -> Path:
     direction_df = _summarize_direction_distribution(decision_df)
     winner_df = _value_counts_frame(cycle_df.get("winner", pd.Series(dtype=object)), "winner")
@@ -641,7 +643,11 @@ def build_performance_report_zh(
         if {"account_cash", "total_net_profit"}.issubset(enriched_summary.columns):
             account_cash = pd.to_numeric(enriched_summary["account_cash"], errors="coerce")
             total_net_profit_col = pd.to_numeric(enriched_summary["total_net_profit"], errors="coerce").fillna(0.0)
-            implied_start_cash = account_cash - total_net_profit_col
+            mode = str(capital_reset_mode or "").strip().lower()
+            if mode == "fixed" and starting_cash is not None:
+                implied_start_cash = pd.Series(float(starting_cash), index=enriched_summary.index, dtype=float)
+            else:
+                implied_start_cash = account_cash - total_net_profit_col
             enriched_summary["implied_start_cash"] = implied_start_cash
             first_start_cash = implied_start_cash.dropna().iloc[0] if implied_start_cash.notna().any() else 0.0
             enriched_summary["estimated_cash_from_cum"] = first_start_cash + enriched_summary["cumulative_profit"]

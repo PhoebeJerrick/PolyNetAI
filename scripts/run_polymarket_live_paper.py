@@ -53,6 +53,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default="configs/strategy.yaml")
     parser.add_argument("--output-dir", default="artifacts/live/polymarket_live_outputs")
     parser.add_argument("--starting-cash", type=float, default=100.0)
+    parser.add_argument("--per-cycle-cash", type=float, default=None,
+                        help="固定模式下每周期实际投注资金；不设置则与 --starting-cash 相同")
+    parser.add_argument(
+        "--capital-reset-mode",
+        type=str,
+        choices=["fixed", "cumulative"],
+        default="fixed",
+        help="周期资金处理模式：fixed=每周期重置，cumulative=跨周期累积",
+    )
     parser.add_argument("--status-every", type=int, default=25)
     parser.add_argument("--max-cycles", type=int, default=10)
     parser.add_argument("--slug-prefix", default=None, help="例如 btc-updown-5m-")
@@ -117,13 +126,7 @@ def _build_summary_from_live_result(
     replay_result,
     new_cycle_slugs: list[str],
 ):
-    """从 LivePaperRunner 的流式处理结果中构建与批量回放兼容的 summary_df / cycle_df / decision_df。
-
-    与批量回放的区别:
-    - 流式处理使用单一引擎实例，账户资金在周期间连续累积
-    - 批量回放每个周期独立创建引擎，资金每次重置
-    对比这两者可暴露状态累积带来的差异（如跨周期下单时间门控、资金差异等）。
-    """
+    """从 LivePaperRunner 的流式处理结果中构建与批量回放兼容的 summary_df / cycle_df / decision_df。"""
     import pandas as pd
 
     cycle_df = replay_result.cycle_df.copy()
@@ -199,11 +202,19 @@ def main() -> int:
 
     stage_2_start = datetime.now()
     print(f"\n[2/7] 初始化回放引擎...")
-    engine = ReplayEngine.from_yaml(args.config, starting_cash=args.starting_cash)
+    engine = ReplayEngine.from_yaml(
+        args.config,
+        starting_cash=args.starting_cash,
+        capital_reset_mode=args.capital_reset_mode,
+        per_cycle_cash=args.per_cycle_cash,
+    )
     runner = LivePaperRunner(engine)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    print(f"  ✓ 引擎已初始化，初始资金: {args.starting_cash} USDT")
+    print(
+        f"  ✓ 引擎已初始化，初始资金: {args.starting_cash} USDT | "
+        f"资金模式: {args.capital_reset_mode}"
+    )
     print(f"  ✓ 输出目录: {args.output_dir}")
     stage_times["2_init_engine"] = (datetime.now() - stage_2_start).total_seconds()
     
@@ -354,6 +365,7 @@ def main() -> int:
                     config_path=args.config,
                     output_dir=cycle_record_dir / "batch_replay_outputs",
                     starting_cash=args.starting_cash,
+                    capital_reset_mode=args.capital_reset_mode,
                     include_trade_process=False,
                     cycle_count=len(new_cycle_files),
                     report_source="实盘行情验证",
@@ -403,6 +415,8 @@ def main() -> int:
                     cycle_count=n_live_cycles,
                     report_source="实盘行情（流式处理）",
                     report_name_prefix="simulation",
+                    capital_reset_mode=args.capital_reset_mode,
+                    starting_cash=args.starting_cash,
                 )
                 if sim_report_path and sim_report_path.exists():
                     print(f"  ✓ 流式处理绩效报告: {sim_report_path.name}")
