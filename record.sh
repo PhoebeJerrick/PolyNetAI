@@ -627,7 +627,7 @@ except Exception:
           > "$JOB_LOG" 2>&1 &
       else
         # 模拟下单测试：run_recorded_live_paper.py
-        nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_recorded_live_paper.py --input-dir "$2" --cycle-glob "$3" --max-cycles "$4" --config "$5" --output-dir "$6" --pace-factor 20 --status-every 100 --dashboard-refresh-seconds 1 --starting-cash "$7"); if [[ -n "${8}" ]]; then cmd+=(--per-cycle-cash "${8}"); fi; exec "${cmd[@]}"' \
+        nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_recorded_live_paper.py --input-dir "$2" --cycle-glob "$3" --max-cycles "$4" --config "$5" --output-dir "$6" --pace-factor 20 --status-every 100 --dashboard-refresh-seconds 1 --starting-cash "$7" --include-trade-process); if [[ -n "${8}" ]]; then cmd+=(--per-cycle-cash "${8}"); fi; exec "${cmd[@]}"' \
           "$JOB_PID_FILE" \
           "$PYTHON_BIN" \
           "$job_data_stream_dir" \
@@ -697,6 +697,11 @@ except Exception:
       echo "  启动:   $reg_time"
       echo "  日志:   $reg_log"
       echo "  数据流: $reg_data_stream_dir"
+      if [[ "$reg_job_type" == "live" ]]; then
+        echo "  报告目录: $reg_data_stream_dir/batch_replay_outputs"
+      else
+        echo "  报告目录: $reg_output_dir/batch_replay_outputs"
+      fi
       if [[ "${MS_TAIL_LINES}" -gt 0 ]] && [[ -f "$reg_log" ]]; then
         echo "  --- 最近 $MS_TAIL_LINES 行日志 ---"
         tail -n "$MS_TAIL_LINES" "$reg_log" 2>/dev/null | sed 's/^/  /'
