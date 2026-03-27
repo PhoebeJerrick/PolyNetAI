@@ -1371,7 +1371,8 @@ def build_dashboard_html(
       const raw = input ? input.value : "";
       const resolved = resolveConfigName(raw);
       if (!resolved) {{
-        setConfigStatus(`未匹配到配置文件：${{raw || "(空)"}}。可输入 strategy.yaml / sweep.yaml / optimize.yaml。`, "error");
+        const available = (configConsoleState.catalog || []).map((item) => item.displayName).join(" / ") || "(无可用配置)";
+        setConfigStatus(`未匹配到配置文件：${{raw || "(空)"}}。可选：${{available}}`, "error");
         return;
       }}
       await loadConfig(resolved);

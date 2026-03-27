@@ -52,6 +52,9 @@ class ReplayEngine:
         # 优化 #1：缓存配置参数，避免每事件都做 dict lookup
         self.cycle_seconds = int(config.get("cycle.cycle_seconds", 300))
         self.last_minute_seconds = int(config.get("cycle.last_minute_seconds", 60))
+        # 优化 #2：缓存风控参数用于快速失败检查
+        self.min_seconds_between_orders = float(config.get("execution.min_seconds_between_orders", 2.0))
+        self.max_strategy_trades_per_cycle = int(config.get("exposure.max_strategy_trades_per_cycle", 40))
         self.state_engine = StateEngine()
         self.router = StrategyRouter(config)
         self.capital_reset_mode = str(capital_reset_mode).strip().lower() or "cumulative"
@@ -71,6 +74,10 @@ class ReplayEngine:
         self._last_strategy_fill_at: datetime | None = None
         self._last_strategy_fill_price_up: float | None = None
         self._last_strategy_fill_price_down: float | None = None
+        # 优化 #3：特征快照缓存
+        self._feature_cache: object | None = None
+        self._feature_cache_timestamp: datetime | None = None
+        self._feature_cache_ttl_seconds = 0.5  # 缓存0.5秒
 
     def reset(self) -> None:
         self.state_engine = StateEngine()
@@ -79,6 +86,9 @@ class ReplayEngine:
         self._last_strategy_fill_at = None
         self._last_strategy_fill_price_up = None
         self._last_strategy_fill_price_down = None
+        # 优化 #3：重置缓存
+        self._feature_cache = None
+        self._feature_cache_timestamp = None
 
     @classmethod
     def from_yaml(
@@ -127,13 +137,97 @@ class ReplayEngine:
             incoming_cycle_key = (event.market_id, event.cycle_id)
             if incoming_cycle_key != current_cycle_key:
                 finalized_cycle_row = self._finalize_cycle()
+                # 优化 #3：新周期开始时清除缓存
+                self._feature_cache = None
+                self._feature_cache_timestamp = None
 
         self.state_engine.apply_market_trade(event)
-        features = build_feature_snapshot(
-            self.state_engine,
-            cycle_seconds=self.cycle_seconds,
-            last_minute_seconds=self.last_minute_seconds,
-        )
+
+        # 优化 #2：快速失败检查 - 在昂贵的特征计算和规则评估之前
+        # 检查下单间隔限制
+        if self.min_seconds_between_orders > 0 and self._last_strategy_fill_at is not None:
+            delta = (event.timestamp - self._last_strategy_fill_at).total_seconds()
+            if delta < self.min_seconds_between_orders:
+                # 间隔不足，跳过特征计算和规则评估
+                row: dict[str, object] = {
+                    "market_id": event.market_id,
+                    "cycle_id": event.cycle_id,
+                    "timestamp": event.timestamp,
+                    "market_price": event.price,
+                    "market_outcome": event.outcome,
+                    "selected_rule": "",
+                    "selected_action": "",
+                    "selected_outcome": "",
+                    "selected_shares": 0.0,
+                    "risk_status": "blocked_fast",
+                    "risk_reason": f"快速检查：下单间隔不足{self.min_seconds_between_orders:g}秒",
+                    "executed": False,
+                    "submitted": False,
+                    "confirmed": False,
+                    "broker_status": "",
+                    "broker_order_id": "",
+                    "fill_price": 0.0,
+                    "fill_fee": 0.0,
+                    "cycle_net_profit": 0.0,
+                    "account_cash": self.account.cash,
+                    "available_cash": self.account.available_cash,
+                }
+                snapshot = self.state_engine.snapshot()
+                return ReplayStepResult(
+                    decision_row=row,
+                    finalized_cycle_row=finalized_cycle_row,
+                    snapshot=snapshot,
+                )
+
+        # 检查周期成交次数限制
+        if self.state_engine.state.strategy_trades >= self.max_strategy_trades_per_cycle:
+            row: dict[str, object] = {
+                "market_id": event.market_id,
+                "cycle_id": event.cycle_id,
+                "timestamp": event.timestamp,
+                "market_price": event.price,
+                "market_outcome": event.outcome,
+                "selected_rule": "",
+                "selected_action": "",
+                "selected_outcome": "",
+                "selected_shares": 0.0,
+                "risk_status": "blocked_fast",
+                "risk_reason": "快速检查：本周期策略成交次数已达上限",
+                "executed": False,
+                "submitted": False,
+                "confirmed": False,
+                "broker_status": "",
+                "broker_order_id": "",
+                "fill_price": 0.0,
+                "fill_fee": 0.0,
+                "cycle_net_profit": 0.0,
+                "account_cash": self.account.cash,
+                "available_cash": self.account.available_cash,
+            }
+            snapshot = self.state_engine.snapshot()
+            return ReplayStepResult(
+                decision_row=row,
+                finalized_cycle_row=finalized_cycle_row,
+                snapshot=snapshot,
+            )
+
+        # 优化 #3：特征快照缓存 - 检查是否可以使用缓存
+        now = event.timestamp
+        if (self._feature_cache is not None and
+            self._feature_cache_timestamp is not None and
+            (now - self._feature_cache_timestamp).total_seconds() < self._feature_cache_ttl_seconds):
+            # 使用缓存的特征
+            features = self._feature_cache
+        else:
+            # 重新计算并缓存
+            features = build_feature_snapshot(
+                self.state_engine,
+                cycle_seconds=self.cycle_seconds,
+                last_minute_seconds=self.last_minute_seconds,
+            )
+            self._feature_cache = features
+            self._feature_cache_timestamp = now
+
         decision = self.router.route(features, strategy_trades=self.state_engine.state.strategy_trades)
         row: dict[str, object] = {
             "market_id": event.market_id,

@@ -185,6 +185,31 @@ stop_pid_file() {
   rm -f "$pid_file"
 }
 
+resolve_replay_data_stream_dir() {
+  local requested_dir="$1"
+  local canonical_live_record_dir="$DEFAULT_OUTPUT_DIR/record_job_market"
+  local legacy_live_record_dir="artifacts/live/record_job_market"
+  local -a candidates=("$requested_dir")
+
+  if [[ "$requested_dir" == "$DEFAULT_OUTPUT_DIR" ]]; then
+    candidates+=("$canonical_live_record_dir" "$legacy_live_record_dir")
+  elif [[ "$requested_dir" == "$legacy_live_record_dir" ]]; then
+    candidates+=("$canonical_live_record_dir" "$DEFAULT_OUTPUT_DIR")
+  elif [[ "$requested_dir" == "$canonical_live_record_dir" ]]; then
+    candidates+=("$legacy_live_record_dir" "$DEFAULT_OUTPUT_DIR")
+  fi
+
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -d "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 case "$COMMAND" in
   d)
     DASHBOARD_DIR="$OUTPUT_DIR/batch_replay_outputs"
@@ -543,6 +568,7 @@ except Exception:
     mkdir -p "$BATCH_BASE_DIR"
     BATCH_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
     BATCH_JOB_INDEX=0
+    BATCH_STARTED_COUNT=0
     # 清理注册表中已结束的旧条目
     if [[ -f "$BATCH_REGISTRY" ]]; then
       LIVE_ENTRIES=""
@@ -602,6 +628,20 @@ except Exception:
       JOB_PID_FILE="$job_output_dir/market_paper.pid"
       JOB_LOG="$JOB_DASHBOARD_DIR/market_paper.log"
       mkdir -p "$JOB_DASHBOARD_DIR"
+      if [[ "$job_type" == "live" ]]; then
+        mkdir -p "$job_data_stream_dir"
+      else
+        resolved_job_data_stream_dir="$(resolve_replay_data_stream_dir "$job_data_stream_dir" || true)"
+        if [[ -z "$resolved_job_data_stream_dir" ]]; then
+          echo "任务 $BATCH_JOB_INDEX: 跳过，replay 输入目录不存在: $job_data_stream_dir"
+          echo "           可先执行 ./record.sh dm<N> / dmb<N> 生成周期事件，或修正 $BATCH_FILE 中的 data_stream_dir。"
+          continue
+        fi
+        if [[ "$resolved_job_data_stream_dir" != "$job_data_stream_dir" ]]; then
+          echo "任务 $BATCH_JOB_INDEX: replay 输入目录自动切换为 $resolved_job_data_stream_dir (原配置: $job_data_stream_dir)"
+          job_data_stream_dir="$resolved_job_data_stream_dir"
+        fi
+      fi
       if [[ -f "$JOB_PID_FILE" ]]; then
         old_job_pid=$(cat "$JOB_PID_FILE" 2>/dev/null | tr -d '[:space:]')
         if [[ -n "$old_job_pid" ]] && kill -0 "$old_job_pid" 2>/dev/null; then
@@ -649,13 +689,14 @@ except Exception:
         sleep 0.2
       done
       echo "${JOB_MARKET_PID:-}  $job_output_dir  $job_cycles  $job_config  $JOB_LOG  $BATCH_TIMESTAMP  $job_data_stream_dir  $job_type" >> "$BATCH_REGISTRY"
+      BATCH_STARTED_COUNT=$((BATCH_STARTED_COUNT + 1))
       echo "任务 $BATCH_JOB_INDEX 已启动 [${job_type}]: pid=${JOB_MARKET_PID:-未知}, 周期=$job_cycles, 配置=$job_config"
       echo "  日志: $JOB_LOG"
       echo "  输出: $job_output_dir"
       echo "  数据流: $job_data_stream_dir"
       echo ""
     done < "$BATCH_FILE"
-    echo "共启动 $BATCH_JOB_INDEX 个批量任务"
+    echo "共启动 $BATCH_STARTED_COUNT 个批量任务"
     echo "查看状态: ./record.sh ms"
     echo "查看并附日志: ./record.sh ms20"
     echo "停止全部: ./record.sh mstop"
@@ -681,6 +722,14 @@ except Exception:
       reg_time="${reg_fields[5]:-}"
       reg_data_stream_dir="${reg_fields[6]:-未知}"
       reg_job_type="${reg_fields[7]:-replay}"
+      reg_progress_completed="0"
+      reg_progress_total="${reg_cycles:-0}"
+      reg_progress_dir="$(dirname "$reg_log")"
+      reg_cycles_csv="$reg_progress_dir/cycles.csv"
+      if [[ -f "$reg_cycles_csv" ]]; then
+        reg_progress_completed="$(tail -n +2 "$reg_cycles_csv" 2>/dev/null | sed '/^[[:space:]]*$/d' | wc -l | tr -d '[:space:]')"
+        [[ -z "$reg_progress_completed" ]] && reg_progress_completed="0"
+      fi
       TOTAL=$((TOTAL + 1))
       if [[ -n "$reg_pid" ]] && kill -0 "$reg_pid" 2>/dev/null; then
         status_str="运行中"
@@ -697,6 +746,7 @@ except Exception:
       echo "  启动:   $reg_time"
       echo "  日志:   $reg_log"
       echo "  数据流: $reg_data_stream_dir"
+      echo "  进度:   ${reg_progress_completed}/${reg_progress_total} (周期)"
       if [[ "$reg_job_type" == "live" ]]; then
         echo "  报告目录: $reg_data_stream_dir/batch_replay_outputs"
       else

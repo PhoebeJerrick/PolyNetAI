@@ -70,8 +70,8 @@ last_minute:
 execution:
   fee_rate: 0.002
   slippage_bps: 5
-  min_seconds_between_orders: 4.0  # 优化：从4.5降低至2.0，提升执行率（预期从0.97%升至5-10%）
-  min_same_outcome_price_move_ratio: 0.03  # Phase2优化：从0.03(3%)降低至0.01(1%)，解决价格波动瓶颈
+  min_seconds_between_orders: 1.0  # 性能优化：从4.0降低至1.0，减少无效信号生成，提升执行率
+  min_same_outcome_price_move_ratio: 0.01  # 性能优化：从0.03(3%)降低至0.01(1%)，降低价格波动门槛
 
 # 【新增】每日风险管理参数
 daily_limits:
@@ -85,20 +85,21 @@ daily_limits:
     # 卖单也按市场最小下单量约束（建议保持 true，避免实盘拒单）
     enforce_sell_min_order_size: true
 # 各买入/卖出规则单独喂价：间隔内沿用上次刷新时的「最近价」；0 表示每 tick 用最新价（与旧行为一致）
+# 性能优化：降低缓存间隔，与 min_seconds_between_orders 保持一致，避免错过交易机会
 rule_price_feed:
-  last_minute: 4
+  last_minute: 2  # 从4降至2
   entries:
-    opening: 4
-    hedge: 2
-    grid: 2
-    mean_reversion: 2
-    trend: 2
+    opening: 2  # 从4降至2
+    hedge: 1  # 从2降至1
+    grid: 1  # 从2降至1
+    mean_reversion: 1  # 从2降至1
+    trend: 1  # 从2降至1
   exits:
-    stop_loss: 4
-    hedge: 3
-    take_profit: 2
-    grid: 4
-    mean_reversion: 4
+    stop_loss: 2  # 从4降至2
+    hedge: 2  # 从3降至2
+    take_profit: 1  # 从2降至1
+    grid: 2  # 从4降至2
+    mean_reversion: 2  # 从4降至2
 priorities:
   risk: 10
   last_minute: 18         # Phase2优化：从15恢复至18（原为20）；重振尾盘机会捕获

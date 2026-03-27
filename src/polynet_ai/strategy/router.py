@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+import os
 
 from polynet_ai.domain.models import DecisionOutcome, FeatureSnapshot, OrderIntent, Outcome
 from polynet_ai.strategy.entry_rules import (
@@ -23,6 +24,17 @@ from polynet_ai.strategy.last_minute import build_last_minute_candidate
 from polynet_ai.strategy.spec import StrategyConfig
 
 
+# 优化 #4：辅助函数用于规则执行（可被序列化）
+def _execute_rule(rule_func, snapshot, config):
+    """执行单个规则并返回结果"""
+    try:
+        return rule_func(snapshot, config)
+    except Exception as e:
+        import sys
+        print(f"警告: 规则 {rule_func.__name__} 执行失败: {e}", file=sys.stderr)
+        return []
+
+
 class StrategyRouter:
     def __init__(self, config: StrategyConfig) -> None:
         self.config = config
@@ -31,6 +43,9 @@ class StrategyRouter:
         self._feed_prices: dict[str, float] = {}
         self._feed_effective_outcomes: dict[str, Outcome | None] = {}
         self._feed_quotes: dict[str, tuple[float, float]] = {}
+        # 优化 #4：从环境变量读取并行配置，默认启用
+        self._enable_parallel = os.environ.get("POLYNET_PARALLEL_RULES", "1") == "1"
+        self._max_workers = int(os.environ.get("POLYNET_MAX_WORKERS", "4"))
 
     def _reset_feed_context(self, features: FeatureSnapshot) -> None:
         ctx = (features.market_id, features.cycle_id)
@@ -90,7 +105,7 @@ class StrategyRouter:
 
     def route(self, features: FeatureSnapshot, strategy_trades: int = 0) -> DecisionOutcome:
         self._reset_feed_context(features)
-        
+
         # 优化 #4：并行化规则评估，11个规则可独立并行执行
         # 定义所有规则及其对应的路径配置
         rule_specs = [
@@ -106,31 +121,34 @@ class StrategyRouter:
             (mean_reversion_entries, ("entries", "mean_reversion")),
             (trend_entries, ("entries", "trend")),
         ]
-        
+
         candidates: list[OrderIntent] = []
-        
-        # 使用线程池并行执行所有规则（受GIL影响较小，主要是I/O和数据处理）
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = {
-                executor.submit(
-                    rule_func,
-                    self._snapshot_for_rule(features, path),
-                    self.config
-                ): rule_func
-                for rule_func, path in rule_specs
-            }
-            
-            # 按完成顺序收集结果（不一定是提交顺序）
-            for future in as_completed(futures):
-                try:
+
+        # 优化 #4：可配置的并行执行（通过环境变量控制）
+        if self._enable_parallel:
+            # 使用线程池并行执行所有规则
+            with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+                futures = {
+                    executor.submit(
+                        _execute_rule,
+                        rule_func,
+                        self._snapshot_for_rule(features, path),
+                        self.config
+                    ): rule_func
+                    for rule_func, path in rule_specs
+                }
+
+                # 按完成顺序收集结果
+                for future in as_completed(futures):
                     result = future.result()
                     if result:
                         candidates.extend(result)
-                except Exception as e:
-                    # 如果规则执行错误，记录但继续处理其他规则
-                    import sys
-                    print(f"警告: 规则执行失败: {e}", file=sys.stderr)
-                    continue
+        else:
+            # 顺序执行（用于调试或对比）
+            for rule_func, path in rule_specs:
+                result = _execute_rule(rule_func, self._snapshot_for_rule(features, path), self.config)
+                if result:
+                    candidates.extend(result)
 
         for candidate in candidates:
             candidate.metadata["strategy_trades"] = strategy_trades

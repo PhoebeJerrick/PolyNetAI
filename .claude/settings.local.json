@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Skill(update-config)",
-      "Skill(update-config:*)"
+      "Skill(update-config:*)",
+      "Bash(find /d/PassiveIncome/Quantification/Projects/PolyMkt/PolyNetAI -name \"*.py\" -type f -exec grep -l \"print\\\\|logger\\\\|logging\" {})",
+      "Bash(.projects-venv/Scripts/python.exe compare_reports.py)"
     ]
   }
 }

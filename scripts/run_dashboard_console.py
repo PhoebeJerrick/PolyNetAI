@@ -463,6 +463,13 @@ def main() -> int:
         "sweep": (ROOT / args.sweep_config).resolve(),
         "optimize": (ROOT / args.optimize_config).resolve(),
     }
+    # 自动发现 configs/ 目录下所有 .yaml 文件，补充到 config_paths（不覆盖已有条目）
+    configs_dir = ROOT / "configs"
+    if configs_dir.is_dir():
+        for _yaml_file in sorted(configs_dir.glob("*.yaml")):
+            _stem = _yaml_file.stem
+            if _stem not in config_paths:
+                config_paths[_stem] = _yaml_file.resolve()
     dashboard_dir.mkdir(parents=True, exist_ok=True)
     run_manager = DashboardRunManager(
         root=ROOT,
