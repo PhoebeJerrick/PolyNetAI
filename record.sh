@@ -35,7 +35,7 @@ print_help() {
     "  ./record.sh rb<N>             后台抓取并回放 N 个周期（直到生成业绩报告）" \
     "  ./record.sh p                查看后台状态和进度" \
     "  ./record.sh x                一键停止后台任务（含后台实盘验证）" \
-    "  ./record.sh mstart [-b FILE] 后台批量启动多个实盘验证任务（默认读 configs/batch.conf）" \
+    "  ./record.sh mstart [-b FILE] 后台批量启动多个任务（replay模拟下单/live实盘验证，默认读 configs/batch.conf）" \
     "  ./record.sh ms[LINES]        查看所有批量任务状态（可附 LINES 显示最近 N 行日志）" \
     "  ./record.sh mstop            停止所有批量任务并清除注册表" \
     "" \
@@ -532,10 +532,12 @@ except Exception:
       echo "错误: 批量任务配置文件不存在: $BATCH_FILE" >&2
       echo "" >&2
       echo "请创建配置文件，每行一个任务，格式：" >&2
-      echo "  周期数  [config路径]  [output_dir]  [starting_cash]  [per_cycle_cash]  [data_stream_dir]" >&2
-      echo "未指定字段填 - 表示使用默认值，示例：" >&2
-      echo "  72  configs/strategy_old.yaml  -  1000  50  artifacts/live/record_job/record_job_market" >&2
-      echo "  20" >&2
+      echo "  类型  周期数  [config路径]  [output_dir]  [starting_cash]  [per_cycle_cash]  [data_stream_dir]" >&2
+      echo "" >&2
+      echo "  类型: replay（模拟下单）或 live（实盘验证），未填则默认 replay" >&2
+      echo "  replay 示例: replay  72  configs/strategy_old.yaml  -  100  -  artifacts/live/record_job" >&2
+      echo "  live   示例: live    20  configs/strategy.yaml       -  100  -  artifacts/live/record_job" >&2
+      echo "  兼容旧格式（无类型字段，默认 replay）：72  configs/strategy_old.yaml" >&2
       exit 1
     fi
     mkdir -p "$BATCH_BASE_DIR"
@@ -561,23 +563,42 @@ except Exception:
       [[ "$line" =~ ^[[:space:]]*# ]] && continue
       [[ -z "${line// }" ]] && continue
       read -ra fields <<< "$line"
-      job_cycles="${fields[0]:-10}"
-      job_config="${fields[1]:--}"
-      job_output_dir_spec="${fields[2]:--}"
-      job_cash="${fields[3]:--}"
-      job_per_cycle="${fields[4]:--}"
-      job_data_stream_dir="${fields[5]:--}"
+      # 第一列是 replay/live 时为新格式，否则为旧格式（第一列是数字，默认 replay）
+      if [[ "${fields[0]}" =~ ^[0-9]+$ ]]; then
+        job_type="replay"
+        job_cycles="${fields[0]:-10}"
+        job_config="${fields[1]:--}"
+        job_output_dir_spec="${fields[2]:--}"
+        job_cash="${fields[3]:--}"
+        job_per_cycle="${fields[4]:--}"
+        job_data_stream_dir="${fields[5]:--}"
+      else
+        job_type="${fields[0]:-replay}"
+        job_cycles="${fields[1]:-10}"
+        job_config="${fields[2]:--}"
+        job_output_dir_spec="${fields[3]:--}"
+        job_cash="${fields[4]:--}"
+        job_per_cycle="${fields[5]:--}"
+        job_data_stream_dir="${fields[6]:--}"
+      fi
       [[ "$job_config" == "-" || -z "$job_config" ]] && job_config="$DEFAULT_CONFIG"
       [[ "$job_cash" == "-" || -z "$job_cash" ]] && job_cash="100"
       [[ "$job_per_cycle" == "-" || -z "$job_per_cycle" ]] && job_per_cycle=""
-      [[ "$job_data_stream_dir" == "-" || -z "$job_data_stream_dir" ]] && job_data_stream_dir="$DEFAULT_OUTPUT_DIR/record_job_market"
+      # 默认数据流路径按任务类型区分
+      if [[ "$job_type" == "live" ]]; then
+        [[ "$job_data_stream_dir" == "-" || -z "$job_data_stream_dir" ]] && job_data_stream_dir="$DEFAULT_OUTPUT_DIR/record_job_market"
+        JOB_OUT_SUBDIR="polymarket_live_outputs"
+      else
+        [[ "$job_data_stream_dir" == "-" || -z "$job_data_stream_dir" ]] && job_data_stream_dir="$DEFAULT_OUTPUT_DIR"
+        JOB_OUT_SUBDIR="batch_replay_outputs"
+      fi
       BATCH_JOB_INDEX=$((BATCH_JOB_INDEX + 1))
       if [[ "$job_output_dir_spec" == "-" || -z "$job_output_dir_spec" ]]; then
-        job_output_dir="$BATCH_BASE_DIR/${BATCH_TIMESTAMP}_$(printf '%03d' $BATCH_JOB_INDEX)"
+        job_output_dir="$BATCH_BASE_DIR/${BATCH_TIMESTAMP}_$(printf '%03d' $BATCH_JOB_INDEX)_${job_type}"
       else
         job_output_dir="$job_output_dir_spec"
       fi
-      JOB_DASHBOARD_DIR="$job_output_dir/polymarket_live_outputs"
+      JOB_DASHBOARD_DIR="$job_output_dir/$JOB_OUT_SUBDIR"
       JOB_PID_FILE="$job_output_dir/market_paper.pid"
       JOB_LOG="$JOB_DASHBOARD_DIR/market_paper.log"
       mkdir -p "$JOB_DASHBOARD_DIR"
@@ -589,19 +610,35 @@ except Exception:
         fi
         rm -f "$JOB_PID_FILE"
       fi
-      nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_polymarket_live_paper.py --robot-mode --slug-prefix "$2" --max-cycles "$3" --config "$4" --output-dir "$5" --record-events-dir "$6" --dashboard-refresh-seconds 1 --starting-cash "$7" --env-file "$8" --account-index "$9"); if [[ -n "${10}" ]]; then cmd+=(--per-cycle-cash "${10}"); fi; exec "${cmd[@]}"' \
-        "$JOB_PID_FILE" \
-        "$PYTHON_BIN" \
-        "$SLUG_PREFIX" \
-        "$job_cycles" \
-        "$job_config" \
-        "$JOB_DASHBOARD_DIR" \
-        "$job_data_stream_dir" \
-        "$job_cash" \
-        "$DEFAULT_ENV_FILE" \
-        "$DEFAULT_ACCOUNT_INDEX" \
-        "$job_per_cycle" \
-        > "$JOB_LOG" 2>&1 &
+      if [[ "$job_type" == "live" ]]; then
+        # 实盘验证：run_polymarket_live_paper.py
+        nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_polymarket_live_paper.py --robot-mode --slug-prefix "$2" --max-cycles "$3" --config "$4" --output-dir "$5" --record-events-dir "$6" --dashboard-refresh-seconds 1 --starting-cash "$7" --env-file "$8" --account-index "$9"); if [[ -n "${10}" ]]; then cmd+=(--per-cycle-cash "${10}"); fi; exec "${cmd[@]}"' \
+          "$JOB_PID_FILE" \
+          "$PYTHON_BIN" \
+          "$SLUG_PREFIX" \
+          "$job_cycles" \
+          "$job_config" \
+          "$JOB_DASHBOARD_DIR" \
+          "$job_data_stream_dir" \
+          "$job_cash" \
+          "$DEFAULT_ENV_FILE" \
+          "$DEFAULT_ACCOUNT_INDEX" \
+          "$job_per_cycle" \
+          > "$JOB_LOG" 2>&1 &
+      else
+        # 模拟下单测试：run_recorded_live_paper.py
+        nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_recorded_live_paper.py --input-dir "$2" --cycle-glob "$3" --max-cycles "$4" --config "$5" --output-dir "$6" --pace-factor 20 --status-every 100 --dashboard-refresh-seconds 1 --starting-cash "$7"); if [[ -n "${8}" ]]; then cmd+=(--per-cycle-cash "${8}"); fi; exec "${cmd[@]}"' \
+          "$JOB_PID_FILE" \
+          "$PYTHON_BIN" \
+          "$job_data_stream_dir" \
+          "${SLUG_PREFIX}*" \
+          "$job_cycles" \
+          "$job_config" \
+          "$JOB_DASHBOARD_DIR" \
+          "$job_cash" \
+          "$job_per_cycle" \
+          > "$JOB_LOG" 2>&1 &
+      fi
       disown 2>/dev/null || true
       JOB_MARKET_PID=""
       for _bi in {1..20}; do
@@ -611,8 +648,8 @@ except Exception:
         fi
         sleep 0.2
       done
-      echo "${JOB_MARKET_PID:-}  $job_output_dir  $job_cycles  $job_config  $JOB_LOG  $BATCH_TIMESTAMP  $job_data_stream_dir" >> "$BATCH_REGISTRY"
-      echo "任务 $BATCH_JOB_INDEX 已启动: pid=${JOB_MARKET_PID:-未知}, 周期=$job_cycles, 配置=$job_config"
+      echo "${JOB_MARKET_PID:-}  $job_output_dir  $job_cycles  $job_config  $JOB_LOG  $BATCH_TIMESTAMP  $job_data_stream_dir  $job_type" >> "$BATCH_REGISTRY"
+      echo "任务 $BATCH_JOB_INDEX 已启动 [${job_type}]: pid=${JOB_MARKET_PID:-未知}, 周期=$job_cycles, 配置=$job_config"
       echo "  日志: $JOB_LOG"
       echo "  输出: $job_output_dir"
       echo "  数据流: $job_data_stream_dir"
@@ -643,6 +680,7 @@ except Exception:
       reg_log="${reg_fields[4]:-}"
       reg_time="${reg_fields[5]:-}"
       reg_data_stream_dir="${reg_fields[6]:-未知}"
+      reg_job_type="${reg_fields[7]:-replay}"
       TOTAL=$((TOTAL + 1))
       if [[ -n "$reg_pid" ]] && kill -0 "$reg_pid" 2>/dev/null; then
         status_str="运行中"
@@ -650,7 +688,7 @@ except Exception:
       else
         status_str="已结束"
       fi
-      echo "--- 任务 $TOTAL ---"
+      echo "--- 任务 $TOTAL [${reg_job_type}] ---"
       echo "  PID:    ${reg_pid:-未知}"
       echo "  状态:   $status_str"
       echo "  周期:   $reg_cycles"
