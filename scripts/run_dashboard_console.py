@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -48,6 +49,7 @@ class DashboardRunManager:
         self._log_path: Path | None = None
         self._log_handle = None
         self._last_exit_code: int | None = None
+        self._started_at_epoch: float | None = None
 
     def profiles_payload(self) -> dict[str, Any]:
         profiles = self._profiles_with_preferences()
@@ -186,6 +188,7 @@ class DashboardRunManager:
             self._log_path = log_path
             self._log_handle = log_handle
             self._last_exit_code = None
+            self._started_at_epoch = time.time()
             return self._status_locked()
 
     def stop(self) -> dict[str, Any]:
@@ -203,6 +206,7 @@ class DashboardRunManager:
             self._last_exit_code = process.returncode
             self._close_log_locked()
             self._process = None
+            self._started_at_epoch = None
             return self._status_locked()
 
     def shutdown(self) -> None:
@@ -217,6 +221,7 @@ class DashboardRunManager:
                     self._process.wait(timeout=5)
                 self._last_exit_code = self._process.returncode
                 self._process = None
+                self._started_at_epoch = None
             self._close_log_locked()
 
     def _refresh_locked(self) -> None:
@@ -227,6 +232,7 @@ class DashboardRunManager:
             return
         self._last_exit_code = exit_code
         self._process = None
+        self._started_at_epoch = None
         self._close_log_locked()
 
     def _close_log_locked(self) -> None:
@@ -239,6 +245,9 @@ class DashboardRunManager:
 
     def _status_locked(self) -> dict[str, Any]:
         running = self._process is not None
+        elapsed_seconds = None
+        if running and self._started_at_epoch is not None:
+            elapsed_seconds = max(0, int(time.time() - self._started_at_epoch))
         return {
             "running": running,
             "profile_name": self._profile_name or "",
@@ -247,6 +256,8 @@ class DashboardRunManager:
             "command_text": format_command(self._command or []) if self._command else "",
             "log_path": str(self._log_path) if self._log_path else "",
             "last_exit_code": self._last_exit_code,
+            "started_at_epoch": self._started_at_epoch,
+            "elapsed_seconds": elapsed_seconds,
             "dashboard_dir": str(self._dashboard_dir),
         }
 

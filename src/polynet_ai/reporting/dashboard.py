@@ -766,7 +766,20 @@ def build_dashboard_html(
     .launcher-title {{ font-size:16px; font-weight:700; }}
     .launcher-desc {{ color:#cbd5e1; line-height:1.6; }}
     .launcher-command {{ margin:0; white-space:pre-wrap; word-break:break-all; background:#020617; border:1px solid #1e293b; border-radius:8px; padding:10px; color:#93c5fd; font-size:12px; line-height:1.5; }}
-    .launcher-actions {{ display:flex; gap:12px; flex-wrap:wrap; margin-top:14px; }}
+    .launcher-actions {{ display:flex; gap:12px; flex-wrap:wrap; margin-top:14px; align-items:center; }}
+    .launcher-actions-progress {{
+      flex:1;
+      min-width:320px;
+      border:1px solid #334155;
+      border-radius:8px;
+      background:#0b1220;
+      padding:8px 10px;
+      font-size:12px;
+      line-height:1.6;
+      color:#cbd5e1;
+      word-break:break-word;
+    }}
+    .launcher-progress-strong {{ color:#93c5fd; font-weight:600; }}
     .launcher-meta {{ color:#94a3b8; font-size:12px; line-height:1.6; }}
     .launcher-card-actions {{ display:flex; gap:10px; flex-wrap:wrap; }}
     .btn-danger {{ background:#991b1b; border-color:#7f1d1d; }}
@@ -786,9 +799,8 @@ def build_dashboard_html(
     <h2>参数控制台</h2>
     <div id="config-console-status" class="muted config-status">参数控制台：若通过本地控制服务打开，可在线修改并保存 `strategy / sweep / optimize` 配置。</div>
     <div class="config-toolbar">
-      <select id="config-file-select">
-        <option value="">选择配置文件</option>
-      </select>
+      <input id="config-file-input" class="config-input" type="text" list="config-file-options" value="strategy.yaml" placeholder="输入配置文件名，例如 strategy.yaml">
+      <datalist id="config-file-options"></datalist>
       <button id="config-reload-btn" type="button">刷新配置</button>
       <button id="config-save-btn" type="button">保存配置</button>
     </div>
@@ -804,6 +816,7 @@ def build_dashboard_html(
     <div class="launcher-actions">
       <button id="launcher-refresh-btn" type="button">刷新运行状态</button>
       <button id="launcher-stop-btn" type="button" class="btn-danger">停止当前任务</button>
+      <div id="launcher-progress" class="launcher-actions-progress">运行进度：等待状态同步...</div>
     </div>
   </div>
   <div id="dashboard-cards" class="grid">{state["card_html"]}</div>
@@ -892,6 +905,7 @@ def build_dashboard_html(
       available: false,
       currentName: "",
       currentData: null,
+      catalog: [],
     }};
     const launcherState = {{
       profiles: [],
@@ -1287,22 +1301,80 @@ def build_dashboard_html(
     }}
     async function loadConfigCatalog() {{
       const payload = await fetchConfigJson("/api/configs", {{ cache: "no-store" }});
-      const select = document.getElementById("config-file-select");
-      if (!select) return [];
+      const input = document.getElementById("config-file-input");
+      const datalist = document.getElementById("config-file-options");
       const options = (payload.configs || []).filter((item) => item && item.exists);
-      select.innerHTML = options.map((item) => `<option value="${{configEscapeHtml(item.name)}}">${{configEscapeHtml(item.name)}} - ${{configEscapeHtml(item.path)}}</option>`).join("");
-      if (options.length && !select.value) {{
-        select.value = options[0].name;
+      configConsoleState.catalog = options.map((item) => {{
+        const pathText = String(item.path || "");
+        const filename = pathText.split(/[\\/]/).pop() || `${{item.name}}.yaml`;
+        return {{
+          name: String(item.name || ""),
+          path: pathText,
+          displayName: filename,
+        }};
+      }});
+      if (datalist) {{
+        datalist.innerHTML = configConsoleState.catalog
+          .map((item) => `<option value="${{configEscapeHtml(item.displayName)}}" label="${{configEscapeHtml(item.path)}}"></option>`)
+          .join("");
+      }}
+      if (input && !String(input.value || "").trim()) {{
+        input.value = "strategy.yaml";
       }}
       return options;
+    }}
+    function resolveConfigName(rawValue) {{
+      const catalog = configConsoleState.catalog || [];
+      if (!catalog.length) return "";
+      const raw = String(rawValue || "").trim();
+      if (!raw) return "";
+      const lower = raw.toLowerCase();
+      const findBy = (picker) => {{
+        const matched = catalog.find((item) => picker(item) === lower);
+        return matched ? matched.name : "";
+      }};
+      const exactName = findBy((item) => String(item.name || "").toLowerCase());
+      if (exactName) return exactName;
+      const exactDisplay = findBy((item) => String(item.displayName || "").toLowerCase());
+      if (exactDisplay) return exactDisplay;
+      const exactPath = findBy((item) => String(item.path || "").toLowerCase());
+      if (exactPath) return exactPath;
+      const fileName = lower.split(/[\\/]/).pop() || lower;
+      const withoutExt = fileName.replace(/\.(yaml|yml)$/i, "");
+      const byStem = findBy((item) => String(item.name || "").toLowerCase().replace(/\.(yaml|yml)$/i, ""));
+      if (byStem && withoutExt === String(byStem).toLowerCase().replace(/\.(yaml|yml)$/i, "")) return byStem;
+      const byFilename = findBy((item) => String(item.displayName || "").toLowerCase().replace(/\.(yaml|yml)$/i, ""));
+      if (byFilename && withoutExt === String(fileName).toLowerCase().replace(/\.(yaml|yml)$/i, "")) return byFilename;
+      return "";
+    }}
+    function syncConfigInputToCurrentName() {{
+      const input = document.getElementById("config-file-input");
+      if (!input) return;
+      const matched = (configConsoleState.catalog || []).find((item) => item.name === configConsoleState.currentName);
+      if (matched && matched.displayName) {{
+        input.value = matched.displayName;
+      }} else if (configConsoleState.currentName) {{
+        input.value = configConsoleState.currentName;
+      }}
     }}
     async function loadConfig(name) {{
       const payload = await fetchConfigJson(`/api/config/${{name}}`, {{ cache: "no-store" }});
       configConsoleState.available = true;
       configConsoleState.currentName = payload.name || name;
       configConsoleState.currentData = payload.data || {{}};
+      syncConfigInputToCurrentName();
       renderConfigForm(configConsoleState.currentName, configConsoleState.currentData);
       setConfigStatus(`已载入 ${{configConsoleState.currentName}}，保存后会直接写回 YAML。`, "ok");
+    }}
+    async function loadSelectedConfig() {{
+      const input = document.getElementById("config-file-input");
+      const raw = input ? input.value : "";
+      const resolved = resolveConfigName(raw);
+      if (!resolved) {{
+        setConfigStatus(`未匹配到配置文件：${{raw || "(空)"}}。可输入 strategy.yaml / sweep.yaml / optimize.yaml。`, "error");
+        return;
+      }}
+      await loadConfig(resolved);
     }}
     function clearConfigFieldError(path) {{
       if (!path) return;
@@ -1546,6 +1618,35 @@ def build_dashboard_html(
       if (stopButton) {{
         stopButton.disabled = !(status && status.running);
       }}
+      renderLauncherProgress(status);
+    }}
+    function formatDurationText(secondsValue) {{
+      const seconds = Math.max(0, Number(secondsValue || 0));
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      const secs = Math.floor(seconds % 60);
+      const parts = [];
+      if (hours > 0) parts.push(`${{hours}}h`);
+      if (minutes > 0 || hours > 0) parts.push(`${{minutes}}m`);
+      parts.push(`${{secs}}s`);
+      return parts.join(" ");
+    }}
+    function renderLauncherProgress(status) {{
+      const node = document.getElementById("launcher-progress");
+      if (!node) return;
+      if (status && status.running) {{
+        const title = configEscapeHtml(status.profile_title || status.profile_name || "任务");
+        const pid = status.pid !== null && status.pid !== undefined ? configEscapeHtml(status.pid) : "-";
+        const elapsed = formatDurationText(status.elapsed_seconds);
+        const logLine = status.log_path ? `<div>日志：${{configEscapeHtml(status.log_path)}}</div>` : "";
+        node.innerHTML = `<div>运行进度：<span class="launcher-progress-strong">正在执行 ${{title}}</span> | PID ${{pid}} | 已运行 ${{configEscapeHtml(elapsed)}}</div>${{logLine}}`;
+        return;
+      }}
+      if (status && status.last_exit_code !== null && status.last_exit_code !== undefined) {{
+        node.innerHTML = `<div>运行进度：当前空闲 | 上次退出码 <span class="launcher-progress-strong">${{configEscapeHtml(status.last_exit_code)}}</span></div>`;
+        return;
+      }}
+      node.textContent = "运行进度：当前无任务运行。";
     }}
     async function loadLauncherCatalog() {{
       return fetchConfigJson("/api/launcher", {{ cache: "no-store" }});
@@ -1726,7 +1827,7 @@ def build_dashboard_html(
       }}
     }}
     async function initializeConfigConsole() {{
-      const select = document.getElementById("config-file-select");
+      const input = document.getElementById("config-file-input");
       const reloadButton = document.getElementById("config-reload-btn");
       const saveButton = document.getElementById("config-save-btn");
       const form = document.getElementById("config-form");
@@ -1758,18 +1859,20 @@ def build_dashboard_html(
           }}
         }});
       }}
-      if (select) {{
-        select.addEventListener("change", function() {{
-          if (select.value) {{
-            loadConfig(select.value).catch((error) => setConfigStatus(`读取配置失败: ${{error.message}}`, "error"));
+      if (input) {{
+        input.addEventListener("change", function() {{
+          loadSelectedConfig().catch((error) => setConfigStatus(`读取配置失败: ${{error.message}}`, "error"));
+        }});
+        input.addEventListener("keydown", function(event) {{
+          if (event.key === "Enter") {{
+            event.preventDefault();
+            loadSelectedConfig().catch((error) => setConfigStatus(`读取配置失败: ${{error.message}}`, "error"));
           }}
         }});
       }}
       if (reloadButton) {{
         reloadButton.addEventListener("click", function() {{
-          if (select && select.value) {{
-            loadConfig(select.value).catch((error) => setConfigStatus(`读取配置失败: ${{error.message}}`, "error"));
-          }}
+          loadSelectedConfig().catch((error) => setConfigStatus(`读取配置失败: ${{error.message}}`, "error"));
         }});
       }}
       if (saveButton) {{
@@ -1783,8 +1886,15 @@ def build_dashboard_html(
           setConfigStatus("未发现可编辑配置文件。", "error");
           return;
         }}
-        if (select && select.value) {{
-          await loadConfig(select.value);
+        if (input && !String(input.value || "").trim()) {{
+          input.value = "strategy.yaml";
+        }}
+        let resolvedName = resolveConfigName(input ? input.value : "");
+        if (!resolvedName) {{
+          resolvedName = resolveConfigName("strategy.yaml") || String((configs[0] && configs[0].name) || "");
+        }}
+        if (resolvedName) {{
+          await loadConfig(resolvedName);
         }}
       }} catch (error) {{
         setConfigStatus("参数控制台未连接。请使用 `python scripts/run_dashboard_console.py --dashboard-dir <输出目录>` 通过 http://localhost 打开 dashboard。", "error");
