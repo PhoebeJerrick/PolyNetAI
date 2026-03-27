@@ -1637,9 +1637,15 @@ def build_dashboard_html(
       if (status && status.running) {{
         const title = configEscapeHtml(status.profile_title || status.profile_name || "任务");
         const pid = status.pid !== null && status.pid !== undefined ? configEscapeHtml(status.pid) : "-";
+        const completed = Number(status.completed_cycles || 0);
+        const total = Number(status.total_cycles || 0);
+        const cycleProgressText = total > 0 ? `${{Math.max(0, completed)}}/${{Math.max(0, total)}}` : "--/--";
         const elapsed = formatDurationText(status.elapsed_seconds);
+        const remaining = status.estimated_remaining_seconds !== null && status.estimated_remaining_seconds !== undefined
+          ? formatDurationText(status.estimated_remaining_seconds)
+          : "--";
         const logLine = status.log_path ? `<div>日志：${{configEscapeHtml(status.log_path)}}</div>` : "";
-        node.innerHTML = `<div>运行进度：<span class="launcher-progress-strong">正在执行 ${{title}}</span> | PID ${{pid}} | 已运行 ${{configEscapeHtml(elapsed)}}</div>${{logLine}}`;
+        node.innerHTML = `<div>运行进度：<span class="launcher-progress-strong">正在执行 ${{title}}</span> | PID ${{pid}} | <span class="launcher-progress-strong">${{configEscapeHtml(cycleProgressText)}}</span> | 已运行 ${{configEscapeHtml(elapsed)}} | 预计还剩 ${{configEscapeHtml(remaining)}}</div>${{logLine}}`;
         return;
       }}
       if (status && status.last_exit_code !== null && status.last_exit_code !== undefined) {{

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import subprocess
@@ -50,6 +51,43 @@ class DashboardRunManager:
         self._log_handle = None
         self._last_exit_code: int | None = None
         self._started_at_epoch: float | None = None
+
+    @staticmethod
+    def _extract_int_option(command: list[str] | None, flag: str) -> int | None:
+        if not command:
+            return None
+        try:
+            index = command.index(flag)
+        except ValueError:
+            return None
+        if index + 1 >= len(command):
+            return None
+        try:
+            value = int(str(command[index + 1]).strip())
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    def _count_completed_cycles(self) -> int:
+        cycles_path = self._dashboard_dir / "cycles.csv"
+        if not cycles_path.exists():
+            return 0
+        seen_cycle_ids: set[str] = set()
+        row_count = 0
+        try:
+            with cycles_path.open("r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    if not isinstance(row, dict):
+                        continue
+                    cycle_id = str(row.get("cycle_id") or "").strip()
+                    if cycle_id:
+                        seen_cycle_ids.add(cycle_id)
+                    else:
+                        row_count += 1
+        except OSError:
+            return 0
+        return len(seen_cycle_ids) if seen_cycle_ids else row_count
 
     def profiles_payload(self) -> dict[str, Any]:
         profiles = self._profiles_with_preferences()
@@ -248,6 +286,17 @@ class DashboardRunManager:
         elapsed_seconds = None
         if running and self._started_at_epoch is not None:
             elapsed_seconds = max(0, int(time.time() - self._started_at_epoch))
+        total_cycles = self._extract_int_option(self._command, "--max-cycles")
+        completed_cycles = 0
+        estimated_remaining_seconds = None
+        if running:
+            completed_cycles = self._count_completed_cycles()
+            if total_cycles is not None:
+                completed_cycles = max(0, min(completed_cycles, total_cycles))
+                if completed_cycles > 0 and elapsed_seconds is not None:
+                    avg_seconds_per_cycle = elapsed_seconds / completed_cycles
+                    remaining_cycles = max(0, total_cycles - completed_cycles)
+                    estimated_remaining_seconds = max(0, int(avg_seconds_per_cycle * remaining_cycles))
         return {
             "running": running,
             "profile_name": self._profile_name or "",
@@ -258,6 +307,9 @@ class DashboardRunManager:
             "last_exit_code": self._last_exit_code,
             "started_at_epoch": self._started_at_epoch,
             "elapsed_seconds": elapsed_seconds,
+            "completed_cycles": completed_cycles,
+            "total_cycles": total_cycles,
+            "estimated_remaining_seconds": estimated_remaining_seconds,
             "dashboard_dir": str(self._dashboard_dir),
         }
 
