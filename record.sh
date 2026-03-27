@@ -15,6 +15,9 @@ DEFAULT_ENV_FILE="${RECORD_ENV_FILE:-../APIs/ApiConfig.env}"
 DEFAULT_ACCOUNT_INDEX="${RECORD_ACCOUNT_INDEX:-2}"
 DEFAULT_START_BUFFER_SECONDS="${RECORD_START_BUFFER_SECONDS:-2}"
 OPEN_EDGE_ON_DASHBOARD="${RECORD_OPEN_DASHBOARD_EDGE:-1}"
+DEFAULT_BATCH_FILE="${RECORD_BATCH_FILE:-configs/batch.conf}"
+BATCH_REGISTRY="${RECORD_BATCH_REGISTRY:-artifacts/live/.batch_registry}"
+BATCH_BASE_DIR="${RECORD_BATCH_BASE_DIR:-artifacts/live/batch_jobs}"
 
 print_help() {
   printf "%s\n" \
@@ -32,6 +35,9 @@ print_help() {
     "  ./record.sh rb<N>             后台抓取并回放 N 个周期（直到生成业绩报告）" \
     "  ./record.sh p                查看后台状态和进度" \
     "  ./record.sh x                一键停止后台任务（含后台实盘验证）" \
+    "  ./record.sh mstart [-b FILE] 后台批量启动多个实盘验证任务（默认读 configs/batch.conf）" \
+    "  ./record.sh ms[LINES]        查看所有批量任务状态（可附 LINES 显示最近 N 行日志）" \
+    "  ./record.sh mstop            停止所有批量任务并清除注册表" \
     "" \
     "可选参数（通用）:" \
     "  N              例如 ds10 / r10 / rb300" \
@@ -41,12 +47,14 @@ print_help() {
     "  -c FILE        自定义 config，默认 configs/strategy.yaml" \
     "  -k CASH        自定义 starting cash（用于模拟下单）" \
     "  -K CASH        自定义每周期固定投注资金（仅 dm/dmb；透传 --per-cycle-cash）" \
+    "  -b FILE        自定义批量任务配置文件（仅 mstart；默认 configs/batch.conf）" \
     "" \
     "环境变量（可选）:" \
     "  RECORD_OPEN_DASHBOARD_EDGE=0   关闭 record.sh d 后自动用 Edge 打开网页" \
     "  RECORD_DASHBOARD_HOST=0.0.0.0  dashboard 监听地址（云服务器可设 0.0.0.0）" \
     "  RECORD_DASHBOARD_PORT=8765     dashboard 监听端口" \
     "  RECORD_PER_CYCLE_CASH=100      dm/dmb 默认每周期固定投注资金" \
+    "  RECORD_OUTPUT_DIR=...          批量任务默认数据流根目录（会拼接 /record_job_market）" \
     "" \
     "Linux 云服务器推荐：" \
     "  RECORD_DASHBOARD_HOST=0.0.0.0 ./record.sh dmb10" \
@@ -71,6 +79,8 @@ if [[ -n "$DEFAULT_PER_CYCLE_CASH" ]]; then
   PER_CYCLE_CASH_SET="true"
 fi
 PM_TAIL_LINES="20"
+BATCH_FILE_ARG=""
+MS_TAIL_LINES="0"
 
 if [[ "$COMMAND" =~ ^(rb|runb|run-bg)([0-9]+)$ ]]; then
   COMMAND="rb"
@@ -90,6 +100,9 @@ elif [[ "$COMMAND" =~ ^(dm|dashboard-market)([0-9]+)$ ]]; then
 elif [[ "$COMMAND" =~ ^pm([0-9]+)$ ]]; then
   COMMAND="pm"
   PM_TAIL_LINES="${BASH_REMATCH[1]}"
+elif [[ "$COMMAND" =~ ^ms([0-9]+)$ ]]; then
+  COMMAND="ms"
+  MS_TAIL_LINES="${BASH_REMATCH[1]}"
 fi
 
 while [[ $# -gt 0 ]]; do
@@ -131,6 +144,10 @@ while [[ $# -gt 0 ]]; do
     -h|--help|h|help)
       print_help
       exit 0
+      ;;
+    -b|--batch-file)
+      BATCH_FILE_ARG="$2"
+      shift 2
       ;;
     *)
       echo "未知参数: $1" >&2
@@ -508,6 +525,173 @@ except Exception:
       --config "$CONFIG_PATH" \
       --overrides "$OVERRIDES_PATH" \
       --starting-cash "$STARTING_CASH"
+    ;;
+  mstart|batch-start)
+    BATCH_FILE="${BATCH_FILE_ARG:-$DEFAULT_BATCH_FILE}"
+    if [[ ! -f "$BATCH_FILE" ]]; then
+      echo "错误: 批量任务配置文件不存在: $BATCH_FILE" >&2
+      echo "" >&2
+      echo "请创建配置文件，每行一个任务，格式：" >&2
+      echo "  周期数  [config路径]  [output_dir]  [starting_cash]  [per_cycle_cash]  [data_stream_dir]" >&2
+      echo "未指定字段填 - 表示使用默认值，示例：" >&2
+      echo "  72  configs/strategy_old.yaml  -  1000  50  artifacts/live/record_job/record_job_market" >&2
+      echo "  20" >&2
+      exit 1
+    fi
+    mkdir -p "$BATCH_BASE_DIR"
+    BATCH_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    BATCH_JOB_INDEX=0
+    # 清理注册表中已结束的旧条目
+    if [[ -f "$BATCH_REGISTRY" ]]; then
+      LIVE_ENTRIES=""
+      while IFS= read -r reg_line || [[ -n "$reg_line" ]]; do
+        [[ "$reg_line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${reg_line// }" ]] && continue
+        read -ra reg_fields <<< "$reg_line"
+        reg_pid="${reg_fields[0]:-}"
+        if [[ -n "$reg_pid" ]] && kill -0 "$reg_pid" 2>/dev/null; then
+          LIVE_ENTRIES="${LIVE_ENTRIES}${reg_line}"$'\n'
+        fi
+      done < "$BATCH_REGISTRY"
+      printf '%s' "$LIVE_ENTRIES" > "$BATCH_REGISTRY"
+    fi
+    echo "读取批量任务配置: $BATCH_FILE"
+    echo ""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ "$line" =~ ^[[:space:]]*# ]] && continue
+      [[ -z "${line// }" ]] && continue
+      read -ra fields <<< "$line"
+      job_cycles="${fields[0]:-10}"
+      job_config="${fields[1]:--}"
+      job_output_dir_spec="${fields[2]:--}"
+      job_cash="${fields[3]:--}"
+      job_per_cycle="${fields[4]:--}"
+      job_data_stream_dir="${fields[5]:--}"
+      [[ "$job_config" == "-" || -z "$job_config" ]] && job_config="$DEFAULT_CONFIG"
+      [[ "$job_cash" == "-" || -z "$job_cash" ]] && job_cash="100"
+      [[ "$job_per_cycle" == "-" || -z "$job_per_cycle" ]] && job_per_cycle=""
+      [[ "$job_data_stream_dir" == "-" || -z "$job_data_stream_dir" ]] && job_data_stream_dir="$DEFAULT_OUTPUT_DIR/record_job_market"
+      BATCH_JOB_INDEX=$((BATCH_JOB_INDEX + 1))
+      if [[ "$job_output_dir_spec" == "-" || -z "$job_output_dir_spec" ]]; then
+        job_output_dir="$BATCH_BASE_DIR/${BATCH_TIMESTAMP}_$(printf '%03d' $BATCH_JOB_INDEX)"
+      else
+        job_output_dir="$job_output_dir_spec"
+      fi
+      JOB_DASHBOARD_DIR="$job_output_dir/polymarket_live_outputs"
+      JOB_PID_FILE="$job_output_dir/market_paper.pid"
+      JOB_LOG="$JOB_DASHBOARD_DIR/market_paper.log"
+      mkdir -p "$JOB_DASHBOARD_DIR"
+      if [[ -f "$JOB_PID_FILE" ]]; then
+        old_job_pid=$(cat "$JOB_PID_FILE" 2>/dev/null | tr -d '[:space:]')
+        if [[ -n "$old_job_pid" ]] && kill -0 "$old_job_pid" 2>/dev/null; then
+          echo "任务 $BATCH_JOB_INDEX: 跳过，$job_output_dir 已有任务在运行 (pid=$old_job_pid)"
+          continue
+        fi
+        rm -f "$JOB_PID_FILE"
+      fi
+      nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_polymarket_live_paper.py --robot-mode --slug-prefix "$2" --max-cycles "$3" --config "$4" --output-dir "$5" --record-events-dir "$6" --dashboard-refresh-seconds 1 --starting-cash "$7" --env-file "$8" --account-index "$9"); if [[ -n "${10}" ]]; then cmd+=(--per-cycle-cash "${10}"); fi; exec "${cmd[@]}"' \
+        "$JOB_PID_FILE" \
+        "$PYTHON_BIN" \
+        "$SLUG_PREFIX" \
+        "$job_cycles" \
+        "$job_config" \
+        "$JOB_DASHBOARD_DIR" \
+        "$job_data_stream_dir" \
+        "$job_cash" \
+        "$DEFAULT_ENV_FILE" \
+        "$DEFAULT_ACCOUNT_INDEX" \
+        "$job_per_cycle" \
+        > "$JOB_LOG" 2>&1 &
+      disown 2>/dev/null || true
+      JOB_MARKET_PID=""
+      for _bi in {1..20}; do
+        if [[ -f "$JOB_PID_FILE" ]]; then
+          JOB_MARKET_PID=$(cat "$JOB_PID_FILE" 2>/dev/null | tr -d '[:space:]')
+          [[ -n "$JOB_MARKET_PID" ]] && break
+        fi
+        sleep 0.2
+      done
+      echo "${JOB_MARKET_PID:-}  $job_output_dir  $job_cycles  $job_config  $JOB_LOG  $BATCH_TIMESTAMP  $job_data_stream_dir" >> "$BATCH_REGISTRY"
+      echo "任务 $BATCH_JOB_INDEX 已启动: pid=${JOB_MARKET_PID:-未知}, 周期=$job_cycles, 配置=$job_config"
+      echo "  日志: $JOB_LOG"
+      echo "  输出: $job_output_dir"
+      echo "  数据流: $job_data_stream_dir"
+      echo ""
+    done < "$BATCH_FILE"
+    echo "共启动 $BATCH_JOB_INDEX 个批量任务"
+    echo "查看状态: ./record.sh ms"
+    echo "查看并附日志: ./record.sh ms20"
+    echo "停止全部: ./record.sh mstop"
+    ;;
+  ms|mstatus|batch-status)
+    if [[ ! -f "$BATCH_REGISTRY" ]]; then
+      echo "暂无批量任务记录 (注册表: $BATCH_REGISTRY)"
+      exit 0
+    fi
+    echo "## 批量任务状态 (注册表: $BATCH_REGISTRY)"
+    echo ""
+    TOTAL=0
+    RUNNING=0
+    while IFS= read -r reg_line || [[ -n "$reg_line" ]]; do
+      [[ "$reg_line" =~ ^[[:space:]]*# ]] && continue
+      [[ -z "${reg_line// }" ]] && continue
+      read -ra reg_fields <<< "$reg_line"
+      reg_pid="${reg_fields[0]:-}"
+      reg_output_dir="${reg_fields[1]:-}"
+      reg_cycles="${reg_fields[2]:-}"
+      reg_config="${reg_fields[3]:-}"
+      reg_log="${reg_fields[4]:-}"
+      reg_time="${reg_fields[5]:-}"
+      reg_data_stream_dir="${reg_fields[6]:-未知}"
+      TOTAL=$((TOTAL + 1))
+      if [[ -n "$reg_pid" ]] && kill -0 "$reg_pid" 2>/dev/null; then
+        status_str="运行中"
+        RUNNING=$((RUNNING + 1))
+      else
+        status_str="已结束"
+      fi
+      echo "--- 任务 $TOTAL ---"
+      echo "  PID:    ${reg_pid:-未知}"
+      echo "  状态:   $status_str"
+      echo "  周期:   $reg_cycles"
+      echo "  配置:   $reg_config"
+      echo "  输出:   $reg_output_dir"
+      echo "  启动:   $reg_time"
+      echo "  日志:   $reg_log"
+      echo "  数据流: $reg_data_stream_dir"
+      if [[ "${MS_TAIL_LINES}" -gt 0 ]] && [[ -f "$reg_log" ]]; then
+        echo "  --- 最近 $MS_TAIL_LINES 行日志 ---"
+        tail -n "$MS_TAIL_LINES" "$reg_log" 2>/dev/null | sed 's/^/  /'
+      fi
+      echo ""
+    done < "$BATCH_REGISTRY"
+    echo "合计: $TOTAL 个任务，其中 $RUNNING 个运行中"
+    ;;
+  mstop|batch-stop)
+    if [[ ! -f "$BATCH_REGISTRY" ]]; then
+      echo "暂无批量任务记录 (注册表: $BATCH_REGISTRY)"
+      exit 0
+    fi
+    STOP_COUNT=0
+    while IFS= read -r reg_line || [[ -n "$reg_line" ]]; do
+      [[ "$reg_line" =~ ^[[:space:]]*# ]] && continue
+      [[ -z "${reg_line// }" ]] && continue
+      read -ra reg_fields <<< "$reg_line"
+      reg_pid="${reg_fields[0]:-}"
+      reg_output_dir="${reg_fields[1]:-}"
+      if [[ -n "$reg_pid" ]] && kill -0 "$reg_pid" 2>/dev/null; then
+        kill "$reg_pid" 2>/dev/null || true
+        sleep 0.5
+        if kill -0 "$reg_pid" 2>/dev/null; then
+          kill -9 "$reg_pid" 2>/dev/null || true
+        fi
+        echo "任务已停止 (pid=$reg_pid, 目录=$reg_output_dir)"
+        STOP_COUNT=$((STOP_COUNT + 1))
+      fi
+      rm -f "$reg_output_dir/market_paper.pid" 2>/dev/null || true
+    done < "$BATCH_REGISTRY"
+    rm -f "$BATCH_REGISTRY"
+    echo "已停止 $STOP_COUNT 个运行中的批量任务，注册表已清除"
     ;;
   x|stop|kill)
     stop_pid_file "$OUTPUT_DIR/market_paper.pid" "后台实盘验证任务"
