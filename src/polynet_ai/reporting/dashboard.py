@@ -1340,11 +1340,11 @@ def build_dashboard_html(
       const exactPath = findBy((item) => String(item.path || "").toLowerCase());
       if (exactPath) return exactPath;
       const fileName = lower.split(/[\\/]/).pop() || lower;
-      const withoutExt = fileName.replace(/\.(yaml|yml)$/i, "");
-      const byStem = findBy((item) => String(item.name || "").toLowerCase().replace(/\.(yaml|yml)$/i, ""));
-      if (byStem && withoutExt === String(byStem).toLowerCase().replace(/\.(yaml|yml)$/i, "")) return byStem;
-      const byFilename = findBy((item) => String(item.displayName || "").toLowerCase().replace(/\.(yaml|yml)$/i, ""));
-      if (byFilename && withoutExt === String(fileName).toLowerCase().replace(/\.(yaml|yml)$/i, "")) return byFilename;
+      const withoutExt = fileName.replace(/\\.(yaml|yml)$/i, "");
+      const byStem = findBy((item) => String(item.name || "").toLowerCase().replace(/\\.(yaml|yml)$/i, ""));
+      if (byStem && withoutExt === String(byStem).toLowerCase().replace(/\\.(yaml|yml)$/i, "")) return byStem;
+      const byFilename = findBy((item) => String(item.displayName || "").toLowerCase().replace(/\\.(yaml|yml)$/i, ""));
+      if (byFilename && withoutExt === String(fileName).toLowerCase().replace(/\\.(yaml|yml)$/i, "")) return byFilename;
       return "";
     }}
     function syncConfigInputToCurrentName() {{
