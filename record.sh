@@ -746,7 +746,21 @@ except Exception:
       echo "  启动:   $reg_time"
       echo "  日志:   $reg_log"
       echo "  数据流: $reg_data_stream_dir"
-      echo "  进度:   ${reg_progress_completed}/${reg_progress_total} (周期)"
+      # 计算已用时间
+      reg_elapsed_str=""
+      if [[ -n "$reg_time" ]]; then
+        reg_start_epoch=$(date -d "${reg_time:0:8} ${reg_time:9:2}:${reg_time:11:2}:${reg_time:13:2}" +%s 2>/dev/null)
+        if [[ -n "$reg_start_epoch" ]]; then
+          reg_now_epoch=$(date +%s)
+          reg_elapsed_sec=$((reg_now_epoch - reg_start_epoch))
+          if [[ $reg_elapsed_sec -ge 0 ]]; then
+            reg_elapsed_min=$((reg_elapsed_sec / 60))
+            reg_elapsed_sec_rem=$((reg_elapsed_sec % 60))
+            reg_elapsed_str="  已用时 ${reg_elapsed_min}m${reg_elapsed_sec_rem}s"
+          fi
+        fi
+      fi
+      echo "  进度:   ${reg_progress_completed}/${reg_progress_total} (周期)${reg_elapsed_str}"
       if [[ "$reg_job_type" == "live" ]]; then
         echo "  报告目录: $reg_data_stream_dir/batch_replay_outputs"
       else
