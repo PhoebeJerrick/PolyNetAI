@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit
+# 每次 git commit 前自动将补丁版本号 +1。
+#
+# 安装方式（只需执行一次）：
+#   git config core.hooksPath .githooks
+#
+# 手动运行测试：
+#   bash .githooks/pre-commit
+
+set -e
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# 优先使用项目 venv，回退到系统 python3 / python
+PYTHON=""
+for candidate in \
+    "$REPO_ROOT/.venv/Scripts/python" \
+    "$REPO_ROOT/.venv/bin/python3" \
+    "python3" \
+    "python"; do
+    if command -v "$candidate" &>/dev/null 2>&1 || [ -f "$candidate" ]; then
+        PYTHON="$candidate"
+        break
+    fi
+done
+
+if [ -z "$PYTHON" ]; then
+    echo "[pre-commit] 未找到 Python，跳过版本号递增。" >&2
+    exit 0
+fi
+
+"$PYTHON" "$REPO_ROOT/scripts/bump_version.py"

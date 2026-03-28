@@ -13,7 +13,7 @@ if str(SRC) not in sys.path:
 
 from polynet_ai.adapters.excel_loader import load_excel_events
 from polynet_ai.engine.replay import ReplayEngine
-from polynet_ai.reporting.excel_export import export_replay_to_excel
+from polynet_ai.reporting.excel_export import export_replay_to_excel, get_version_tag
 from polynet_ai.reporting.experiments import build_experiment_frame, build_experiment_row
 from polynet_ai.strategy.spec import load_strategy_config
 from polynet_ai.strategy.tuning import load_scenarios
@@ -43,6 +43,7 @@ def main() -> int:
         scenarios = scenarios[: args.limit]
 
     experiment_rows: list[dict[str, object]] = []
+    _vtag = get_version_tag()
     for scenario in scenarios:
         scenario_config = base_config.with_overrides(scenario.overrides)
         engine = ReplayEngine(scenario_config, starting_cash=args.starting_cash)
@@ -53,7 +54,7 @@ def main() -> int:
             result.cycle_df,
             result.decision_df,
             result.metrics_df,
-            scenario_dir / "replay_report.xlsx",
+            scenario_dir / f"replay_report_{_vtag}.xlsx",
         )
         result.cycle_df.to_csv(scenario_dir / "cycles.csv", index=False, encoding="utf-8-sig")
         result.decision_df.to_csv(scenario_dir / "decisions.csv", index=False, encoding="utf-8-sig")
@@ -70,7 +71,7 @@ def main() -> int:
         ascending=[False, False],
     )
     summary_df.to_csv(output_dir / "sweep_summary.csv", index=False, encoding="utf-8-sig")
-    with pd.ExcelWriter(output_dir / "sweep_summary.xlsx", engine="openpyxl") as writer:
+    with pd.ExcelWriter(output_dir / f"sweep_summary_{_vtag}.xlsx", engine="openpyxl") as writer:
         summary_df.to_excel(writer, sheet_name="summary", index=False)
     print(f"参数扫描完成: {output_dir}")
     print(summary_df.head(10).to_string(index=False))

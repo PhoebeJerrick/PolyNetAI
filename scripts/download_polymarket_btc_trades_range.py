@@ -43,6 +43,7 @@ from polynet_ai.adapters.polymarket_live import (
     fetch_market_spec,
     load_api_env,
 )
+from polynet_ai.reporting.excel_export import get_version_tag
 
 
 def parse_args() -> argparse.Namespace:
@@ -503,7 +504,7 @@ def main() -> int:
     base_name = f"{args.output_prefix}_{days_tag}d_{stamp}"
     progress_path = out_dir / f"{base_name}.progress.json"
     csv_path = out_dir / f"{base_name}.csv"
-    xlsx_path = out_dir / f"{base_name}.xlsx"
+    xlsx_path = out_dir / f"{base_name}_{get_version_tag()}.xlsx"
 
     specs = collect_specs(args, start_ts_floor, end_ts_ceil)
     if not specs:

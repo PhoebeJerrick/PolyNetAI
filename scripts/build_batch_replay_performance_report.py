@@ -42,6 +42,7 @@ from polynet_ai.reporting.excel_export import (
     SAME_OUTCOME_PRICE_MOVE_COL,
     _format_elapsed,
     compute_same_outcome_price_move_pct,
+    get_version_tag,
     infer_decision_reason,
 )
 
@@ -658,10 +659,11 @@ def build_performance_report_zh(
         safe_prefix = str(report_name_prefix).strip().replace(" ", "_")
         if safe_prefix:
             base_name = f"{safe_prefix}_{base_name}"
+    _vtag = get_version_tag()
     if cycle_count > 0:
-        report_xlsx = output_path / f"{base_name}_{cycle_count}_{suffix}.xlsx"
+        report_xlsx = output_path / f"{base_name}_{cycle_count}_{_vtag}_{suffix}.xlsx"
     else:
-        report_xlsx = output_path / f"{base_name}_{suffix}.xlsx"
+        report_xlsx = output_path / f"{base_name}_{_vtag}_{suffix}.xlsx"
     shown_dir = display_batch_dir or resolved_batch_dir
 
     tail_per_cycle, tail_overview = summarize_tail_window_executions(
@@ -767,7 +769,7 @@ def build_comparison_report_zh(
         live_cycles = pd.DataFrame()
 
     # --- 写出 ---
-    report_name = f"sim_vs_live_comparison_zh_{_today_suffix()}.xlsx"
+    report_name = f"sim_vs_live_comparison_zh_{get_version_tag()}_{_today_suffix()}.xlsx"
     report_xlsx = output_path / report_name
     with pd.ExcelWriter(report_xlsx, engine="openpyxl") as writer:
         meta_df.to_excel(writer, sheet_name="报告信息", index=False)
@@ -788,7 +790,7 @@ def _write_batch_trade_process_xlsx(
     output_path: Path,
 ) -> Path:
     """交易过程 Excel：元数据、周期快照、决策流水。"""
-    xlsx_path = output_path / f"batch_replay_trade_process_zh_{_today_suffix()}.xlsx"
+    xlsx_path = output_path / f"batch_replay_trade_process_zh_{get_version_tag()}_{_today_suffix()}.xlsx"
     meta_df = pd.DataFrame([("数据目录", input_dir.as_posix())], columns=["项", "值"])
     snap_df = cycle_df.copy() if not cycle_df.empty else pd.DataFrame()
 

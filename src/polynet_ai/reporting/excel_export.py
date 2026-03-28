@@ -5,9 +5,19 @@ from typing import Iterable
 
 import pandas as pd
 
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
 # 与 analyze_polymarket_tracker / 批量绩效报告交易流水表一致，置于「成交价格」右侧
 SAME_OUTCOME_PRICE_MOVE_COL = "同向成交价波动幅度(%)"
 EXECUTION_LEDGER_SHEET_NAME = "分周期执行交易流水"
+
+
+def get_version_tag() -> str:
+    """返回当前包版本标签，格式如 'V0.1.0'，用于在输出文件名中标注版本。"""
+    version_file = _REPO_ROOT / "VERSION"
+    if version_file.exists():
+        return f"V{version_file.read_text(encoding='utf-8-sig').strip()}"
+    return "V0"
 
 
 def compute_same_outcome_price_move_pct(

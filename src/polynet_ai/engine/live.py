@@ -10,7 +10,7 @@ import pandas as pd
 from polynet_ai.domain.models import TradeEvent
 from polynet_ai.engine.replay import ReplayEngine, ReplayResult
 from polynet_ai.reporting.dashboard import generate_dashboard_bundle
-from polynet_ai.reporting.excel_export import export_trade_ledger_to_excel
+from polynet_ai.reporting.excel_export import export_trade_ledger_to_excel, get_version_tag
 
 
 @dataclass(slots=True)
@@ -169,13 +169,14 @@ def export_live_result(
     result.replay_result.decision_df.to_csv(directory / "decisions.csv", index=False, encoding="utf-8-sig")
     result.replay_result.metrics_df.to_csv(directory / "metrics.csv", index=False, encoding="utf-8-sig")
     result.snapshot_df.to_csv(directory / "snapshots.csv", index=False, encoding="utf-8-sig")
+    _vtag = get_version_tag()
     export_trade_ledger_to_excel(
         decision_df=result.replay_result.decision_df,
         snapshot_df=result.snapshot_df,
-        output_path=directory / "trade_ledger.xlsx",
+        output_path=directory / f"trade_ledger_{_vtag}.xlsx",
     )
     if write_excel:
-        with pd.ExcelWriter(directory / "live_report.xlsx", engine="openpyxl") as writer:
+        with pd.ExcelWriter(directory / f"live_report_{_vtag}.xlsx", engine="openpyxl") as writer:
             result.replay_result.cycle_df.to_excel(writer, sheet_name="cycles", index=False)
             result.replay_result.decision_df.to_excel(writer, sheet_name="decisions", index=False)
             result.replay_result.metrics_df.to_excel(writer, sheet_name="metrics", index=False)

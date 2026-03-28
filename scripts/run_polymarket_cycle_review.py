@@ -33,6 +33,7 @@ from polynet_ai.adapters.trade_event_store import (  # noqa: E402
 from polynet_ai.engine.live import LivePaperRunner, export_live_result  # noqa: E402
 from polynet_ai.engine.replay import ReplayEngine  # noqa: E402
 from polynet_ai.execution.polymarket_broker import PolymarketBroker  # noqa: E402
+from polynet_ai.reporting.excel_export import get_version_tag  # noqa: E402
 from polynet_ai.strategy.spec import load_strategy_config  # noqa: E402
 
 DATA_API_BASE = "https://data-api.polymarket.com"
@@ -429,16 +430,17 @@ def main() -> int:
     pd.DataFrame(market_rows).to_csv(market_raw_csv, index=False, encoding="utf-8-sig")
 
     user_trade_df = _rows_to_trade_excel(user_rows, cycle_slug=spec.slug, cycle_start=cycle_start)
-    user_trade_xlsx = run_dir / "account_trades.xlsx"
+    _vtag = get_version_tag()
+    user_trade_xlsx = run_dir / f"account_trades_{_vtag}.xlsx"
     with pd.ExcelWriter(user_trade_xlsx, engine="openpyxl") as writer:
         user_trade_df.to_excel(writer, sheet_name="BTC", index=False)
 
     market_trade_df = pd.DataFrame(market_rows)
-    market_trade_xlsx = run_dir / "market_trades_raw.xlsx"
+    market_trade_xlsx = run_dir / f"market_trades_raw_{_vtag}.xlsx"
     with pd.ExcelWriter(market_trade_xlsx, engine="openpyxl") as writer:
         market_trade_df.to_excel(writer, sheet_name="BTC", index=False)
 
-    analyzed_xlsx = run_dir / "account_trades_analyzed.xlsx"
+    analyzed_xlsx = run_dir / f"account_trades_analyzed_{_vtag}.xlsx"
     if user_trade_df.empty:
         print("[review] 该周期未抓到账号成交，跳过 analyze_polymarket_tracker.py。", flush=True)
     else:

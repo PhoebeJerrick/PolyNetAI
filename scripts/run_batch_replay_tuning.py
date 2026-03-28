@@ -16,6 +16,7 @@ if str(SRC) not in sys.path:
 
 from polynet_ai.adapters.trade_event_store import load_recorded_trade_events
 from polynet_ai.engine.replay import ReplayEngine
+from polynet_ai.reporting.excel_export import get_version_tag
 from polynet_ai.strategy.spec import load_strategy_config
 
 
@@ -358,7 +359,7 @@ def main() -> int:
         ignore_index=True,
     )
     ordered.to_csv(output_dir / "tuning_summary.csv", index=False, encoding="utf-8-sig")
-    with pd.ExcelWriter(output_dir / "tuning_summary.xlsx", engine="openpyxl") as writer:
+    with pd.ExcelWriter(output_dir / f"tuning_summary_{get_version_tag()}.xlsx", engine="openpyxl") as writer:
         ordered.to_excel(writer, sheet_name="summary", index=False)
 
     top_k = max(args.top_k, 1)

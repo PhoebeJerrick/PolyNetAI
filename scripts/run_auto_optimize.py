@@ -15,7 +15,7 @@ if str(SRC) not in sys.path:
 
 from polynet_ai.adapters.excel_loader import load_excel_events
 from polynet_ai.engine.replay import ReplayEngine
-from polynet_ai.reporting.excel_export import export_replay_to_excel
+from polynet_ai.reporting.excel_export import export_replay_to_excel, get_version_tag
 from polynet_ai.reporting.experiments import build_experiment_frame, build_experiment_row
 from polynet_ai.strategy.optimize import (
     compute_score,
@@ -75,7 +75,8 @@ def main() -> int:
         ascending=[False, False, False],
     )
     leaderboard.to_csv(output_dir / "optimization_leaderboard.csv", index=False, encoding="utf-8-sig")
-    with pd.ExcelWriter(output_dir / "optimization_leaderboard.xlsx", engine="openpyxl") as writer:
+    _vtag = get_version_tag()
+    with pd.ExcelWriter(output_dir / f"optimization_leaderboard_{_vtag}.xlsx", engine="openpyxl") as writer:
         leaderboard.to_excel(writer, sheet_name="leaderboard", index=False)
 
     top_scenarios = leaderboard.head(max(1, study.export_top_n))["scenario"].tolist()
@@ -98,7 +99,7 @@ def main() -> int:
             result.cycle_df,
             result.decision_df,
             result.metrics_df,
-            scenario_dir / "replay_report.xlsx",
+            scenario_dir / f"replay_report_{_vtag}.xlsx",
         )
         result.cycle_df.to_csv(scenario_dir / "cycles.csv", index=False, encoding="utf-8-sig")
         result.decision_df.to_csv(scenario_dir / "decisions.csv", index=False, encoding="utf-8-sig")
