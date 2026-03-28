@@ -29,7 +29,7 @@ exposure:
   hedge_trigger_value: 12.0
   hedge_scale: 0.05
   max_grid_net_position: 10
-  max_strategy_trades_per_cycle: 80
+  max_strategy_trades_per_cycle: 40
 trend:
   min_trend_strength: 0.5
   trend_price_edge: 0.03
