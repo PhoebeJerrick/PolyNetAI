@@ -56,7 +56,7 @@ def parse_args() -> argparse.Namespace:
         default="fixed",
         help="周期资金处理模式：fixed=每周期固定本金并累计盈亏曲线，cumulative=跨周期累积资金",
     )
-    parser.add_argument("--pace-factor", type=float, default=10000.0)
+    parser.add_argument("--pace-factor", type=float, default=1000000.0)
     parser.add_argument("--max-sleep-seconds", type=float, default=0.25)
     parser.add_argument("--status-every", type=int, default=100)
     parser.add_argument("--limit", type=int, default=None)
