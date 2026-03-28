@@ -191,8 +191,15 @@ trim_trailing_cr() {
   printf '%s' "${s//$'\r'/}"
 }
 
+normalize_path_separators() {
+  local s="$1"
+  # 兼容 Windows 风格路径，统一使用 / 便于在 Linux 上判定目录存在性。
+  printf '%s' "${s//\\//}"
+}
+
 resolve_replay_data_stream_dir() {
   local requested_dir="$1"
+  requested_dir="$(normalize_path_separators "$(trim_trailing_cr "$requested_dir")")"
   local canonical_live_record_dir="$DEFAULT_OUTPUT_DIR/record_job_market"
   local legacy_live_record_dir="artifacts/live/record_job_market"
   local -a candidates=("$requested_dir")
@@ -559,6 +566,7 @@ except Exception:
     ;;
   mstart|batch-start)
     BATCH_FILE="${BATCH_FILE_ARG:-$DEFAULT_BATCH_FILE}"
+    BATCH_FILE="$(normalize_path_separators "$BATCH_FILE")"
     if [[ ! -f "$BATCH_FILE" ]]; then
       echo "错误: 批量任务配置文件不存在: $BATCH_FILE" >&2
       echo "" >&2
@@ -615,6 +623,9 @@ except Exception:
         job_per_cycle="${fields[5]:--}"
         job_data_stream_dir="${fields[6]:--}"
       fi
+      job_config="$(normalize_path_separators "$job_config")"
+      job_output_dir_spec="$(normalize_path_separators "$job_output_dir_spec")"
+      job_data_stream_dir="$(normalize_path_separators "$job_data_stream_dir")"
       [[ "$job_config" == "-" || -z "$job_config" ]] && job_config="$DEFAULT_CONFIG"
       [[ "$job_cash" == "-" || -z "$job_cash" ]] && job_cash="100"
       [[ "$job_per_cycle" == "-" || -z "$job_per_cycle" ]] && job_per_cycle=""
