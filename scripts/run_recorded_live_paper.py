@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -125,6 +126,81 @@ def iter_events_with_pacing(events, *, pace_factor: float, max_sleep_seconds: fl
         yield event
 
 
+class StreamingAggregator:
+    """流式聚合器，维护必要的跨周期指标"""
+
+    def __init__(self):
+        self.cycle_profits: list[float] = []
+        self.total_cycles = 0
+        self.total_profit = 0.0
+        self.win_count = 0
+        self.total_fees = 0.0
+
+    def update(self, cycle_row: dict) -> None:
+        """更新聚合指标"""
+        profit = float(cycle_row.get('cycle_net_profit', 0.0))
+        self.cycle_profits.append(profit)
+        self.total_cycles += 1
+        self.total_profit += profit
+        if profit > 0:
+            self.win_count += 1
+
+    def compute_max_drawdown(self) -> float:
+        """计算最大回撤"""
+        if not self.cycle_profits:
+            return 0.0
+        cumsum = np.cumsum(self.cycle_profits)
+        running_max = np.maximum.accumulate(cumsum)
+        drawdown = running_max - cumsum
+        return float(np.max(drawdown))
+
+    def get_win_rate(self) -> float:
+        """计算胜率"""
+        if self.total_cycles == 0:
+            return 0.0
+        return self.win_count / self.total_cycles
+
+
+def write_cycle_results_incremental(
+    output_dir: Path,
+    cycle_idx: int,
+    cycle_row: dict,
+    decision_rows: list[dict],
+    snapshot_rows: list[dict],
+) -> None:
+    """将单个周期的结果增量写入CSV文件"""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 写入周期结果
+    cycle_csv = output_dir / "streaming_cycle_results.csv"
+    cycle_df = pd.DataFrame([cycle_row])
+    cycle_df['cycle_index'] = cycle_idx
+    if cycle_csv.exists():
+        cycle_df.to_csv(cycle_csv, mode='a', header=False, index=False)
+    else:
+        cycle_df.to_csv(cycle_csv, mode='w', header=True, index=False)
+
+    # 写入决策结果
+    if decision_rows:
+        decision_csv = output_dir / "streaming_decision_results.csv"
+        decision_df = pd.DataFrame(decision_rows)
+        decision_df['cycle_index'] = cycle_idx
+        if decision_csv.exists():
+            decision_df.to_csv(decision_csv, mode='a', header=False, index=False)
+        else:
+            decision_df.to_csv(decision_csv, mode='w', header=True, index=False)
+
+    # 写入快照结果（可选，数据量大）
+    # if snapshot_rows:
+    #     snapshot_csv = output_dir / "streaming_snapshot_results.csv"
+    #     snapshot_df = pd.DataFrame(snapshot_rows)
+    #     snapshot_df['cycle_index'] = cycle_idx
+    #     if snapshot_csv.exists():
+    #         snapshot_df.to_csv(snapshot_csv, mode='a', header=False, index=False)
+    #     else:
+    #         snapshot_df.to_csv(snapshot_csv, mode='w', header=True, index=False)
+
+
 def _build_summary_df(cycle_df: pd.DataFrame, decision_df: pd.DataFrame) -> pd.DataFrame:
     if cycle_df.empty:
         return pd.DataFrame(columns=["cycle_slug", "executed_trades", "accepted_signals", "blocked_signals", "total_net_profit", "total_fees", "winner", "account_cash"])
@@ -203,6 +279,164 @@ def _write_sim_batch_reports(
     )
     _cleanup_batch_replay_markdown(out_dir)
     return perf_xlsx, trade_xlsx
+
+
+def main_streaming() -> int:
+    """流式处理版本：逐周期加载和处理，避免内存累积"""
+    args = parse_args()
+    start_time = datetime.now()
+    print("\n" + "="*70)
+    print(f"[模拟下单测试 - 流式处理] 开始于 {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print("="*70)
+
+    print(f"\n[1/5] 加载输入数据...")
+    input_dir_parts = _parse_input_dirs(args.input_dirs)
+    if input_dir_parts:
+        input_dirs = [_resolve_input_dir(ROOT, raw) for raw in input_dir_parts]
+    else:
+        input_dirs = [_resolve_input_dir(ROOT, args.input_dir)]
+
+    missing = [p for p in input_dirs if not p.exists()]
+    if missing:
+        raise FileNotFoundError(f"输入目录不存在: {', '.join(str(p) for p in missing)}")
+    print(f"  ✓ 输入目录已验证: {', '.join(str(p.name) for p in input_dirs)}")
+
+    max_cycles = args.max_cycles if args.max_cycles and args.max_cycles > 0 else None
+
+    cycle_dirs = sorted(_load_cycle_dirs_from_input_dirs(input_dirs, args.cycle_glob), key=_cycle_sort_key)
+    if max_cycles is not None and max_cycles > 0:
+        cycle_dirs = cycle_dirs[:max_cycles]
+    print(f"  ✓ 发现 {len(cycle_dirs)} 个周期目录")
+
+    print(f"\n[2/5] 初始化回放引擎...")
+    engine = ReplayEngine.from_yaml(
+        args.config,
+        starting_cash=args.starting_cash,
+        capital_reset_mode=args.capital_reset_mode,
+        per_cycle_cash=args.per_cycle_cash,
+    )
+    runner = LivePaperRunner(engine)
+    print(
+        f"  ✓ 引擎已初始化，初始资金: {args.starting_cash} USDT | "
+        f"资金模式: {args.capital_reset_mode}"
+    )
+
+    # 初始化流式聚合器
+    aggregator = StreamingAggregator()
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n[3/5] 开始逐周期流式处理（共 {len(cycle_dirs)} 个周期）...")
+    run_start_time = datetime.now()
+
+    for cycle_idx, cycle_dir in enumerate(cycle_dirs, 1):
+        cycle_start = datetime.now()
+        event_path = cycle_dir / args.event_file_name
+
+        # 加载单个周期的事件
+        cycle_events = load_recorded_trade_events(event_path)
+        if not cycle_events:
+            print(f"  ⚠ 周期 {cycle_idx}/{len(cycle_dirs)} ({cycle_dir.name}): 无事件，跳过")
+            continue
+
+        sorted_events = sorted(cycle_events, key=lambda e: e.timestamp)
+        if args.limit is not None:
+            sorted_events = sorted_events[:args.limit]
+
+        # 处理单个周期
+        event_stream = iter_events_with_pacing(
+            sorted_events,
+            pace_factor=args.pace_factor,
+            max_sleep_seconds=args.max_sleep_seconds,
+        )
+
+        result = runner.run_stream(
+            event_stream,
+            status_every=args.status_every,
+            on_progress=None,
+            progress_interval_seconds=0.0,
+        )
+
+        # 提取周期结果
+        if not result.replay_result.cycle_df.empty:
+            cycle_row = result.replay_result.cycle_df.iloc[-1].to_dict()
+            decision_rows = result.replay_result.decision_df.to_dict('records')
+            snapshot_rows = result.snapshot_df.to_dict('records')
+
+            # 增量写入文件
+            write_cycle_results_incremental(
+                output_dir,
+                cycle_idx,
+                cycle_row,
+                decision_rows,
+                snapshot_rows
+            )
+
+            # 更新聚合指标
+            aggregator.update(cycle_row)
+
+            cycle_elapsed = (datetime.now() - cycle_start).total_seconds()
+            profit = cycle_row.get('cycle_net_profit', 0.0)
+            print(f"  ✓ 周期 {cycle_idx}/{len(cycle_dirs)} ({cycle_dir.name}): "
+                  f"{len(cycle_events)} 事件, 盈亏 {profit:.2f}, 耗时 {cycle_elapsed:.1f}s")
+
+        # 释放内存
+        del cycle_events, sorted_events, result
+
+    run_elapsed = (datetime.now() - run_start_time).total_seconds()
+    print(f"  ✓ 流式处理完成 (总耗时 {run_elapsed:.1f}s)")
+
+    print(f"\n[4/5] 从流式输出生成最终报告...")
+    # 读取流式输出文件
+    cycle_csv = output_dir / "streaming_cycle_results.csv"
+    decision_csv = output_dir / "streaming_decision_results.csv"
+
+    if cycle_csv.exists():
+        cycle_df = pd.read_csv(cycle_csv)
+        decision_df = pd.read_csv(decision_csv) if decision_csv.exists() else pd.DataFrame()
+
+        # 构建汇总数据
+        summary_df = _build_summary_df(cycle_df, decision_df)
+
+        # 生成报告
+        if args.include_trade_process:
+            trade_xlsx = write_batch_trade_process_zh(
+                input_dir=output_dir,
+                cycle_df=cycle_df,
+                decision_df=decision_df,
+                output_path=output_dir,
+            )
+            perf_xlsx = build_performance_report_zh(
+                resolved_batch_dir=output_dir,
+                summary_df=summary_df,
+                cycle_df=cycle_df,
+                decision_df=decision_df,
+                output_path=output_dir,
+                display_batch_dir=output_dir,
+                report_source="模拟下单测试（流式）",
+                report_name_prefix="simulation_streaming",
+                capital_reset_mode=args.capital_reset_mode,
+                starting_cash=args.starting_cash,
+            )
+            _cleanup_batch_replay_markdown(output_dir)
+            print(f"  ✓ 总绩效报告 (Excel): {perf_xlsx}")
+            print(f"  ✓ 交易过程 (Excel): {trade_xlsx}")
+        else:
+            print(f"  ✓ 流式输出文件已生成在: {output_dir}")
+
+    print(f"\n[5/5] 性能统计...")
+    total_elapsed = (datetime.now() - start_time).total_seconds()
+    print(f"  ✓ 总周期数: {aggregator.total_cycles}")
+    print(f"  ✓ 总盈亏: {aggregator.total_profit:.2f} USDT")
+    print(f"  ✓ 胜率: {aggregator.get_win_rate():.1%}")
+    print(f"  ✓ 最大回撤: {aggregator.compute_max_drawdown():.2f} USDT")
+    print(f"  ✓ 平均每周期耗时: {run_elapsed/max(1, aggregator.total_cycles):.1f}s")
+
+    print(f"\n{'='*70}")
+    print(f"[完成] 流式处理完成 | 周期数: {aggregator.total_cycles}")
+    print(f"      总耗时: {int(total_elapsed//60)}分 {total_elapsed%60:.0f}秒")
+    print(f"{'='*70}\n")
+    return 0
 
 
 def main() -> int:
@@ -326,4 +560,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # 默认使用流式处理版本以优化内存占用和性能
+    raise SystemExit(main_streaming())

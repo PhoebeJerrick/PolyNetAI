@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 
 from polynet_ai.domain.models import FillEvent
@@ -11,7 +12,7 @@ class Account:
     cash: float = 100.0
     reserved_cash: float = 0.0
     fees_paid: float = 0.0
-    fills: list[FillEvent] = field(default_factory=list)
+    fills: deque[FillEvent] = field(default_factory=lambda: deque(maxlen=1000))
 
     def __post_init__(self) -> None:
         self.cash = self.starting_cash
