@@ -68,10 +68,10 @@ profit_taking:
   take_profit_fraction: 0.3
 stop_loss:
   # 阶段性止损阈值（A+C联合方案）
-  phase_1_stop_loss_pct: 0.03      # 第一阶段（0-70s）：3%，建仓阶段需要容忍更大波动
-  phase_2_stop_loss_pct: 0.02      # 第二阶段（70-160s）：2%，已有仓位需要保护利润
-  phase_3_stop_loss_pct: 0.025     # 第三阶段（160-240s）：2.5%，加仓阶段需要一定容忍度
-  phase_4_stop_loss_pct: 0.015     # 第四阶段（240-290s）：1.5%，临近结束快速止损
+  phase_1_stop_loss_pct: 0.15      # 第一阶段（0-70s）：3%，建仓阶段需要容忍更大波动
+  phase_2_stop_loss_pct: 0.06      # 第二阶段（70-160s）：2%，已有仓位需要保护利润
+  phase_3_stop_loss_pct: 0.10     # 第三阶段（160-240s）：2.5%，加仓阶段需要一定容忍度
+  phase_4_stop_loss_pct: 0.05     # 第四阶段（240-290s）：1.5%，临近结束快速止损
 
   # 高波动止损（全阶段统一）
   high_vol_stop_loss_pct: 0.01     # 高波动时1%止损
