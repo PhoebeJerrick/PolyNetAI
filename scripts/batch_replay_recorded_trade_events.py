@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -92,6 +93,73 @@ def _discover_cycle_event_files(input_dir: Path) -> list[Path]:
     return files
 
 
+class StreamingAggregator:
+    """流式聚合器，维护必要的跨周期指标"""
+
+    def __init__(self):
+        self.cycle_profits: list[float] = []
+        self.total_cycles = 0
+        self.total_profit = 0.0
+        self.win_count = 0
+        self.total_fees = 0.0
+
+    def update(self, cycle_row: dict) -> None:
+        """更新聚合指标"""
+        profit = float(cycle_row.get('cycle_net_profit', 0.0))
+        self.cycle_profits.append(profit)
+        self.total_cycles += 1
+        self.total_profit += profit
+        if profit > 0:
+            self.win_count += 1
+
+    def compute_max_drawdown(self) -> float:
+        """计算最大回撤"""
+        if not self.cycle_profits:
+            return 0.0
+        cumsum = np.cumsum(self.cycle_profits)
+        running_max = np.maximum.accumulate(cumsum)
+        drawdown = running_max - cumsum
+        return float(np.max(drawdown))
+
+    def get_win_rate(self) -> float:
+        """计算胜率"""
+        if self.total_cycles == 0:
+            return 0.0
+        return self.win_count / self.total_cycles
+
+
+def write_cycle_results_incremental(
+    output_dir: Path,
+    cycle_idx: int,
+    cycle_slug: str,
+    cycle_row: dict,
+    decision_rows: list[dict],
+) -> None:
+    """将单个周期的结果增量写入CSV文件"""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 写入周期结果
+    cycle_csv = output_dir / "streaming_cycle_results.csv"
+    cycle_df = pd.DataFrame([cycle_row])
+    cycle_df['cycle_index'] = cycle_idx
+    cycle_df['cycle_slug'] = cycle_slug
+    if cycle_csv.exists():
+        cycle_df.to_csv(cycle_csv, mode='a', header=False, index=False)
+    else:
+        cycle_df.to_csv(cycle_csv, mode='w', header=True, index=False)
+
+    # 写入决策结果
+    if decision_rows:
+        decision_csv = output_dir / "streaming_decision_results.csv"
+        decision_df = pd.DataFrame(decision_rows)
+        decision_df['cycle_index'] = cycle_idx
+        decision_df['cycle_slug'] = cycle_slug
+        if decision_csv.exists():
+            decision_df.to_csv(decision_csv, mode='a', header=False, index=False)
+        else:
+            decision_df.to_csv(decision_csv, mode='w', header=True, index=False)
+
+
 def run_batch_replay(
     input_dir: str | Path,
     config_path: str | Path = "configs/strategy.yaml",
@@ -106,6 +174,7 @@ def run_batch_replay(
     report_source: str = "",
     max_cycles: int | None = None,
     report_name_prefix: str = "",
+    use_streaming: bool = True,  # 新增参数：默认使用流式处理
 ) -> Path | None:
     """核心 batch replay 逻辑，可被外部脚本调用。返回 Excel 绩效报告路径。"""
     input_resolved = _resolve_existing_path("输入目录", input_dir)
@@ -118,79 +187,166 @@ def run_batch_replay(
         raise RuntimeError(f"未在目录下找到任何 `<cycle_slug>/ws_trade_events.ndjson`: {input_resolved}")
     if max_cycles is not None and max_cycles > 0:
         event_files = event_files[-max_cycles:]
-    
+
     total_files = len(event_files)
     print(f"  ℹ 共需回放 {total_files} 个周期文件")
 
-    summary_rows: list[dict[str, object]] = []
-    cycle_parts: list[pd.DataFrame] = []
-    decision_parts: list[pd.DataFrame] = []
-
-    # 引擎内部根据 capital_reset_mode 处理周期资金：
-    # fixed: 每周期固定投注本金，但保留累计盈亏曲线；cumulative: 账户资金跨周期连续累积。
+    # 引擎内部根据 capital_reset_mode 处理周期资金
     engine = ReplayEngine(
         config,
         starting_cash=starting_cash,
         capital_reset_mode=capital_reset_mode,
         per_cycle_cash=per_cycle_cash,
     )
-    all_finalized_cycle_rows: list[dict[str, object]] = []
-    per_cycle_meta: dict[str, dict] = {}  # cycle_slug -> {event_count, decision_rows}
 
-    for idx, event_file in enumerate(event_files, 1):
-        cycle_slug = event_file.parent.name
+    if use_streaming:
+        # 流式处理模式：逐周期处理，增量输出
+        aggregator = StreamingAggregator()
 
-        events = load_recorded_trade_events(event_file)
-        if not events:
-            print(f"[skip] {cycle_slug}: 事件文件为空")
-            continue
+        for idx, event_file in enumerate(event_files, 1):
+            cycle_slug = event_file.parent.name
+            events = load_recorded_trade_events(event_file)
+            if not events:
+                print(f"[skip] {cycle_slug}: 事件文件为空")
+                continue
 
-        sorted_events = sorted(events, key=lambda e: (e.market_id, e.cycle_id, e.timestamp))
-        cycle_decisions: list[dict[str, object]] = []
+            sorted_events = sorted(events, key=lambda e: (e.market_id, e.cycle_id, e.timestamp))
+            cycle_decisions: list[dict[str, object]] = []
 
-        for event in sorted_events:
-            step = engine.process_event(event)
-            if step.finalized_cycle_row is not None:
-                all_finalized_cycle_rows.append(step.finalized_cycle_row)
-            cycle_decisions.append(step.decision_row)
+            for event in sorted_events:
+                step = engine.process_event(event)
+                cycle_decisions.append(step.decision_row)
 
-        per_cycle_meta[cycle_slug] = {
-            "event_count": len(events),
-            "decision_rows": cycle_decisions,
-        }
+            # 获取周期结果
+            if cycle_decisions:
+                cycle_row = {
+                    'cycle_id': cycle_slug,
+                    'cycle_net_profit': float(cycle_decisions[-1].get("cycle_net_profit", 0.0)),
+                    'winner': cycle_decisions[-1].get("winner", ""),
+                    'account_cash': cycle_decisions[-1].get("account_cash", None),
+                }
 
-        executed = sum(1 for d in cycle_decisions if d.get("executed"))
-        net_profit = float(cycle_decisions[-1].get("cycle_net_profit", 0.0)) if cycle_decisions else 0.0
-        print(
-            f"    [{idx}/{total_files}] {cycle_slug}: "
-            f"events={len(events)} | profit={net_profit:.4f} | "
-            f"executed={executed}"
-        )
+                # 增量写入文件
+                write_cycle_results_incremental(
+                    output_resolved,
+                    idx,
+                    cycle_slug,
+                    cycle_row,
+                    cycle_decisions
+                )
 
-    # 最后一个周期尚未被下一周期的事件触发结算，手动结算
-    pending = engine.finalize_pending_cycle()
-    if pending is not None:
-        all_finalized_cycle_rows.append(pending)
+                # 更新聚合指标
+                aggregator.update(cycle_row)
 
-    # 从结算行和决策行构建每周期汇总
-    for cycle_row in all_finalized_cycle_rows:
-        slug = str(cycle_row.get("cycle_id", ""))
-        meta = per_cycle_meta.get(slug, {})
-        decisions = meta.get("decision_rows", [])
+                executed = sum(1 for d in cycle_decisions if d.get("executed"))
+                net_profit = cycle_row['cycle_net_profit']
+                print(
+                    f"    [{idx}/{total_files}] {cycle_slug}: "
+                    f"events={len(events)} | profit={net_profit:.4f} | "
+                    f"executed={executed}"
+                )
 
-        cdf = pd.DataFrame([cycle_row])
-        cdf["cycle_slug"] = slug
-        cycle_parts.append(cdf)
+            # 释放内存
+            del events, sorted_events, cycle_decisions
 
-        if decisions:
-            ddf = pd.DataFrame(decisions)
-            ddf["cycle_slug"] = slug
-            decision_parts.append(ddf)
+        # 最后一个周期结算
+        pending = engine.finalize_pending_cycle()
+        if pending:
+            print(f"  ℹ 最后周期已结算")
 
-        total_fees = sum(float(d.get("fill_fee", 0)) for d in decisions)
-        net_profit = float(cycle_row.get("cycle_net_profit", 0.0))
-        summary_rows.append(
-            {
+        # 从流式输出文件读取数据生成报告
+        cycle_csv = output_resolved / "streaming_cycle_results.csv"
+        decision_csv = output_resolved / "streaming_decision_results.csv"
+
+        if cycle_csv.exists():
+            cycle_df = pd.read_csv(cycle_csv)
+            decision_df = pd.read_csv(decision_csv) if decision_csv.exists() else pd.DataFrame()
+
+            # 构建汇总数据
+            summary_rows = []
+            for _, row in cycle_df.iterrows():
+                slug = str(row.get('cycle_slug', ''))
+                cycle_decisions = decision_df[decision_df['cycle_slug'] == slug].to_dict('records') if not decision_df.empty else []
+
+                total_fees = sum(float(d.get("fill_fee", 0)) for d in cycle_decisions)
+                net_profit = float(row.get("cycle_net_profit", 0.0))
+                summary_rows.append({
+                    "cycle_slug": slug,
+                    "event_count": 0,  # 流式模式下不记录事件数
+                    "executed_trades": sum(1 for d in cycle_decisions if d.get("executed")),
+                    "accepted_signals": sum(1 for d in cycle_decisions if d.get("risk_status") == "accepted"),
+                    "blocked_signals": sum(1 for d in cycle_decisions if d.get("risk_status") == "blocked"),
+                    "total_net_profit": net_profit,
+                    "total_fees": total_fees,
+                    "win_rate": 1.0 if net_profit > 0 else 0.0,
+                    "winner": row.get("winner", ""),
+                    "account_cash": row.get("account_cash", None),
+                })
+
+            summary_df = pd.DataFrame(summary_rows)
+        else:
+            summary_df = pd.DataFrame()
+            cycle_df = pd.DataFrame()
+            decision_df = pd.DataFrame()
+
+    else:
+        # 原有的一次性加载模式（保留作为备份）
+        summary_rows: list[dict[str, object]] = []
+        cycle_parts: list[pd.DataFrame] = []
+        decision_parts: list[pd.DataFrame] = []
+        all_finalized_cycle_rows: list[dict[str, object]] = []
+        per_cycle_meta: dict[str, dict] = {}
+
+        for idx, event_file in enumerate(event_files, 1):
+            cycle_slug = event_file.parent.name
+            events = load_recorded_trade_events(event_file)
+            if not events:
+                print(f"[skip] {cycle_slug}: 事件文件为空")
+                continue
+
+            sorted_events = sorted(events, key=lambda e: (e.market_id, e.cycle_id, e.timestamp))
+            cycle_decisions: list[dict[str, object]] = []
+
+            for event in sorted_events:
+                step = engine.process_event(event)
+                if step.finalized_cycle_row is not None:
+                    all_finalized_cycle_rows.append(step.finalized_cycle_row)
+                cycle_decisions.append(step.decision_row)
+
+            per_cycle_meta[cycle_slug] = {
+                "event_count": len(events),
+                "decision_rows": cycle_decisions,
+            }
+
+            executed = sum(1 for d in cycle_decisions if d.get("executed"))
+            net_profit = float(cycle_decisions[-1].get("cycle_net_profit", 0.0)) if cycle_decisions else 0.0
+            print(
+                f"    [{idx}/{total_files}] {cycle_slug}: "
+                f"events={len(events)} | profit={net_profit:.4f} | "
+                f"executed={executed}"
+            )
+
+        pending = engine.finalize_pending_cycle()
+        if pending is not None:
+            all_finalized_cycle_rows.append(pending)
+
+        for cycle_row in all_finalized_cycle_rows:
+            slug = str(cycle_row.get("cycle_id", ""))
+            meta = per_cycle_meta.get(slug, {})
+            decisions = meta.get("decision_rows", [])
+
+            cdf = pd.DataFrame([cycle_row])
+            cdf["cycle_slug"] = slug
+            cycle_parts.append(cdf)
+
+            if decisions:
+                ddf = pd.DataFrame(decisions)
+                ddf["cycle_slug"] = slug
+                decision_parts.append(ddf)
+
+            total_fees = sum(float(d.get("fill_fee", 0)) for d in decisions)
+            net_profit = float(cycle_row.get("cycle_net_profit", 0.0))
+            summary_rows.append({
                 "cycle_slug": slug,
                 "event_count": meta.get("event_count", 0),
                 "executed_trades": sum(1 for d in decisions if d.get("executed")),
@@ -201,16 +357,15 @@ def run_batch_replay(
                 "win_rate": 1.0 if net_profit > 0 else 0.0,
                 "winner": cycle_row.get("winner", ""),
                 "account_cash": cycle_row.get("account_cash", None),
-            }
-        )
+            })
 
-    summary_df = pd.DataFrame(summary_rows)
-    if not summary_df.empty:
-        summary_df = summary_df.sort_values("cycle_slug").reset_index(drop=True)
-    cycle_df = pd.concat(cycle_parts, ignore_index=True) if cycle_parts else pd.DataFrame()
-    decision_df = pd.concat(decision_parts, ignore_index=True) if decision_parts else pd.DataFrame()
+        summary_df = pd.DataFrame(summary_rows)
+        if not summary_df.empty:
+            summary_df = summary_df.sort_values("cycle_slug").reset_index(drop=True)
+        cycle_df = pd.concat(cycle_parts, ignore_index=True) if cycle_parts else pd.DataFrame()
+        decision_df = pd.concat(decision_parts, ignore_index=True) if decision_parts else pd.DataFrame()
 
-    # 根据参数决定是否生成交易过程 Excel
+    # 生成报告（流式和非流式共用）
     trade_xlsx: Path | None = None
     if include_trade_process:
         trade_xlsx = write_batch_trade_process_zh(
@@ -237,8 +392,7 @@ def run_batch_replay(
     _cleanup_batch_replay_markdown(output_resolved)
 
     print(f"  ✓ 回放完成，共 {len(summary_df)} 个周期")
-    
-    # 验证报告文件是否存在
+
     if xlsx_report.exists():
         print(f"  ✓ 绩效报告: {xlsx_report}")
         return xlsx_report
@@ -248,7 +402,6 @@ def run_batch_replay(
             f"     请检查 {output_resolved} 目录是否包含文件。",
             file=sys.stderr,
         )
-        # 列出输出目录中的文件供调试
         if output_resolved.exists():
             files = list(output_resolved.glob("*.xlsx"))
             if files:
