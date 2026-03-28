@@ -12,11 +12,13 @@ set -e
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 
-# 优先使用项目 venv，回退到系统 python3 / python
+# 优先使用统一虚拟环境 .projects-venv（当前仓库位于 Projects/PolyMkt/PolyNetAI），回退到系统 python3 / python
 PYTHON=""
 for candidate in \
-    "$REPO_ROOT/.venv/Scripts/python" \
-    "$REPO_ROOT/.venv/bin/python3" \
+    "$REPO_ROOT/../../.projects-venv/Scripts/python.exe" \
+    "$REPO_ROOT/../../.projects-venv/bin/python3" \
+    "$REPO_ROOT/../.projects-venv/Scripts/python.exe" \
+    "$REPO_ROOT/../.projects-venv/bin/python3" \
     "python3" \
     "python"; do
     if command -v "$candidate" &>/dev/null 2>&1 || [ -f "$candidate" ]; then

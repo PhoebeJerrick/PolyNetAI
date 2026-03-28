@@ -203,6 +203,12 @@ def run_batch_replay(
         # 流式处理模式：逐周期处理，增量输出
         aggregator = StreamingAggregator()
 
+        # 清理上次运行残留的流式 CSV，避免追加导致列数不一致
+        for _stale in ("streaming_cycle_results.csv", "streaming_decision_results.csv"):
+            _stale_path = output_resolved / _stale
+            if _stale_path.exists():
+                _stale_path.unlink()
+
         for idx, event_file in enumerate(event_files, 1):
             cycle_slug = event_file.parent.name
             events = load_recorded_trade_events(event_file)

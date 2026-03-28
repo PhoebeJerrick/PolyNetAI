@@ -17,10 +17,7 @@ coverage.xml
 .nox/
 
 # --- Virtual environments ---
-.venv/
-venv/
-ENV/
-env/
+.projects-venv/
 
 # --- Build / packaging ---
 build/

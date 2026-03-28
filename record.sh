@@ -185,6 +185,12 @@ stop_pid_file() {
   rm -f "$pid_file"
 }
 
+trim_trailing_cr() {
+  local s="$1"
+  # 兼容 Windows CRLF 配置/注册表文件，移除整行中的 \r，避免污染路径参数。
+  printf '%s' "${s//$'\r'/}"
+}
+
 resolve_replay_data_stream_dir() {
   local requested_dir="$1"
   local canonical_live_record_dir="$DEFAULT_OUTPUT_DIR/record_job_market"
@@ -573,6 +579,7 @@ except Exception:
     if [[ -f "$BATCH_REGISTRY" ]]; then
       LIVE_ENTRIES=""
       while IFS= read -r reg_line || [[ -n "$reg_line" ]]; do
+        reg_line="$(trim_trailing_cr "$reg_line")"
         [[ "$reg_line" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${reg_line// }" ]] && continue
         read -ra reg_fields <<< "$reg_line"
@@ -586,6 +593,7 @@ except Exception:
     echo "读取批量任务配置: $BATCH_FILE"
     echo ""
     while IFS= read -r line || [[ -n "$line" ]]; do
+      line="$(trim_trailing_cr "$line")"
       [[ "$line" =~ ^[[:space:]]*# ]] && continue
       [[ -z "${line// }" ]] && continue
       read -ra fields <<< "$line"
@@ -711,6 +719,7 @@ except Exception:
     TOTAL=0
     RUNNING=0
     while IFS= read -r reg_line || [[ -n "$reg_line" ]]; do
+      reg_line="$(trim_trailing_cr "$reg_line")"
       [[ "$reg_line" =~ ^[[:space:]]*# ]] && continue
       [[ -z "${reg_line// }" ]] && continue
       read -ra reg_fields <<< "$reg_line"
@@ -726,6 +735,10 @@ except Exception:
       reg_progress_total="${reg_cycles:-0}"
       reg_progress_dir="$(dirname "$reg_log")"
       reg_cycles_csv="$reg_progress_dir/cycles.csv"
+      # 流式模式写入 streaming_cycle_results.csv 而非 cycles.csv
+      if [[ ! -f "$reg_cycles_csv" ]]; then
+        reg_cycles_csv="$reg_progress_dir/streaming_cycle_results.csv"
+      fi
       if [[ -f "$reg_cycles_csv" ]]; then
         reg_progress_completed="$(tail -n +2 "$reg_cycles_csv" 2>/dev/null | sed '/^[[:space:]]*$/d' | wc -l | tr -d '[:space:]')"
         [[ -z "$reg_progress_completed" ]] && reg_progress_completed="0"
@@ -781,6 +794,7 @@ except Exception:
     fi
     STOP_COUNT=0
     while IFS= read -r reg_line || [[ -n "$reg_line" ]]; do
+      reg_line="$(trim_trailing_cr "$reg_line")"
       [[ "$reg_line" =~ ^[[:space:]]*# ]] && continue
       [[ -z "${reg_line// }" ]] && continue
       read -ra reg_fields <<< "$reg_line"

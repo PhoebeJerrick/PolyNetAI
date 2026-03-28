@@ -174,7 +174,10 @@ def write_cycle_results_incremental(
     # 写入周期结果
     cycle_csv = output_dir / "streaming_cycle_results.csv"
     cycle_df = pd.DataFrame([cycle_row])
+    cycle_slug = str(cycle_row.get("cycle_slug") or cycle_row.get("cycle_id") or "")
     cycle_df['cycle_index'] = cycle_idx
+    if "cycle_slug" not in cycle_df.columns:
+        cycle_df['cycle_slug'] = cycle_slug
     if cycle_csv.exists():
         cycle_df.to_csv(cycle_csv, mode='a', header=False, index=False)
     else:
@@ -185,6 +188,8 @@ def write_cycle_results_incremental(
         decision_csv = output_dir / "streaming_decision_results.csv"
         decision_df = pd.DataFrame(decision_rows)
         decision_df['cycle_index'] = cycle_idx
+        if "cycle_slug" not in decision_df.columns:
+            decision_df['cycle_slug'] = cycle_slug
         if decision_csv.exists():
             decision_df.to_csv(decision_csv, mode='a', header=False, index=False)
         else:
@@ -326,6 +331,12 @@ def main_streaming() -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # 清理上次运行残留的流式 CSV，避免追加导致列数不一致
+    for _stale in ("streaming_cycle_results.csv", "streaming_decision_results.csv"):
+        _stale_path = output_dir / _stale
+        if _stale_path.exists():
+            _stale_path.unlink()
+
     print(f"\n[3/5] 开始逐周期流式处理（共 {len(cycle_dirs)} 个周期）...")
     run_start_time = datetime.now()
 
@@ -394,6 +405,12 @@ def main_streaming() -> int:
     if cycle_csv.exists():
         cycle_df = pd.read_csv(cycle_csv)
         decision_df = pd.read_csv(decision_csv) if decision_csv.exists() else pd.DataFrame()
+
+        # 兼容旧版流式输出：若缺失 cycle_slug，则从 cycle_id 补齐。
+        if not cycle_df.empty and "cycle_slug" not in cycle_df.columns and "cycle_id" in cycle_df.columns:
+            cycle_df["cycle_slug"] = cycle_df["cycle_id"].astype(str)
+        if not decision_df.empty and "cycle_slug" not in decision_df.columns and "cycle_id" in decision_df.columns:
+            decision_df["cycle_slug"] = decision_df["cycle_id"].astype(str)
 
         # 构建汇总数据
         summary_df = _build_summary_df(cycle_df, decision_df)
