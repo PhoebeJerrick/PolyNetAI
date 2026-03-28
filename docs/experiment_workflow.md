@@ -165,7 +165,7 @@ parameters:
 当你想观察策略在“持续到来的事件流”上的行为时，可以使用 `scripts/run_live_paper.py`。它会逐条消费事件、按可选节奏回放、打印运行状态，并输出滚动快照。
 
 ```bash
-python scripts/run_live_paper.py --input data/raw/polymarket_tracker_collection.xlsx --sheet BTC --config configs/strategy.yaml --output-dir artifacts/live/live_outputs_btc --pace-factor 20 --status-every 100
+python scripts/run_live_paper.py --input data/raw/polymarket_tracker_collection.xlsx --sheet BTC --config configs/strategy.yaml --output-dir artifacts/live/live_outputs_btc --pace-factor 10000 --status-every 100
 ```
 
 关键参数：

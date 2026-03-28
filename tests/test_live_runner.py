@@ -40,8 +40,8 @@ def test_live_runner_generates_snapshots_and_cycle_output() -> None:
     runner = LivePaperRunner(ReplayEngine(build_config()))
     result = runner.run(
         events,
-        pace_factor=10.0,
-        max_sleep_seconds=0.01,
+        pace_factor=0.0,
+        max_sleep_seconds=0.0001,
         status_every=0,
         sleep_fn=sleeps.append,
     )

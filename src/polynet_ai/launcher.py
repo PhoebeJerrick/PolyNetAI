@@ -196,7 +196,7 @@ def build_launch_profiles(
                 "--output-dir",
                 dashboard_output,
                 "--pace-factor",
-                "20",
+                "10000",
                 "--status-every",
                 "100",
                 "--dashboard-refresh-seconds",
