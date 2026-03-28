@@ -197,6 +197,36 @@ normalize_path_separators() {
   printf '%s' "${s//\\//}"
 }
 
+is_batch_job_process_alive() {
+  local pid="$1"
+  local job_type="${2:-replay}"
+  if [[ -z "$pid" ]]; then
+    return 1
+  fi
+  if ! kill -0 "$pid" 2>/dev/null; then
+    return 1
+  fi
+
+  # 仅用 kill -0 容易受到 PID 复用影响；补充命令行校验，避免误报/误杀。
+  local expected_script="run_recorded_live_paper.py"
+  if [[ "$job_type" == "live" ]]; then
+    expected_script="run_polymarket_live_paper.py"
+  fi
+  local cmdline
+  cmdline="$(ps -p "$pid" -o args= 2>/dev/null | head -n 1 || true)"
+  cmdline="$(trim_trailing_cr "$cmdline")"
+
+  # 某些平台上 ps 可能不可用或无输出，此时回退为 kill -0 结果。
+  if [[ -z "${cmdline// }" ]]; then
+    return 0
+  fi
+
+  if [[ "$cmdline" == *"$expected_script"* ]]; then
+    return 0
+  fi
+  return 1
+}
+
 resolve_replay_data_stream_dir() {
   local requested_dir="$1"
   requested_dir="$(normalize_path_separators "$(trim_trailing_cr "$requested_dir")")"
@@ -592,7 +622,8 @@ except Exception:
         [[ -z "${reg_line// }" ]] && continue
         read -ra reg_fields <<< "$reg_line"
         reg_pid="${reg_fields[0]:-}"
-        if [[ -n "$reg_pid" ]] && kill -0 "$reg_pid" 2>/dev/null; then
+        reg_job_type="${reg_fields[7]:-replay}"
+        if is_batch_job_process_alive "$reg_pid" "$reg_job_type"; then
           LIVE_ENTRIES="${LIVE_ENTRIES}${reg_line}"$'\n'
         fi
       done < "$BATCH_REGISTRY"
@@ -663,7 +694,7 @@ except Exception:
       fi
       if [[ -f "$JOB_PID_FILE" ]]; then
         old_job_pid=$(cat "$JOB_PID_FILE" 2>/dev/null | tr -d '[:space:]')
-        if [[ -n "$old_job_pid" ]] && kill -0 "$old_job_pid" 2>/dev/null; then
+        if is_batch_job_process_alive "$old_job_pid" "$job_type"; then
           echo "任务 $BATCH_JOB_INDEX: 跳过，$job_output_dir 已有任务在运行 (pid=$old_job_pid)"
           continue
         fi
@@ -755,8 +786,12 @@ except Exception:
         [[ -z "$reg_progress_completed" ]] && reg_progress_completed="0"
       fi
       TOTAL=$((TOTAL + 1))
-      if [[ -n "$reg_pid" ]] && kill -0 "$reg_pid" 2>/dev/null; then
-        status_str="运行中"
+      if is_batch_job_process_alive "$reg_pid" "$reg_job_type"; then
+        if [[ "$reg_progress_total" =~ ^[0-9]+$ ]] && [[ "$reg_progress_completed" =~ ^[0-9]+$ ]] && [[ "$reg_progress_completed" -ge "$reg_progress_total" ]]; then
+          status_str="收尾中"
+        else
+          status_str="运行中"
+        fi
         RUNNING=$((RUNNING + 1))
       else
         status_str="已结束"
@@ -811,14 +846,17 @@ except Exception:
       read -ra reg_fields <<< "$reg_line"
       reg_pid="${reg_fields[0]:-}"
       reg_output_dir="${reg_fields[1]:-}"
-      if [[ -n "$reg_pid" ]] && kill -0 "$reg_pid" 2>/dev/null; then
+      reg_job_type="${reg_fields[7]:-replay}"
+      if is_batch_job_process_alive "$reg_pid" "$reg_job_type"; then
         kill "$reg_pid" 2>/dev/null || true
         sleep 0.5
-        if kill -0 "$reg_pid" 2>/dev/null; then
+        if is_batch_job_process_alive "$reg_pid" "$reg_job_type"; then
           kill -9 "$reg_pid" 2>/dev/null || true
         fi
         echo "任务已停止 (pid=$reg_pid, 目录=$reg_output_dir)"
         STOP_COUNT=$((STOP_COUNT + 1))
+      elif [[ -n "$reg_pid" ]] && kill -0 "$reg_pid" 2>/dev/null; then
+        echo "跳过停止: pid=$reg_pid 当前不是批量任务进程（疑似 PID 已复用）"
       fi
       rm -f "$reg_output_dir/market_paper.pid" 2>/dev/null || true
     done < "$BATCH_REGISTRY"
