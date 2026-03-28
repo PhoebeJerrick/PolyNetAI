@@ -19,6 +19,7 @@ def _router_config() -> StrategyConfig:
                 "vwap_epsilon": 0.01,
                 "range_low_fraction": 0.35,
                 "min_range_width": 0.02,
+                "min_market_trades": 1,
                 "infer_missing_with_binary_complement": True,
             },
             "order_sizing": {

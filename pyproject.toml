@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "polynet-ai"
-version = "0.1.10"
+version = "0.1.11"
 description = "Polymarket 5-minute paper trading research framework."
 readme = "docs/strategy_spec.md"
 requires-python = ">=3.11"
@@ -23,3 +23,7 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+# 使用项目内临时目录，避免 Windows 系统 Temp 权限问题
+addopts = "--basetemp=artifacts/pytest_tmp"

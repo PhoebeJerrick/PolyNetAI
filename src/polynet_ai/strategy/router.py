@@ -19,9 +19,48 @@ from polynet_ai.strategy.exit_rules import (
     stop_loss_exits,
     take_profit_exits,
 )
+from polynet_ai.strategy.cycle_windows import calculate_position_percentage, determine_phase
 from polynet_ai.strategy.features import snapshot_with_effective_price, snapshot_with_effective_quotes
 from polynet_ai.strategy.last_minute import build_last_minute_candidate
 from polynet_ai.strategy.spec import StrategyConfig
+
+
+def adjust_priority_by_phase(
+    intent: OrderIntent,
+    features: FeatureSnapshot,
+    config: StrategyConfig,
+) -> None:
+    """
+    根据阶段和仓位状态动态调整规则优先级（A+C联合方案 — 方案C）
+
+    直接修改 intent.priority（原地修改，无返回值）。
+    Phase 4 不做调整，使用基础优先级。
+    """
+    phase = determine_phase(features.cycle_elapsed_seconds)
+    if phase == 4:
+        return
+
+    pos_pct = calculate_position_percentage(features, config)
+
+    if phase == 1:
+        threshold = float(config.get("dynamic_priority.phase_1_position_threshold", 0.65))
+        boost = int(config.get("dynamic_priority.phase_1_boost", 15))
+        if pos_pct < threshold and intent.action == "buy" and intent.category in ("opening", "mean_reversion"):
+            intent.priority -= boost
+
+    elif phase == 2:
+        threshold = float(config.get("dynamic_priority.phase_2_position_threshold", 0.50))
+        boost = int(config.get("dynamic_priority.phase_2_boost", 15))
+        if pos_pct > threshold and intent.action == "sell" and intent.category in ("grid", "take_profit"):
+            intent.priority -= boost
+
+    elif phase == 3:
+        threshold = float(config.get("dynamic_priority.phase_3_position_threshold", 0.85))
+        if pos_pct < threshold and intent.action == "buy":
+            if intent.category == "trend":
+                intent.priority -= int(config.get("dynamic_priority.phase_3_trend_boost", 25))
+            elif intent.category == "grid":
+                intent.priority -= int(config.get("dynamic_priority.phase_3_grid_boost", 15))
 
 
 # 优化 #4：辅助函数用于规则执行（可被序列化）
@@ -153,5 +192,10 @@ class StrategyRouter:
         for candidate in candidates:
             candidate.metadata["strategy_trades"] = strategy_trades
         candidates = [candidate for candidate in candidates if candidate.shares > 0]
+
+        # A+C联合方案：根据阶段和仓位动态调整优先级
+        for candidate in candidates:
+            adjust_priority_by_phase(candidate, features, self.config)
+
         candidates.sort(key=lambda item: (item.priority, -item.shares))
         return DecisionOutcome(selected=candidates[0] if candidates else None, candidates=candidates)

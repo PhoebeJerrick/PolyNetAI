@@ -151,6 +151,7 @@ def test_take_profit_down_sell_triggers_on_positive_deviation() -> None:
             "up_held": 0.0,
             "down_held": 10.0,
             "down_deviation": 0.25,
+            "down_last_price": 0.6,
             "unrealized_down_pnl": 1.0,
         }
     )

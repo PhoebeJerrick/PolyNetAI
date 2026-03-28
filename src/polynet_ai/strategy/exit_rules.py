@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from polynet_ai.domain.models import FeatureSnapshot, OrderIntent
-from polynet_ai.strategy.cycle_windows import rule_disabled_in_cycle_tail
+from polynet_ai.strategy.cycle_windows import determine_phase, rule_disabled_in_cycle_tail
 from polynet_ai.strategy.spec import StrategyConfig
 from polynet_ai.strategy.price_reference import outcome_reference_price
 
@@ -117,11 +117,17 @@ def stop_loss_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[O
             )
         return [intent for intent in intents if intent.shares > 0]
     
-    # 机制2: 基于百分比的激进止损 (新增)
-    stop_loss_pct = float(config.get("stop_loss.stop_loss_pct", 0.02))
+    # 机制2: 基于百分比的激进止损 — 使用阶段性止损阈值（A+C联合方案）
+    stop_loss_pct_fallback = float(config.get("stop_loss.stop_loss_pct", 0.02))
     high_vol_stop_loss_pct = float(config.get("stop_loss.high_vol_stop_loss_pct", 0.01))
 
-    # 根据波动率调整止损百分比
+    # 根据周期阶段获取对应的止损阈值
+    phase = determine_phase(features.cycle_elapsed_seconds)
+    stop_loss_pct = float(
+        config.get(f"stop_loss.phase_{phase}_stop_loss_pct", stop_loss_pct_fallback)
+    )
+
+    # 根据波动率调整止损百分比（高波动止损全阶段统一）
     volatility_threshold = 1.5
     effective_stop_loss_pct = high_vol_stop_loss_pct if features.volatility_ratio > volatility_threshold else stop_loss_pct
 

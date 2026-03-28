@@ -7,6 +7,7 @@ from openpyxl import load_workbook
 from polynet_ai.domain.models import FillEvent, TradeEvent
 from polynet_ai.engine.live import LivePaperRunner, export_live_result
 from polynet_ai.engine.replay import ReplayEngine
+from polynet_ai.reporting.excel_export import get_version_tag
 from polynet_ai.strategy.spec import StrategyConfig
 
 
@@ -162,7 +163,7 @@ def test_export_live_result_writes_trade_ledger_excel(tmp_path) -> None:
         ),
         output_dir=tmp_path,
     )
-    workbook = load_workbook(result / "trade_ledger.xlsx", read_only=True)
+    workbook = load_workbook(result / f"trade_ledger_{get_version_tag()}.xlsx", read_only=True)
     assert workbook.sheetnames == ["BTC"]
     rows = list(workbook["BTC"].iter_rows(values_only=True))
     assert rows[0][0] == "下注时间距开盘差(分，秒)"
