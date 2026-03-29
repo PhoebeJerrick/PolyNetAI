@@ -118,32 +118,7 @@ def opening_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[O
     ):
         return []
     
-    # 【改进3】市场状态确认 - 避免在极端波动下入场
-    max_volatility = float(config.get("opening_entry.max_volatility_for_entry", 2.0))
-    if features.volatility_ratio > max_volatility:
-        return []  # 波动率过高，不入场
-    
-    # 【改进4】置信度评分
-    # 计算入场置信度 (0-1): 
-    # - 市场成交笔数越多越好
-    # - 价格偏离中位数越远越好
-    # - 波动率越低越好
-    market_n = features.up_market_n if weak == "up" else features.down_market_n
-    confidence = 0.6  # 基础分
-    confidence += min(0.2, (market_n - 1) / 10)  # 最多+0.2
-    confidence += min(0.2, 1 - features.volatility_ratio / max_volatility)  # 最多+0.2
-    
-    # 只有置信度足够高才入场 (可以通过配置调整)
-    min_confidence = float(config.get("opening_entry.min_confidence", 0.65))
-    if confidence < min_confidence:
-        return []
-    
     size = _base_size(config, features)
-    
-    # 根据置信度调整头寸大小
-    size_multiplier = confidence / min_confidence  # 置信度越高，头寸越大
-    size = size * size_multiplier
-    
     ref = features.up_last_price if weak == "up" else features.down_last_price
     return [
         OrderIntent(
@@ -154,7 +129,7 @@ def opening_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[O
             shares=size,
             reference_price=ref,
             category="opening",
-            reason=f"开盘试探建仓：买入相对低价（{weak}方），多指标确认（置信度{confidence:.1%}）",
+            reason=f"开盘试探建仓：买入相对低价（{weak}方），流动性+价格时机确认",
             priority=int(config.priorities.get("opening", 52)),
         )
     ]
@@ -175,7 +150,7 @@ def trend_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Ord
     
     # 计算基础下单量
     base_size = _base_size(config, features)
-    trend_scale = float(config.get("trend.trend_scale", 0.15))
+    trend_scale = float(config.get("trend.trend_scale", 0.1))
     position_add = abs(features.net_position) * trend_scale
     size = base_size + position_add
     

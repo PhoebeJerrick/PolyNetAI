@@ -154,7 +154,7 @@ def snapshot_with_effective_price(
     price_percentile = _price_percentile(up_px, up_low, up_high)
     market_regime = (
         "trend"
-        if features.trend_strength >= 0.35 or abs(price_move) > features.volatility * 0.5
+        if features.trend_strength >= 0.50 or abs(price_move) > features.volatility * 0.5
         else "range"
     )
     confidence_proxy = _confidence_proxy(features.cycle_net_profit, price_move, features.volatility)
@@ -213,7 +213,7 @@ def snapshot_with_effective_quotes(
     price_percentile = _price_percentile(up_px, up_low, up_high)
     market_regime = (
         "trend"
-        if features.trend_strength >= 0.35 or abs(price_move) > features.volatility * 0.5
+        if features.trend_strength >= 0.50 or abs(price_move) > features.volatility * 0.5
         else "range"
     )
     confidence_proxy = _confidence_proxy(features.cycle_net_profit, price_move, features.volatility)
@@ -253,7 +253,7 @@ def build_feature_snapshot(
         trend_bias = state.consecutive_outcome
     trend_strength = state.consecutive_outcome_count / max(1, state.market_trades + state.strategy_trades)
     net_position_value = state.net_position_value()
-    market_regime = "trend" if trend_strength >= 0.35 or abs(price_move) > volatility * 0.5 else "range"
+    market_regime = "trend" if trend_strength >= 0.50 or abs(price_move) > volatility * 0.5 else "range"
     up_vwap = state.up_market_sum / state.up_market_n if state.up_market_n else 0.0
     down_vwap = state.down_market_sum / state.down_market_n if state.down_market_n else 0.0
     up_px, down_px = _resolve_outcome_prices(

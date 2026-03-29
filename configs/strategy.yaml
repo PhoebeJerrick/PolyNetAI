@@ -51,7 +51,7 @@ exposure:
 trend:
   min_trend_strength: 0.5
   trend_price_edge: 0.03
-  trend_scale: 0.05
+  trend_scale: 0.1
   max_trend_order_size: 80.0
 grid:
   grid_low_percentile: 0.25
