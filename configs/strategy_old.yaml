@@ -4,7 +4,7 @@ cycle:
 opening_entry:
   enabled: true
   window_seconds: 30
-  min_market_trades: 1
+  min_market_trades: 3
   vwap_epsilon: 0.01
   range_low_fraction: 0.35
   min_range_width: 0.02
@@ -70,7 +70,7 @@ last_minute:
 execution:
   fee_rate: 0.002
   slippage_bps: 5
-  min_seconds_between_orders: 2.0
+  min_seconds_between_orders: 1.0
   min_same_outcome_price_move_ratio: 0.03
 
 # 【新增】每日风险管理参数

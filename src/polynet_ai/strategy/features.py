@@ -248,10 +248,23 @@ def build_feature_snapshot(
     opening = state.opening_price or state.last_price
     price_move = state.last_price - opening
     volatility_ratio = volatility / opening if opening > 1e-10 else 0.0
-    trend_bias = None
-    if state.consecutive_outcome_count >= 2:
-        trend_bias = state.consecutive_outcome
-    trend_strength = state.consecutive_outcome_count / max(1, state.market_trades + state.strategy_trades)
+
+    # ── 趋势强度重设计：基于最近 N 笔市场成交的同向比例 ──────────────────────────────────
+    # 旧方案（连续计数/总数）在高频二元市场中永远 << 0.5，新方案用滑动窗口比例
+    _TREND_WINDOW = 30  # 最近 30 笔市场成交（仅市场交易，不含策略成交）
+    _recent_tape = list(engine.market_tape)[-_TREND_WINDOW:]
+    if len(_recent_tape) >= 3:
+        _up_count = sum(1 for t in _recent_tape if t.outcome == "up")
+        _total = len(_recent_tape)
+        _dominant_count = max(_up_count, _total - _up_count)
+        trend_strength = _dominant_count / _total
+        _up_dominant = _up_count > (_total - _up_count)
+        _down_dominant = (_total - _up_count) > _up_count
+        trend_bias: Outcome | None = "up" if _up_dominant else ("down" if _down_dominant else None)
+    else:
+        trend_strength = 0.0
+        trend_bias = None
+
     net_position_value = state.net_position_value()
     market_regime = "trend" if trend_strength >= 0.50 or abs(price_move) > volatility * 0.5 else "range"
     up_vwap = state.up_market_sum / state.up_market_n if state.up_market_n else 0.0
@@ -262,6 +275,12 @@ def build_feature_snapshot(
         state.last_price,
         infer_missing_with_binary_complement=True,
     )
+    # ── 反向价格联动推断：基于最新市场成交方向实时更新另一方向的隐含价格 ────────────────
+    # 确保 UP 价格上涨时 DOWN 持仓的止损/止盈 能基于最新推断价格而非陈旧的历史成交价
+    if state.market_last_outcome == "up" and state.up_last_price > 1e-9:
+        down_px = _clamp_binary_price(1.0 - state.up_last_price)
+    elif state.market_last_outcome == "down" and state.down_last_price > 1e-9:
+        up_px = _clamp_binary_price(1.0 - state.down_last_price)
     up_low, up_high = _implied_up_price_bounds(
         up_low=state.up_market_low,
         up_high=state.up_market_high,

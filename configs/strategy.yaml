@@ -22,7 +22,7 @@ dynamic_priority:
 opening_entry:
   enabled: true
   window_seconds: 30
-  min_market_trades: 1
+  min_market_trades: 3
   vwap_epsilon: 0.01
   range_low_fraction: 0.35
   min_range_width: 0.02
@@ -47,12 +47,13 @@ exposure:
   hedge_trigger_value: 12.0
   hedge_scale: 0.05
   max_grid_net_position: 10
-  max_strategy_trades_per_cycle: 40
+  max_strategy_trades_per_cycle: 80
 trend:
   min_trend_strength: 0.5
   trend_price_edge: 0.03
   trend_scale: 0.1
   max_trend_order_size: 80.0
+  trend_window: 30   # 最近N笔市场成交用于计算趋势强度
 grid:
   grid_low_percentile: 0.25
   grid_high_percentile: 0.75
@@ -149,8 +150,8 @@ last_minute:
 execution:
   fee_rate: 0.002
   slippage_bps: 5
-  min_seconds_between_orders: 1.0
-  min_same_outcome_price_move_ratio: 0.03
+  min_seconds_between_orders: 2.0
+  min_same_outcome_price_move_ratio: 0.005
 
 # 【新增】每日风险管理参数
 daily_limits:

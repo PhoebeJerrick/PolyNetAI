@@ -102,7 +102,7 @@ def opening_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[O
         return []
     
     # 【改进1】流动性检查 - 确保有足够的市场成交
-    min_market_trades = int(config.get("opening_entry.min_market_trades", 2))  # 增加到2笔
+    min_market_trades = int(config.get("opening_entry.min_market_trades", 2))
     if weak == "up" and features.up_market_n < min_market_trades:
         return []
     if weak == "down" and features.down_market_n < min_market_trades:

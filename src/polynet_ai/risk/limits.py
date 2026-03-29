@@ -102,14 +102,17 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
 
     min_gap = float(config.get("execution.min_seconds_between_orders", 2.0))
     if min_gap > 0:
-        last_at = _coerce_datetime(clipped.metadata.get("last_strategy_fill_at"))
+        # 按方向独立追踪下单间隔：买 UP 检查 up 最后成交时间，买/卖 DOWN 检查 down
+        direction_key = "last_strategy_fill_at_up" if clipped.outcome == "up" else "last_strategy_fill_at_down"
+        last_at = _coerce_datetime(clipped.metadata.get(direction_key))
         if last_at is not None:
             delta = (features.timestamp - last_at).total_seconds()
             if delta <= min_gap:
-                return RiskDecision(False, None, f"策略下单间隔不足{min_gap:g}秒")
+                return RiskDecision(False, None, f"策略下单间隔不足{min_gap:g}秒（{clipped.outcome}方向）")
 
-    min_move = float(config.get("execution.min_same_outcome_price_move_ratio", 0.03))
-    if min_move > 0 and clipped.reference_price > 1e-12:
+    # 价格波动检查：仅对买入单生效；卖出单（止盈/止损/减仓）不受此约束
+    min_move = float(config.get("execution.min_same_outcome_price_move_ratio", 0.005))
+    if clipped.action == "buy" and min_move > 0 and clipped.reference_price > 1e-12:
         key = "last_strategy_fill_price_up" if clipped.outcome == "up" else "last_strategy_fill_price_down"
         raw_last = clipped.metadata.get(key)
         if raw_last is not None:
@@ -118,13 +121,13 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
                 move = abs(clipped.reference_price - last_px) / last_px
                 if move <= min_move:
                     pct = min_move * 100.0
-                    return RiskDecision(False, None, f"同方向价格相对上次成交价波动不足{pct:g}%")
+                    return RiskDecision(False, None, f"同方向买入价格相对上次成交价波动不足{pct:g}%")
 
     if features.net_position_value and abs(features.net_position_value) > max_exposure and clipped.action == "buy":
         if clipped.category not in {"hedge", "last_minute"}:
             return RiskDecision(False, None, "净敞口已超限，仅允许对冲或尾盘调整")
 
-    if clipped.metadata.get("strategy_trades", 0) >= max_trades:
+    if clipped.metadata.get("strategy_trades", 0) >= max_trades and clipped.category != "last_minute":
         return RiskDecision(False, None, "本周期策略成交次数已达上限")
 
     projected_exposure = abs(features.net_position_value)

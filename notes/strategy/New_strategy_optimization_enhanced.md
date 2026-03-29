@@ -146,7 +146,7 @@
 - 时间窗口：开盘 10–30 秒内触发
 - 识别弱势方向（价格 < 0.5 的一侧），从弱势方向买入
 - **2 道确认门**，全部通过方执行：
-  - ① 流动性：弱势方向成交笔数 ≥ `min_market_trades`（默认 2）
+  - ① 流动性：弱势方向成交笔数 ≥ `min_market_trades`（默认 3）
   - ② 价格时机：价格 ≤ VWAP+ε 或处于价格区间低 35% 分位
 - 头寸 = `_base_size()` = `base_order_size(5)` + `volatility_ratio × volatility_order_scale(5)`
 
@@ -288,7 +288,7 @@
 - 周期前 30 秒内
 - 识别弱势一侧（价格 < 0.5 的方向）
 - **2 道确认门**（全部通过方执行）：
-  - 流动性：弱势方向成交笔数 ≥ `min_market_trades`（默认 2）
+  - 流动性：弱势方向成交笔数 ≥ `min_market_trades`（默认 3）
   - 价格时机：价格 ≤ VWAP + `vwap_epsilon(0.01)` 或处于低 35% 分位（`range_low_fraction`）
 
 **头寸计算**：
@@ -576,7 +576,7 @@ volatility_ratio = 当前波动率 / 历史平均波动率
 | `take_profit_fraction` | **0.30** | 单次止盈比例 |
 | `grid_exit_fraction` | 0.25 | 网格减仓比例 |
 | `mean_reversion_sell_fraction` | 0.40 | 均值回归减仓比例 |
-| `min_seconds_between_orders` | 2.0 | 同方向订单间隔（秒） |
+| `min_seconds_between_orders` | 1.0 | 同方向订单间隔（秒） |
 | `last_minute_seconds` | 30 | 最后收仓触发时长（秒） |
 | `last_minute_min_confidence` | 0.90 | 最后收仓置信度门槛 |
 | `max_tail_exposure` | 25 USDT | 尾部最大留仓敞口 |

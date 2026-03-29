@@ -320,7 +320,7 @@ def test_apply_risk_limits_blocks_when_order_interval_too_short() -> None:
         priority=10,
         metadata={
             "account_cash": 100.0,
-            "last_strategy_fill_at": datetime(2026, 3, 20, 12, 0, 2),
+            "last_strategy_fill_at_up": datetime(2026, 3, 20, 12, 0, 2),
         },
     )
     decision = apply_risk_limits(features, intent, build_config())
@@ -335,7 +335,7 @@ def test_apply_risk_limits_blocks_when_same_outcome_price_move_too_small() -> No
         outcome="up",
         action="buy",
         shares=10.0,
-        reference_price=0.51,
+        reference_price=0.502,  # 与上次成交价 0.50 相比移动 0.4%，小于 0.5% 阈値
         category="grid",
         reason="test",
         priority=10,

@@ -117,8 +117,9 @@ def test_build_feature_snapshot_uses_outcome_specific_prices_for_deviation() -> 
 
     snap = build_feature_snapshot(engine, cycle_seconds=300, last_minute_seconds=60)
 
-    # 最后一笔为 up=0.80，但 down 偏离应基于 down_last_price=0.30 计算，而不是 0.80。
-    assert round(snap.down_deviation, 6) == -0.4
+    # 最后一笔为 up=0.80，根据二元互补推断：down 隐含价 = 1 - 0.80 = 0.20
+    # down_deviation = (0.20 - 0.50) / 0.50 = -0.60
+    assert round(snap.down_deviation, 6) == -0.6
 
 
 def test_snapshot_with_effective_price_updates_only_active_outcome_for_deviation() -> None:

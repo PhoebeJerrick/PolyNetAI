@@ -229,7 +229,9 @@ def export_trade_ledger_to_excel(
     executed["timestamp"] = pd.to_datetime(executed.get("timestamp"), errors="coerce", utc=True)
     snapshots["timestamp"] = pd.to_datetime(snapshots.get("timestamp"), errors="coerce", utc=True)
     cycle_starts_fb = snapshots.groupby("cycle_id", dropna=False)["timestamp"].min().rename("cycle_start_fb").reset_index()
-    cycle_starts_fb["cycle_start"] = cycle_starts_fb["cycle_id"].map(absolute_cycle_open_timestamp_utc_for_cycle_id)
+    cycle_starts_fb["cycle_start"] = pd.to_datetime(
+        cycle_starts_fb["cycle_id"].map(absolute_cycle_open_timestamp_utc_for_cycle_id), utc=True
+    )
     miss = cycle_starts_fb["cycle_start"].isna() & cycle_starts_fb["cycle_start_fb"].notna()
     cycle_starts_fb.loc[miss, "cycle_start"] = cycle_starts_fb.loc[miss, "cycle_start_fb"]
     cycle_starts = cycle_starts_fb.drop(columns=["cycle_start_fb"])
