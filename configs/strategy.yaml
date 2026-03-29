@@ -1,6 +1,13 @@
 cycle:
   cycle_seconds: 300
   last_minute_seconds: 30
+  # 阶段性时间划分（秒，已过周期时间）：阶段1≤第1边界；阶段2∈(1,2]；阶段3∈(2,3]；阶段4>第3边界。须严格递增。
+  phase_end_seconds_1: 70
+  phase_end_seconds_2: 160
+  phase_end_seconds_3: 240
+  # 每个时间桶（如 btc-updown-5m-<unix>）绝对开始后，推迟多少秒再把成交流喂给策略/规则。
+  # 模拟下单、实盘验证、批量回放、单周期复盘均读取此项；命令行传参可覆盖。
+  post_window_start_delay_seconds: 10.0
 position:
   max_position_value: 85.0           # 目标总仓位价值（USDT）
 dynamic_priority:
@@ -67,21 +74,66 @@ profit_taking:
   take_profit_down_deviation: 0.2
   take_profit_fraction: 0.3
 stop_loss:
-  # 阶段性止损阈值（A+C联合方案）
-  phase_1_stop_loss_pct: 0.15      # 第一阶段（0-70s）：3%，建仓阶段需要容忍更大波动
-  phase_2_stop_loss_pct: 0.06      # 第二阶段（70-160s）：2%，已有仓位需要保护利润
-  phase_3_stop_loss_pct: 0.10     # 第三阶段（160-240s）：2.5%，加仓阶段需要一定容忍度
-  phase_4_stop_loss_pct: 0.05     # 第四阶段（240-290s）：1.5%，临近结束快速止损
+  # ── 触发1：周期累计亏损熔断（全阶段统一） ───────────────────────────────────
+  # 单周期亏损 > stop_loss_cycle_loss → 对亏损仓位按 stop_loss_fraction 强制平仓
+  stop_loss_cycle_loss: 18.0       # 周期累计亏损触发额（USDT）
+  stop_loss_fraction: 0.5          # 触发1 平仓比例（50%）
 
-  # 高波动止损（全阶段统一）
-  high_vol_stop_loss_pct: 0.01     # 高波动时1%止损
+  # ── 触发2：单仓止损（按周期阶段独立配置，双条件） ────────────────────────────
+  # 条件A：当前价格 ≤ near_zero_price → 立即全平（无时间门槛）
+  # 条件B：浮亏% ≥ stop_loss_pct AND 周期已过时间 ≥ min_hold_seconds → 全平
 
-  # 周期累计止损（全阶段统一）
-  stop_loss_cycle_loss: 18.0
-  stop_loss_fraction: 0.5
+  # 阶段1（0–70s）：建仓阶段，容忍最大波动，但要防近零价死亡
+  phase_1_near_zero_price: 0.06               # 条件A 绝对价格阈值
+  phase_1_stop_loss_pct: 0.15                 # 条件B 浮亏%阈值（15%）
+  phase_1_min_hold_seconds: 20                # 条件B 时间门槛（秒），防入场噪声误触
+  phase_1_stop_loss_action_fraction: 1.0      # 触发后全平比例
 
-  # 兼容旧版配置（如果未配置阶段性阈值，使用此默认值）
-  stop_loss_pct: 0.02
+  # 阶段2（70–160s）：减仓阶段，提升保护力度
+  phase_2_near_zero_price: 0.06
+  phase_2_stop_loss_pct: 0.12                 # 条件B 浮亏%阈值（12%）
+  phase_2_min_hold_seconds: 40                # 需要持仓更久才触发条件B
+  phase_2_stop_loss_action_fraction: 1.0
+
+  # 阶段3（160–240s）：顺势加仓，保持一定容忍度
+  phase_3_near_zero_price: 0.06
+  phase_3_stop_loss_pct: 0.12                 # 条件B 浮亏%阈值（12%）
+  phase_3_min_hold_seconds: 45
+  phase_3_stop_loss_action_fraction: 1.0
+
+  # 阶段4（240–290s）：临近结束，更激进止损
+  phase_4_near_zero_price: 0.08               # 条件A 提高阈值（允许更早识别失败方向）
+  phase_4_stop_loss_pct: 0.08                 # 条件B 浮亏%阈值（8%，更激进）
+  phase_4_min_hold_seconds: 20                # 持仓门槛最短
+  phase_4_stop_loss_action_fraction: 1.0
+
+  # ── 触发3：高波动绝对价格止损（按周期阶段独立配置） ─────────────────────────
+  # volatility_ratio > high_vol_trigger_ratio AND 当前价格 ≤ high_vol_price_threshold → 全平
+  # 仅在触发2未触发时执行，避免对同一仓位重复止损
+
+  # 阶段1（0–70s）
+  phase_1_high_vol_trigger_ratio: 1.5         # 波动率比率触发门槛
+  phase_1_high_vol_price_threshold: 0.15      # 绝对价格阈值（价格≤此值时止损）
+  phase_1_high_vol_action_fraction: 1.0       # 全平
+
+  # 阶段2（70–160s）
+  phase_2_high_vol_trigger_ratio: 1.5
+  phase_2_high_vol_price_threshold: 0.12      # 阶段2更严，价格需更低才触发
+  phase_2_high_vol_action_fraction: 1.0
+
+  # 阶段3（160–240s）
+  phase_3_high_vol_trigger_ratio: 1.5
+  phase_3_high_vol_price_threshold: 0.12
+  phase_3_high_vol_action_fraction: 1.0
+
+  # 阶段4（240–290s）：临近结束对高波动更敏感
+  phase_4_high_vol_trigger_ratio: 1.3         # 触发门槛降低（更敏感）
+  phase_4_high_vol_price_threshold: 0.15      # 末期放宽价格阈值，快速识别失败方向
+  phase_4_high_vol_action_fraction: 1.0
+
+  # ── 兼容 fallback（当阶段性配置缺失时使用） ─────────────────────────────────
+  stop_loss_pct: 0.12              # 全局止损%兜底（替代旧值 0.02）
+  high_vol_stop_loss_pct: 0.01    # 旧版高波动%阈值（保留供其他引用处使用）
 last_minute:
   last_minute_min_confidence: 0.9
   tail_profit_scale: 0.35

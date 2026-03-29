@@ -3,8 +3,9 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
+from collections.abc import Callable, Iterable
 from contextlib import nullcontext
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -14,9 +15,19 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from polynet_ai.adapters.cycle_window_timing import (  # noqa: E402
+    cycle_seconds_from_market_slug,
+    cycle_seconds_from_slug_prefix,
+    next_bucket_start_utc,
+    poll_until_success,
+    sleep_until_utc_instant,
+    trade_event_passes_post_window_delay,
+)
+from polynet_ai.domain.models import TradeEvent  # noqa: E402
 from polynet_ai.adapters.polymarket_live import (  # noqa: E402
     apply_proxy_env_from_dict,
     build_market_specs,
+    fetch_market_spec,
     get_account_env_value,
     iter_polymarket_trade_events_robot,
     iter_polymarket_trade_events,
@@ -32,7 +43,7 @@ from polynet_ai.execution.paper_broker import PaperBroker  # noqa: E402
 from polynet_ai.engine.live import LivePaperRunner, LiveRunnerResult, export_live_result  # noqa: E402
 from polynet_ai.engine.replay import ReplayEngine  # noqa: E402
 from polynet_ai.strategy.router import StrategyRouter  # noqa: E402
-from polynet_ai.strategy.spec import load_strategy_config  # noqa: E402
+from polynet_ai.strategy.spec import load_strategy_config, resolve_post_window_start_delay_seconds  # noqa: E402
 
 try:
     from scripts.batch_replay_recorded_trade_events import run_batch_replay  # noqa: E402
@@ -81,7 +92,81 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="可选：按周期目录额外落盘实时事件流，输出结构兼容 record_job/<cycle_slug>/ws_trade_events.ndjson。",
     )
+    parser.add_argument(
+        "--no-wait-cycle-boundary",
+        action="store_true",
+        help="不在消费事件前等待下一个周期边界（按周期落盘时首个文件可能不完整）。",
+    )
+    parser.add_argument(
+        "--post-window-start-delay-seconds",
+        type=float,
+        default=None,
+        help="若指定则覆盖 strategy.yaml 的 cycle.post_window_start_delay_seconds。",
+    )
     return parser.parse_args()
+
+
+def _resolve_cycle_seconds_for_wait(args: argparse.Namespace, market_slugs: list[str] | None) -> int | None:
+    if args.slug_prefix:
+        sec = cycle_seconds_from_slug_prefix(str(args.slug_prefix))
+        if sec is not None:
+            return sec
+    if market_slugs:
+        return cycle_seconds_from_market_slug(str(market_slugs[0]))
+    return None
+
+
+def _maybe_wait_next_cycle_boundary(
+    *,
+    args: argparse.Namespace,
+    market_slugs: list[str] | None,
+    cycle_record_dir: Path | None,
+) -> None:
+    if args.no_wait_cycle_boundary:
+        return
+    if cycle_record_dir is None:
+        return
+    cycle_seconds = _resolve_cycle_seconds_for_wait(args, market_slugs)
+    if cycle_seconds is None:
+        print(
+            "  ⚠ 无法从 --slug-prefix 或 market slug 解析周期长度，跳过「等到下一周期边界」。"
+        )
+        return
+    boundary = next_bucket_start_utc(datetime.now(timezone.utc), cycle_seconds)
+    print(
+        f"  [对齐周期] 按周期落盘已启用：精确等待 UTC 桶切换 "
+        f"{boundary.strftime('%Y-%m-%d %H:%M:%S')}Z ..."
+    )
+    sleep_until_utc_instant(boundary)
+    sp = (args.slug_prefix or "").strip()
+    if sp and cycle_seconds_from_slug_prefix(sp) is not None:
+        expected_slug = f"{sp}{int(boundary.timestamp())}"
+        print(f"  [对齐周期] 轮询 Gamma 直至新窗就绪: {expected_slug}")
+        poll_until_success(
+            lambda: fetch_market_spec(expected_slug),
+            timeout_seconds=120.0,
+            interval_seconds=0.35,
+            log_fn=print,
+            describe=f"Gamma 市场 {expected_slug}",
+        )
+        print(f"  ✓ 新窗已就绪: {expected_slug}")
+    else:
+        print(
+            "  ℹ 未配置标准 btc-updown-Nm- 前缀，跳过 Gamma 新窗探测（仍依赖 slug 时间戳推迟策略生效）。"
+        )
+
+
+def _iter_record_full_socket_strategy_gated(
+    events: Iterable[TradeEvent],
+    *,
+    delay_seconds: float,
+    record_fn: Callable[[TradeEvent], None],
+) -> Iterable[TradeEvent]:
+    """每条 Socket 成交先落盘，再按窗起点+delay 决定是否交给策略（实盘验证按周期落盘时用）。"""
+    for event in events:
+        record_fn(event)
+        if trade_event_passes_post_window_delay(event, delay_seconds):
+            yield event
 
 
 def _load_market_slugs(args: argparse.Namespace) -> list[str] | None:
@@ -231,6 +316,27 @@ def main() -> int:
     
     stage_3_start = datetime.now()
     print(f"\n[3/7] 建立 Polymarket 实时行情订阅...")
+    _strategy_cfg = load_strategy_config(args.config)
+    _pwd = resolve_post_window_start_delay_seconds(
+        config=_strategy_cfg,
+        cli_seconds=args.post_window_start_delay_seconds,
+    )
+    _pwd_src = (
+        "命令行覆盖"
+        if args.post_window_start_delay_seconds is not None
+        else "strategy.yaml cycle.post_window_start_delay_seconds"
+    )
+    _record_full_ws = cycle_record_dir is not None
+    _iter_ws_delay = 0.0 if _record_full_ws else _pwd
+    if _record_full_ws:
+        print(f"  ℹ 策略推迟: {_pwd:.1f}s（{_pwd_src}）；Socket 订阅不推迟，落盘为全量原始流")
+    else:
+        print(f"  ℹ 窗绝对起点后策略/落盘推迟: {_pwd:.1f}s（{_pwd_src}）")
+    _maybe_wait_next_cycle_boundary(
+        args=args,
+        market_slugs=market_slugs,
+        cycle_record_dir=cycle_record_dir,
+    )
     event_stream = None
     if args.robot_mode:
         if market_slugs:
@@ -243,7 +349,11 @@ def main() -> int:
             if not specs:
                 raise RuntimeError("没有可用的实时市场可供订阅。")
             print(f"  ✓ 将跟踪 {len(specs)} 个周期")
-            event_stream = iter_polymarket_trade_events(specs, log_fn=print)
+            event_stream = iter_polymarket_trade_events(
+                specs,
+                post_window_start_delay_seconds=_iter_ws_delay,
+                log_fn=print,
+            )
         elif not args.slug_prefix:
             raise ValueError("机器人模式需要提供 --slug-prefix（例如 btc-updown-5m-）。")
         else:
@@ -255,6 +365,7 @@ def main() -> int:
                 slug_prefix=args.slug_prefix,
                 max_cycles=args.max_cycles,
                 poll_interval_seconds=args.poll_interval_seconds,
+                post_window_start_delay_seconds=_iter_ws_delay,
                 log_fn=print,
             )
     else:
@@ -266,7 +377,11 @@ def main() -> int:
         if not specs:
             raise RuntimeError("没有可用的实时市场可供订阅。")
         print(f"  ✓ 发现 {len(specs)} 个市场")
-        event_stream = iter_polymarket_trade_events(specs, log_fn=print)
+        event_stream = iter_polymarket_trade_events(
+            specs,
+            post_window_start_delay_seconds=_iter_ws_delay,
+            log_fn=print,
+        )
 
     event_stream = _wrap_event_stream_with_config_reload(
         event_stream,
@@ -295,7 +410,7 @@ def main() -> int:
     if cycle_record_dir is not None:
         print(f"  ✓ 实时事件落盘目录: {cycle_record_dir}")
 
-    def _record_event(event) -> None:
+    def _record_event(event: TradeEvent) -> None:
         event_recorder.record(event)
         if cycle_event_recorder is not None:
             cycle_event_recorder.record(event)
@@ -308,10 +423,19 @@ def main() -> int:
     with TradeEventRecorder(recorded_events_path) as event_recorder, (
         CycleTradeEventRecorder(cycle_record_dir) if cycle_record_dir is not None else nullcontext()
     ) as cycle_event_recorder:
+        stream_in = (
+            _iter_record_full_socket_strategy_gated(
+                event_stream,
+                delay_seconds=_pwd,
+                record_fn=_record_event,
+            )
+            if cycle_record_dir is not None
+            else event_stream
+        )
         result = runner.run_stream(
-            event_stream,
+            stream_in,
             status_every=args.status_every,
-            on_event=_record_event,
+            on_event=None if cycle_record_dir is not None else _record_event,
             on_progress=progress_callback,
             progress_interval_seconds=max(0.0, args.dashboard_refresh_seconds),
         )
@@ -370,6 +494,7 @@ def main() -> int:
                     cycle_count=len(new_cycle_files),
                     report_source="实盘行情验证",
                     report_name_prefix="real",
+                    post_window_start_delay_seconds=_pwd,
                 )
                 report_elapsed = (datetime.now() - report_start).total_seconds()
                 stage_times["6_report"] = report_elapsed

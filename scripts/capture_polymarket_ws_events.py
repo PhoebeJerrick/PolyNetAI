@@ -374,6 +374,7 @@ def _iter_events_for_spec_from_cycle_start(
         ping_interval_seconds=ping_interval_seconds,
         receive_timeout_seconds=receive_timeout_seconds,
         cycle_grace_seconds=cycle_grace_seconds,
+        post_window_start_delay_seconds=0.0,
         log_fn=log_fn,
     ):
         if cycle_start is not None and event.timestamp < cycle_start:

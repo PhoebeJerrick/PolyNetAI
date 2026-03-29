@@ -315,7 +315,14 @@ def test_iter_polymarket_trade_events_reconnects_after_socket_closed(monkeypatch
     monkeypatch.setattr(polymarket_live, "_import_websocket_module", lambda: FakeWebSocketModule())
     monkeypatch.setattr(polymarket_live, "time", type("FakeTime", (), {"monotonic": staticmethod(lambda: 100.0), "sleep": staticmethod(lambda _: None)})())
 
-    events = list(iter_polymarket_trade_events([spec], receive_timeout_seconds=0.01, cycle_grace_seconds=0.0))
+    events = list(
+        iter_polymarket_trade_events(
+            [spec],
+            receive_timeout_seconds=0.01,
+            cycle_grace_seconds=0.0,
+            post_window_start_delay_seconds=0.0,
+        )
+    )
 
     assert len(events) == 2
     assert events[0].outcome == "up"

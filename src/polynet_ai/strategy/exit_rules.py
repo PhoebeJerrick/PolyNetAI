@@ -72,109 +72,152 @@ def take_profit_exits(features: FeatureSnapshot, config: StrategyConfig) -> list
 
 def stop_loss_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
     """
-    改进的止损机制：
-    1. 基于周期累计亏损额 (原有机制)
-    2. 基于单个持仓的亏损百分比 (新增 - 更激进)
-    3. 基于市场波动率的动态阈值 (新增)
+    三层止损机制（方案三，四阶段动态止损）：
+
+    机制1 — 周期累计亏损熔断（全阶段统一）：
+      cycle_net_profit < -stop_loss_cycle_loss
+      → 对亏损仓位按 stop_loss_fraction（50%）强制平仓，提前返回。
+
+    机制2 — 单仓止损（按周期阶段独立配置，双条件互斥）：
+      条件A：当前价格 ≤ phase_N_near_zero_price
+             → 立即全平，无时间门槛（价格接近0表示方向已判定失败）
+      条件B：浮亏% ≥ phase_N_stop_loss_pct
+             AND cycle_elapsed_seconds ≥ phase_N_min_hold_seconds
+             → 全平（时间门槛防止入场瞬间噪声误触，30s内≥2%逆向概率82%）
+
+    机制3 — 高波动绝对价格止损（按周期阶段独立配置）：
+      volatility_ratio > phase_N_high_vol_trigger_ratio
+      AND 当前价格 ≤ phase_N_high_vol_price_threshold
+      → 全平（仅在机制2未触发时执行，避免对同一仓位重复止损）
     """
     infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
-    up_ref = outcome_reference_price(features, "up", infer_missing_with_binary_complement=infer_missing)
+    up_ref   = outcome_reference_price(features, "up",   infer_missing_with_binary_complement=infer_missing)
     down_ref = outcome_reference_price(features, "down", infer_missing_with_binary_complement=infer_missing)
-    fraction = float(config.get("stop_loss.stop_loss_fraction", 0.50))
-    
+    priority = int(config.priorities.get("stop_loss", 30))
+
     intents: list[OrderIntent] = []
-    
-    # 机制1: 周期累计亏损额止损 (保留原有逻辑，但降低阈值)
-    cycle_loss_threshold = float(config.get("stop_loss.stop_loss_cycle_loss", 8.0))
+
+    # ── 机制1：周期累计亏损熔断 ─────────────────────────────────────────────
+    cycle_loss_threshold = float(config.get("stop_loss.stop_loss_cycle_loss", 18.0))
+    stop_loss_fraction   = float(config.get("stop_loss.stop_loss_fraction", 0.50))
+
     if features.cycle_net_profit < -cycle_loss_threshold:
         if features.unrealized_up_pnl < 0 and _held_up(features) > 0:
-            intents.append(
-                OrderIntent(
-                    market_id=features.market_id,
-                    cycle_id=features.cycle_id,
-                    outcome="up",
-                    action="sell",
-                    shares=_held_up(features) * fraction,
-                    reference_price=up_ref,
-                    category="stop_loss",
-                    reason=f"周期亏损${-features.cycle_net_profit:.2f}超阈值${cycle_loss_threshold:.1f}，止损 Up 持仓",
-                    priority=int(config.priorities.get("stop_loss", 30)),
-                )
-            )
+            intents.append(OrderIntent(
+                market_id=features.market_id,
+                cycle_id=features.cycle_id,
+                outcome="up",
+                action="sell",
+                shares=_held_up(features) * stop_loss_fraction,
+                reference_price=up_ref,
+                category="stop_loss",
+                reason=(
+                    f"周期亏损${-features.cycle_net_profit:.2f}超阈值${cycle_loss_threshold:.1f}，"
+                    f"熔断止损 Up（{stop_loss_fraction*100:.0f}%）"
+                ),
+                priority=priority,
+            ))
         if features.unrealized_down_pnl < 0 and _held_down(features) > 0:
-            intents.append(
-                OrderIntent(
-                    market_id=features.market_id,
-                    cycle_id=features.cycle_id,
-                    outcome="down",
-                    action="sell",
-                    shares=_held_down(features) * fraction,
-                    reference_price=down_ref,
-                    category="stop_loss",
-                    reason=f"周期亏损${-features.cycle_net_profit:.2f}超阈值${cycle_loss_threshold:.1f}，止损 Down 持仓",
-                    priority=int(config.priorities.get("stop_loss", 30)),
-                )
-            )
+            intents.append(OrderIntent(
+                market_id=features.market_id,
+                cycle_id=features.cycle_id,
+                outcome="down",
+                action="sell",
+                shares=_held_down(features) * stop_loss_fraction,
+                reference_price=down_ref,
+                category="stop_loss",
+                reason=(
+                    f"周期亏损${-features.cycle_net_profit:.2f}超阈值${cycle_loss_threshold:.1f}，"
+                    f"熔断止损 Down（{stop_loss_fraction*100:.0f}%）"
+                ),
+                priority=priority,
+            ))
         return [intent for intent in intents if intent.shares > 0]
-    
-    # 机制2: 基于百分比的激进止损 — 使用阶段性止损阈值（A+C联合方案）
-    stop_loss_pct_fallback = float(config.get("stop_loss.stop_loss_pct", 0.02))
-    high_vol_stop_loss_pct = float(config.get("stop_loss.high_vol_stop_loss_pct", 0.01))
 
-    # 根据周期阶段获取对应的止损阈值
-    phase = determine_phase(features.cycle_elapsed_seconds)
-    stop_loss_pct = float(
-        config.get(f"stop_loss.phase_{phase}_stop_loss_pct", stop_loss_pct_fallback)
-    )
+    # ── 读取当前阶段参数 ──────────────────────────────────────────────────────
+    phase   = determine_phase(features.cycle_elapsed_seconds, config)
+    elapsed = features.cycle_elapsed_seconds
+    sl_pct_fallback = float(config.get("stop_loss.stop_loss_pct", 0.12))
 
-    # 根据波动率调整止损百分比（高波动止损全阶段统一）
-    volatility_threshold = 1.5
-    effective_stop_loss_pct = high_vol_stop_loss_pct if features.volatility_ratio > volatility_threshold else stop_loss_pct
+    # 触发2 参数
+    near_zero_price = float(config.get(f"stop_loss.phase_{phase}_near_zero_price", 0.06))
+    stop_loss_pct   = float(config.get(f"stop_loss.phase_{phase}_stop_loss_pct", sl_pct_fallback))
+    min_hold_secs   = float(config.get(f"stop_loss.phase_{phase}_min_hold_seconds", 45.0))
+    sl_action_frac  = float(config.get(f"stop_loss.phase_{phase}_stop_loss_action_fraction", 1.0))
 
-    # 检查 UP 持仓的止损 - 使用当前市场价格计算实际盈亏
-    if _held_up(features) > 0 and features.up_avg_price > 0:
-        current_price = features.up_last_price
-        if current_price > 0:
-            # 计算基于当前市场价格的实际盈亏百分比
-            actual_pnl_pct = (current_price - features.up_avg_price) / features.up_avg_price
-            # 只有当实际是亏损时才触发止损
-            if actual_pnl_pct < 0 and abs(actual_pnl_pct) >= effective_stop_loss_pct:
-                intents.append(
-                    OrderIntent(
-                        market_id=features.market_id,
-                        cycle_id=features.cycle_id,
-                        outcome="up",
-                        action="sell",
-                        shares=_held_up(features) * fraction,
-                        reference_price=up_ref,
-                        category="stop_loss",
-                        reason=f"Up 持仓亏损{abs(actual_pnl_pct)*100:.1f}%超止损点{effective_stop_loss_pct*100:.1f}%",
-                        priority=int(config.priorities.get("stop_loss", 30)),
-                    )
-                )
+    # 触发3 参数
+    hv_trigger_ratio = float(config.get(f"stop_loss.phase_{phase}_high_vol_trigger_ratio", 1.5))
+    hv_price_thr     = float(config.get(f"stop_loss.phase_{phase}_high_vol_price_threshold", 0.12))
+    hv_action_frac   = float(config.get(f"stop_loss.phase_{phase}_high_vol_action_fraction", 1.0))
+    is_high_vol      = features.volatility_ratio > hv_trigger_ratio
 
-    # 检查 DOWN 持仓的止损 - 使用当前市场价格计算实际盈亏
-    if _held_down(features) > 0 and features.down_avg_price > 0:
-        current_price = features.down_last_price
-        if current_price > 0:
-            # 计算基于当前市场价格的实际盈亏百分比
-            actual_pnl_pct = (current_price - features.down_avg_price) / features.down_avg_price
-            # 只有当实际是亏损时才触发止损
-            if actual_pnl_pct < 0 and abs(actual_pnl_pct) >= effective_stop_loss_pct:
-                intents.append(
-                    OrderIntent(
-                        market_id=features.market_id,
-                        cycle_id=features.cycle_id,
-                        outcome="down",
-                        action="sell",
-                        shares=_held_down(features) * fraction,
-                        reference_price=down_ref,
-                        category="stop_loss",
-                        reason=f"Down 持仓亏损{abs(actual_pnl_pct)*100:.1f}%超止损点{effective_stop_loss_pct*100:.1f}%",
-                        priority=int(config.priorities.get("stop_loss", 30)),
-                    )
-                )
-    
+    # ── 机制2 & 3：逐方向检查 ────────────────────────────────────────────────
+    sides = [
+        ("up",   _held_up(features),   features.up_avg_price,   features.up_last_price,   up_ref),
+        ("down", _held_down(features), features.down_avg_price, features.down_last_price, down_ref),
+    ]
+
+    for outcome, held, avg_price, last_price, ref_price in sides:
+        if held <= 0 or avg_price <= 0 or last_price <= 0:
+            continue
+
+        pnl_pct  = (last_price - avg_price) / avg_price
+        triggered = False
+
+        # 机制2 — 触发2：双条件（条件A / 条件B 互斥）
+        if last_price <= near_zero_price:
+            # 条件A：近零价格，立即全平（无时间限制）
+            intents.append(OrderIntent(
+                market_id=features.market_id,
+                cycle_id=features.cycle_id,
+                outcome=outcome,
+                action="sell",
+                shares=held * sl_action_frac,
+                reference_price=ref_price,
+                category="stop_loss",
+                reason=(
+                    f"{outcome.upper()} 价格{last_price:.4f}≤近零阈值{near_zero_price:.4f}"
+                    f"（阶段{phase}），条件A全平"
+                ),
+                priority=priority,
+            ))
+            triggered = True
+
+        elif pnl_pct < 0 and abs(pnl_pct) >= stop_loss_pct and elapsed >= min_hold_secs:
+            # 条件B：浮亏% ≥ 阈值 AND 已过 ≥ min_hold_seconds
+            intents.append(OrderIntent(
+                market_id=features.market_id,
+                cycle_id=features.cycle_id,
+                outcome=outcome,
+                action="sell",
+                shares=held * sl_action_frac,
+                reference_price=ref_price,
+                category="stop_loss",
+                reason=(
+                    f"{outcome.upper()} 浮亏{abs(pnl_pct)*100:.1f}%≥{stop_loss_pct*100:.1f}%"
+                    f"，已过{elapsed:.0f}s≥{min_hold_secs:.0f}s（阶段{phase}），条件B全平"
+                ),
+                priority=priority,
+            ))
+            triggered = True
+
+        # 机制3 — 触发3：高波动 + 绝对价格（触发2未触发时才检查）
+        if not triggered and is_high_vol and last_price <= hv_price_thr:
+            intents.append(OrderIntent(
+                market_id=features.market_id,
+                cycle_id=features.cycle_id,
+                outcome=outcome,
+                action="sell",
+                shares=held * hv_action_frac,
+                reference_price=ref_price,
+                category="stop_loss",
+                reason=(
+                    f"{outcome.upper()} 高波动(ratio={features.volatility_ratio:.2f}>{hv_trigger_ratio:.1f})"
+                    f" 价格{last_price:.4f}≤{hv_price_thr:.4f}（阶段{phase}），触发3全平"
+                ),
+                priority=priority,
+            ))
+
     return [intent for intent in intents if intent.shares > 0]
 
 

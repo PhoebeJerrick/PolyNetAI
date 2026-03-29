@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import subprocess
 import sys
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -18,6 +16,13 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from polynet_ai.adapters.cycle_window_timing import (  # noqa: E402
+    cycle_seconds_from_slug_prefix,
+    next_bucket_start_utc,
+    poll_until_success,
+    sleep_until_utc_instant,
+    window_start_naive_utc_from_slug,
+)
 from polynet_ai.adapters.polymarket_live import (  # noqa: E402
     apply_proxy_env_from_dict,
     fetch_market_spec,
@@ -34,7 +39,10 @@ from polynet_ai.engine.live import LivePaperRunner, export_live_result  # noqa: 
 from polynet_ai.engine.replay import ReplayEngine  # noqa: E402
 from polynet_ai.execution.polymarket_broker import PolymarketBroker  # noqa: E402
 from polynet_ai.reporting.excel_export import get_version_tag  # noqa: E402
-from polynet_ai.strategy.spec import load_strategy_config  # noqa: E402
+from polynet_ai.strategy.spec import (  # noqa: E402
+    load_strategy_config,
+    resolve_post_window_start_delay_seconds,
+)
 
 DATA_API_BASE = "https://data-api.polymarket.com"
 DEFAULT_OVERRIDES = (
@@ -58,7 +66,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--signature-type", type=int, default=2, help="Polymarket signature type，默认 2（Gnosis Safe / proxy wallet）。")
     parser.add_argument("--status-every", type=int, default=25)
     parser.add_argument("--dashboard-refresh-seconds", type=float, default=1.0)
-    parser.add_argument("--start-buffer-seconds", type=float, default=2.0, help="到达周期边界后再等待几秒再抓 spec，避免新市场尚未出现在 Gamma。")
+    parser.add_argument(
+        "--start-buffer-seconds",
+        type=float,
+        default=None,
+        help="若指定则覆盖 strategy.yaml 的 cycle.post_window_start_delay_seconds。",
+    )
     parser.add_argument("--cycle-grace-seconds", type=float, default=20.0)
     parser.add_argument("--account-index", type=int, default=2)
     parser.add_argument(
@@ -67,18 +80,6 @@ def parse_args() -> argparse.Namespace:
         help="API 配置文件路径；本脚本只会用账号地址抓成交与应用代理，不会真实下单。",
     )
     return parser.parse_args()
-
-
-def _cycle_seconds_from_slug_prefix(slug_prefix: str) -> int:
-    marker = "-updown-"
-    if marker not in slug_prefix:
-        raise ValueError(f"无法从 slug 前缀解析周期长度: {slug_prefix}")
-    rest = slug_prefix.split(marker, 1)[1]
-    minutes_text = rest.split("m", 1)[0]
-    minutes = int(minutes_text)
-    if minutes <= 0:
-        raise ValueError(f"非法周期分钟数: {minutes}")
-    return minutes * 60
 
 
 def _format_elapsed(ts: datetime, cycle_start: datetime) -> str:
@@ -91,42 +92,6 @@ def _ensure_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
-
-
-def _target_cycle_start(now_utc: datetime, cycle_seconds: int) -> datetime:
-    epoch_seconds = now_utc.timestamp()
-    current_bucket = math.floor(epoch_seconds / cycle_seconds) * cycle_seconds
-    is_exact_boundary = abs(epoch_seconds - current_bucket) < 1e-6
-    target_ts = current_bucket if is_exact_boundary else current_bucket + cycle_seconds
-    return datetime.fromtimestamp(target_ts, tz=timezone.utc)
-
-
-def _sleep_until(target_utc: datetime) -> None:
-    while True:
-        remaining = (target_utc - datetime.now(timezone.utc)).total_seconds()
-        if remaining <= 0:
-            return
-        if remaining > 60:
-            print(f"[cycle] 距离目标开始还有 {remaining / 60:.1f} 分钟，继续等待...", flush=True)
-            time.sleep(min(30.0, remaining))
-            continue
-        print(f"[cycle] 距离目标开始还有 {remaining:.1f} 秒...", flush=True)
-        time.sleep(min(5.0, remaining))
-
-
-def _wait_for_market_spec(slug: str, *, timeout_seconds: float = 90.0):
-    deadline = time.monotonic() + timeout_seconds
-    attempt = 0
-    while True:
-        attempt += 1
-        try:
-            return fetch_market_spec(slug)
-        except Exception as exc:
-            if time.monotonic() >= deadline:
-                raise RuntimeError(f"等待市场 slug 就绪超时: {slug}") from exc
-            if attempt == 1 or attempt % 5 == 0:
-                print(f"[cycle] 目标市场尚未就绪 {slug}，继续重试...", flush=True)
-            time.sleep(2.0)
 
 
 def _load_overrides(path: str | Path) -> dict[str, Any]:
@@ -328,17 +293,41 @@ def main() -> int:
     if applied:
         print(f"[env] 已应用代理: {', '.join(applied)}", flush=True)
 
-    cycle_seconds = _cycle_seconds_from_slug_prefix(args.slug_prefix)
-    target_start = _target_cycle_start(datetime.now(timezone.utc), cycle_seconds)
-    launch_at = target_start + timedelta(seconds=max(0.0, args.start_buffer_seconds))
+    strategy_config = _build_strategy_config(args.config, args.overrides)
+    post_delay = resolve_post_window_start_delay_seconds(
+        config=strategy_config,
+        cli_seconds=args.start_buffer_seconds,
+    )
+    print(
+        f"[cycle] 窗起点后策略推迟: {post_delay:g}s（"
+        f"{'命令行 --start-buffer-seconds' if args.start_buffer_seconds is not None else 'strategy.yaml cycle.post_window_start_delay_seconds'}）",
+        flush=True,
+    )
+
+    cycle_seconds = cycle_seconds_from_slug_prefix(args.slug_prefix)
+    if cycle_seconds is None:
+        raise ValueError(f"无法从 slug 前缀解析周期长度: {args.slug_prefix}")
+    target_start = next_bucket_start_utc(datetime.now(timezone.utc), cycle_seconds)
     target_slug = f"{args.slug_prefix}{int(target_start.timestamp())}"
 
     print(f"[cycle] 目标完整周期: {target_slug}", flush=True)
-    _sleep_until(launch_at)
-    spec = _wait_for_market_spec(target_slug)
-    print(f"[cycle] 已锁定市场: {spec.slug}", flush=True)
-
-    strategy_config = _build_strategy_config(args.config, args.overrides)
+    print(f"[cycle] 精确等待 UTC 桶切换 {target_start.isoformat()} ...", flush=True)
+    sleep_until_utc_instant(target_start)
+    spec = poll_until_success(
+        lambda: fetch_market_spec(target_slug),
+        timeout_seconds=120.0,
+        interval_seconds=0.35,
+        log_fn=lambda msg: print(msg, flush=True),
+        describe=f"Gamma 市场 {target_slug}",
+    )
+    print(f"[cycle] 新窗已在 Gamma 就绪: {spec.slug}", flush=True)
+    launch_at = target_start + timedelta(seconds=post_delay)
+    if datetime.now(timezone.utc) < launch_at:
+        print(
+            f"[cycle] 等待策略生效时刻 {launch_at.isoformat()}（窗起点+{post_delay:g}s）...",
+            flush=True,
+        )
+        sleep_until_utc_instant(launch_at)
     real_broker = None
     effective_starting_cash = args.starting_cash
     mode_label = "Paper"
@@ -384,7 +373,12 @@ def main() -> int:
 
     with TradeEventRecorder(recorded_events_path) as event_recorder:
         result = runner.run_stream(
-            iter_polymarket_trade_events([spec], cycle_grace_seconds=args.cycle_grace_seconds, log_fn=print),
+            iter_polymarket_trade_events(
+                [spec],
+                cycle_grace_seconds=args.cycle_grace_seconds,
+                post_window_start_delay_seconds=post_delay,
+                log_fn=print,
+            ),
             status_every=args.status_every,
             on_event=event_recorder.record,
             on_progress=progress_callback,
@@ -401,8 +395,13 @@ def main() -> int:
     if real_broker is not None:
         real_broker.export_orders(run_dir / "real_order_attempts.json")
 
-    cycle_start = _ensure_utc(spec.start_time or target_start)
+    # API 拉取区间仍以 Gamma 的 start/end 为准；展示「距开盘差」等与批量报告一致时用 slug epoch。
+    cycle_start_api = _ensure_utc(spec.start_time or target_start)
     cycle_end = _ensure_utc(spec.end_time or (target_start + timedelta(seconds=cycle_seconds)))
+    slug_open_naive = window_start_naive_utc_from_slug(spec.slug)
+    review_display_start = (
+        _ensure_utc(slug_open_naive) if slug_open_naive is not None else cycle_start_api
+    )
 
     user_rows: list[dict[str, Any]] = []
     if purse_address:
@@ -412,7 +411,7 @@ def main() -> int:
                 user=purse_address,
                 taker_only=False,
             ),
-            cycle_start=cycle_start,
+            cycle_start=cycle_start_api,
             cycle_end=cycle_end + timedelta(seconds=args.cycle_grace_seconds),
         )
     market_rows = _filter_cycle_window(
@@ -420,7 +419,7 @@ def main() -> int:
             market=spec.condition_id,
             taker_only=False,
         ),
-        cycle_start=cycle_start,
+        cycle_start=cycle_start_api,
         cycle_end=cycle_end + timedelta(seconds=args.cycle_grace_seconds),
     )
 
@@ -429,7 +428,7 @@ def main() -> int:
     pd.DataFrame(user_rows).to_csv(user_raw_csv, index=False, encoding="utf-8-sig")
     pd.DataFrame(market_rows).to_csv(market_raw_csv, index=False, encoding="utf-8-sig")
 
-    user_trade_df = _rows_to_trade_excel(user_rows, cycle_slug=spec.slug, cycle_start=cycle_start)
+    user_trade_df = _rows_to_trade_excel(user_rows, cycle_slug=spec.slug, cycle_start=review_display_start)
     _vtag = get_version_tag()
     user_trade_xlsx = run_dir / f"account_trades_{_vtag}.xlsx"
     with pd.ExcelWriter(user_trade_xlsx, engine="openpyxl") as writer:
@@ -463,7 +462,7 @@ def main() -> int:
         account_index=args.account_index,
         purse_address=purse_address,
         cycle_slug=spec.slug,
-        cycle_start=cycle_start,
+        cycle_start=review_display_start,
         cycle_end=cycle_end,
         user_trade_df=user_trade_df,
         market_trade_df=market_trade_df,

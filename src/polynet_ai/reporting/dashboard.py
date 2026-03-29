@@ -921,6 +921,9 @@ def build_dashboard_html(
             fields: [
               {{ path: "cycle.cycle_seconds", label: "周期长度（秒）", hint: "BTC 5 分钟市场通常为 300 秒。", type: "number", ui: "select", options: [300], risk: "low" }},
               {{ path: "cycle.last_minute_seconds", label: "尾盘窗口（秒）", hint: "最后一分钟逻辑开始生效的时间。", type: "number", ui: "select", options: [30, 45, 60, 75, 90], risk: "medium" }},
+              {{ path: "cycle.phase_end_seconds_1", label: "阶段1结束秒数（含）", hint: "已过周期时间≤该值属阶段1；须小于阶段2/3边界。", type: "number", ui: "range", min: 1, max: 600, step: 1, risk: "high" }},
+              {{ path: "cycle.phase_end_seconds_2", label: "阶段2结束秒数（含）", hint: "阶段2为(阶段1边界, 本值]；须介于阶段1与阶段3之间。", type: "number", ui: "range", min: 1, max: 600, step: 1, risk: "high" }},
+              {{ path: "cycle.phase_end_seconds_3", label: "阶段3结束秒数（含）", hint: "阶段3为(阶段2边界, 本值]；之后为阶段4。", type: "number", ui: "range", min: 1, max: 600, step: 1, risk: "high" }},
             ],
           }},
           {{

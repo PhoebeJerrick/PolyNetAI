@@ -15,13 +15,22 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from polynet_ai.adapters.cycle_window_timing import filter_trade_events_after_post_window_delay  # noqa: E402
 from polynet_ai.adapters.trade_event_store import load_recorded_trade_events  # noqa: E402
 from polynet_ai.engine.replay import ReplayEngine  # noqa: E402
-from polynet_ai.strategy.spec import load_strategy_config  # noqa: E402
+from polynet_ai.strategy.spec import (  # noqa: E402
+    load_strategy_config,
+    resolve_post_window_start_delay_seconds,
+)
 from scripts.build_batch_replay_performance_report import (  # noqa: E402
     _cleanup_batch_replay_markdown,
     build_performance_report_zh,
     write_batch_trade_process_zh,
+)
+from scripts.run_recorded_live_paper import (  # noqa: E402
+    _append_dataframe_to_csv,
+    clear_streaming_csv_cache,
+    recording_slug_for_path,
 )
 
 
@@ -67,6 +76,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=False,
         help="是否生成交易过程详细 Excel（batch_replay_trade_process_zh_*.xlsx）",
+    )
+    parser.add_argument(
+        "--post-window-start-delay-seconds",
+        type=float,
+        default=None,
+        help="若指定则覆盖 strategy.yaml 的 cycle.post_window_start_delay_seconds。",
     )
     return parser.parse_args()
 
@@ -135,29 +150,21 @@ def write_cycle_results_incremental(
     cycle_row: dict,
     decision_rows: list[dict],
 ) -> None:
-    """将单个周期的结果增量写入CSV文件"""
+    """将单个周期的结果增量写入CSV文件（列与表头对齐，避免追加行错位）。"""
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 写入周期结果
     cycle_csv = output_dir / "streaming_cycle_results.csv"
     cycle_df = pd.DataFrame([cycle_row])
-    cycle_df['cycle_index'] = cycle_idx
-    cycle_df['cycle_slug'] = cycle_slug
-    if cycle_csv.exists():
-        cycle_df.to_csv(cycle_csv, mode='a', header=False, index=False)
-    else:
-        cycle_df.to_csv(cycle_csv, mode='w', header=True, index=False)
+    cycle_df["cycle_index"] = cycle_idx
+    cycle_df["cycle_slug"] = cycle_slug
+    _append_dataframe_to_csv(cycle_csv, cycle_df)
 
-    # 写入决策结果
     if decision_rows:
         decision_csv = output_dir / "streaming_decision_results.csv"
         decision_df = pd.DataFrame(decision_rows)
-        decision_df['cycle_index'] = cycle_idx
-        decision_df['cycle_slug'] = cycle_slug
-        if decision_csv.exists():
-            decision_df.to_csv(decision_csv, mode='a', header=False, index=False)
-        else:
-            decision_df.to_csv(decision_csv, mode='w', header=True, index=False)
+        decision_df["cycle_index"] = cycle_idx
+        decision_df["cycle_slug"] = cycle_slug
+        _append_dataframe_to_csv(decision_csv, decision_df)
 
 
 def run_batch_replay(
@@ -175,6 +182,7 @@ def run_batch_replay(
     max_cycles: int | None = None,
     report_name_prefix: str = "",
     use_streaming: bool = True,  # 新增参数：默认使用流式处理
+    post_window_start_delay_seconds: float | None = None,
 ) -> Path | None:
     """核心 batch replay 逻辑，可被外部脚本调用。返回 Excel 绩效报告路径。"""
     input_resolved = _resolve_existing_path("输入目录", input_dir)
@@ -182,6 +190,10 @@ def run_batch_replay(
     output_resolved.mkdir(parents=True, exist_ok=True)
 
     config = _load_config(config_path, overrides_path)
+    _pwd = resolve_post_window_start_delay_seconds(
+        config=config,
+        cli_seconds=post_window_start_delay_seconds,
+    )
     event_files = _discover_cycle_event_files(input_resolved)
     if not event_files:
         raise RuntimeError(f"未在目录下找到任何 `<cycle_slug>/ws_trade_events.ndjson`: {input_resolved}")
@@ -190,6 +202,7 @@ def run_batch_replay(
 
     total_files = len(event_files)
     print(f"  ℹ 共需回放 {total_files} 个周期文件")
+    print(f"  ℹ 窗起点后策略推迟: {_pwd:g}s（与实盘/WebSocket 路径一致）")
 
     # 引擎内部根据 capital_reset_mode 处理周期资金
     engine = ReplayEngine(
@@ -203,34 +216,51 @@ def run_batch_replay(
         # 流式处理模式：逐周期处理，增量输出
         aggregator = StreamingAggregator()
 
-        # 清理上次运行残留的流式 CSV，避免追加导致列数不一致
-        for _stale in ("streaming_cycle_results.csv", "streaming_decision_results.csv"):
-            _stale_path = output_resolved / _stale
-            if _stale_path.exists():
-                _stale_path.unlink()
+        clear_streaming_csv_cache(output_resolved)
 
         for idx, event_file in enumerate(event_files, 1):
-            cycle_slug = event_file.parent.name
+            cycle_slug = recording_slug_for_path(event_file.parent)
             events = load_recorded_trade_events(event_file)
             if not events:
                 print(f"[skip] {cycle_slug}: 事件文件为空")
                 continue
 
             sorted_events = sorted(events, key=lambda e: (e.market_id, e.cycle_id, e.timestamp))
+            raw_n = len(sorted_events)
+            sorted_events = filter_trade_events_after_post_window_delay(
+                sorted_events,
+                post_window_start_delay_seconds=_pwd,
+            )
+            if _pwd > 0 and len(sorted_events) != raw_n:
+                print(
+                    f"    [{idx}] 推迟 {_pwd:g}s：使用 {len(sorted_events)}/{raw_n} 条事件"
+                )
             cycle_decisions: list[dict[str, object]] = []
 
             for event in sorted_events:
                 step = engine.process_event(event)
                 cycle_decisions.append(step.decision_row)
 
-            # 获取周期结果
+            # 获取周期结果：须用结算后口径，与 LivePaperRunner（每段流结束 finalize_pending_cycle）一致。
+            # 决策行里的 cycle_net_profit 来自特征快照，多为未结算值；逐文件回放时下一周期文件尚未读入，
+            # 不会在本文件最后一条事件上触发 _finalize_cycle，若直接取 cycle_decisions[-1] 会与「分周期执行交易流水」
+            # （按成交与结算口径）及 simulation 报告不一致。
             if cycle_decisions:
-                cycle_row = {
-                    'cycle_id': cycle_slug,
-                    'cycle_net_profit': float(cycle_decisions[-1].get("cycle_net_profit", 0.0)),
-                    'winner': cycle_decisions[-1].get("winner", ""),
-                    'account_cash': cycle_decisions[-1].get("account_cash", None),
-                }
+                finalized = engine.finalize_pending_cycle()
+                if finalized is not None:
+                    cycle_row = {
+                        "cycle_id": cycle_slug,
+                        "cycle_net_profit": float(finalized.get("cycle_net_profit", 0.0)),
+                        "winner": finalized.get("winner", ""),
+                        "account_cash": finalized.get("account_cash", None),
+                    }
+                else:
+                    cycle_row = {
+                        "cycle_id": cycle_slug,
+                        "cycle_net_profit": float(cycle_decisions[-1].get("cycle_net_profit", 0.0)),
+                        "winner": cycle_decisions[-1].get("winner", ""),
+                        "account_cash": cycle_decisions[-1].get("account_cash", None),
+                    }
 
                 # 增量写入文件
                 write_cycle_results_incremental(
@@ -248,17 +278,17 @@ def run_batch_replay(
                 net_profit = cycle_row['cycle_net_profit']
                 print(
                     f"    [{idx}/{total_files}] {cycle_slug}: "
-                    f"events={len(events)} | profit={net_profit:.4f} | "
+                    f"events={len(sorted_events)}/{len(events)} | profit={net_profit:.4f} | "
                     f"executed={executed}"
                 )
 
             # 释放内存
             del events, sorted_events, cycle_decisions
 
-        # 最后一个周期结算
+        # 各周期已在文件循环内 finalize；此处仅兜底（例如未来改为合并读入多文件单周期时）
         pending = engine.finalize_pending_cycle()
         if pending:
-            print(f"  ℹ 最后周期已结算")
+            print("  ℹ 流结束后仍有未结算周期（已结算）；请检查事件切分逻辑")
 
         # 从流式输出文件读取数据生成报告
         cycle_csv = output_resolved / "streaming_cycle_results.csv"
@@ -311,6 +341,10 @@ def run_batch_replay(
                 continue
 
             sorted_events = sorted(events, key=lambda e: (e.market_id, e.cycle_id, e.timestamp))
+            sorted_events = filter_trade_events_after_post_window_delay(
+                sorted_events,
+                post_window_start_delay_seconds=_pwd,
+            )
             cycle_decisions: list[dict[str, object]] = []
 
             for event in sorted_events:
@@ -328,7 +362,7 @@ def run_batch_replay(
             net_profit = float(cycle_decisions[-1].get("cycle_net_profit", 0.0)) if cycle_decisions else 0.0
             print(
                 f"    [{idx}/{total_files}] {cycle_slug}: "
-                f"events={len(events)} | profit={net_profit:.4f} | "
+                f"events={len(sorted_events)}/{len(events)} | profit={net_profit:.4f} | "
                 f"executed={executed}"
             )
 
@@ -428,6 +462,7 @@ def main() -> int:
         capital_reset_mode=args.capital_reset_mode,
         per_cycle_cash=args.per_cycle_cash,
         include_trade_process=args.include_trade_process,
+        post_window_start_delay_seconds=args.post_window_start_delay_seconds,
     )
     return 0
 

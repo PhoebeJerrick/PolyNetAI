@@ -39,25 +39,42 @@ def calculate_position_percentage(features: FeatureSnapshot, config: StrategyCon
     return total / max_value
 
 
-def determine_phase(cycle_elapsed_seconds: float) -> int:
+_DEFAULT_PHASE_ENDS: tuple[float, float, float] = (70.0, 160.0, 240.0)
+
+
+def phase_end_seconds_from_config(config: StrategyConfig) -> tuple[float, float, float]:
+    """读取 ``cycle.phase_end_seconds_{1,2,3}``；若未配置或非法（非严格递增正数）则回退默认值。"""
+    try:
+        e1 = float(config.get("cycle.phase_end_seconds_1", _DEFAULT_PHASE_ENDS[0]))
+        e2 = float(config.get("cycle.phase_end_seconds_2", _DEFAULT_PHASE_ENDS[1]))
+        e3 = float(config.get("cycle.phase_end_seconds_3", _DEFAULT_PHASE_ENDS[2]))
+    except (TypeError, ValueError):
+        return _DEFAULT_PHASE_ENDS
+    if not (0.0 < e1 < e2 < e3):
+        return _DEFAULT_PHASE_ENDS
+    return (e1, e2, e3)
+
+
+def determine_phase(cycle_elapsed_seconds: float, config: StrategyConfig) -> int:
     """
     根据周期已过时间判断当前阶段（A+C联合方案）
 
     Args:
         cycle_elapsed_seconds: 周期已过时间（秒）
+        config: 策略配置（``cycle.phase_end_seconds_*`` 定义各阶段上界，含等号）
 
     Returns:
         阶段编号：1, 2, 3, 4
-        - 第一阶段（0-70s）：趋势低吸加仓，目标65%仓位
-        - 第二阶段（70-160s）：网格减仓为主
-        - 第三阶段（160-240s）：顺势加仓+对冲
-        - 第四阶段（240-290s）：确认方向加仓
+        - 第一阶段：(0, phase_end_1]
+        - 第二阶段：(phase_end_1, phase_end_2]
+        - 第三阶段：(phase_end_2, phase_end_3]
+        - 第四阶段：phase_end_3 之后至周期结束
     """
-    if cycle_elapsed_seconds <= 70:
+    e1, e2, e3 = phase_end_seconds_from_config(config)
+    if cycle_elapsed_seconds <= e1:
         return 1
-    elif cycle_elapsed_seconds <= 160:
+    if cycle_elapsed_seconds <= e2:
         return 2
-    elif cycle_elapsed_seconds <= 240:
+    if cycle_elapsed_seconds <= e3:
         return 3
-    else:
-        return 4
+    return 4

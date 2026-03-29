@@ -12,6 +12,12 @@ from typing import Any, Callable, Iterable
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
+from polynet_ai.adapters.cycle_window_timing import (
+    DEFAULT_POST_WINDOW_START_DELAY_SECONDS,
+    effective_strategy_start_naive_utc,
+    naive_utc_to_aware_utc,
+    sleep_until_utc_instant,
+)
 from polynet_ai.domain.models import TradeEvent
 
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
@@ -463,6 +469,7 @@ def iter_polymarket_trade_events(
     receive_timeout_seconds: float = 1.0,
     cycle_grace_seconds: float = 20.0,
     reconnect_delay_seconds: float = 1.0,
+    post_window_start_delay_seconds: float = DEFAULT_POST_WINDOW_START_DELAY_SECONDS,
     log_fn: Callable[[str], None] | None = None,
 ) -> Iterable[TradeEvent]:
     websocket = _import_websocket_module()
@@ -472,6 +479,18 @@ def iter_polymarket_trade_events(
     for spec in market_specs:
         if log_fn is not None:
             log_fn(f"[polymarket] 订阅周期 {spec.slug}")
+        eff_cutoff_naive = effective_strategy_start_naive_utc(
+            spec.slug, spec.start_time, post_window_start_delay_seconds
+        )
+        if post_window_start_delay_seconds > 0 and eff_cutoff_naive is not None:
+            eff_aware = naive_utc_to_aware_utc(eff_cutoff_naive)
+            if datetime.now(timezone.utc) < eff_aware:
+                if log_fn is not None:
+                    log_fn(
+                        f"[polymarket] {spec.slug} 策略生效时刻 "
+                        f"{eff_aware.strftime('%Y-%m-%d %H:%M:%S')}Z（窗起点+{post_window_start_delay_seconds:g}s），等待中..."
+                    )
+                sleep_until_utc_instant(eff_aware)
         close_after = None
         reconnect_attempt = 0
 
@@ -555,6 +574,8 @@ def iter_polymarket_trade_events(
 
                         event = ws_message_to_trade_event(message, spec)
                         if event is not None:
+                            if eff_cutoff_naive is not None and event.timestamp < eff_cutoff_naive:
+                                continue
                             yield event
             except closed_exc:
                 reconnect_attempt += 1
@@ -593,6 +614,7 @@ def iter_polymarket_trade_events_robot(
     ping_interval_seconds: float = 10.0,
     receive_timeout_seconds: float = 1.0,
     cycle_grace_seconds: float = 20.0,
+    post_window_start_delay_seconds: float = DEFAULT_POST_WINDOW_START_DELAY_SECONDS,
     log_fn: Callable[[str], None] | None = None,
 ) -> Iterable[TradeEvent]:
     """
@@ -634,6 +656,7 @@ def iter_polymarket_trade_events_robot(
                 ping_interval_seconds=ping_interval_seconds,
                 receive_timeout_seconds=receive_timeout_seconds,
                 cycle_grace_seconds=cycle_grace_seconds,
+                post_window_start_delay_seconds=post_window_start_delay_seconds,
                 log_fn=log_fn,
             )
 

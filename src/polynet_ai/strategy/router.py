@@ -36,7 +36,7 @@ def adjust_priority_by_phase(
     直接修改 intent.priority（原地修改，无返回值）。
     Phase 4 不做调整，使用基础优先级。
     """
-    phase = determine_phase(features.cycle_elapsed_seconds)
+    phase = determine_phase(features.cycle_elapsed_seconds, config)
     if phase == 4:
         return
 

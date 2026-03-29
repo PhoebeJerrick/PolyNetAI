@@ -5,7 +5,20 @@ from typing import Iterable
 
 import pandas as pd
 
+from polynet_ai.adapters.cycle_window_timing import window_start_naive_utc_from_slug
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def absolute_cycle_open_timestamp_utc_for_cycle_id(cycle_id: object) -> pd.Timestamp:
+    """Polymarket 时间桶的 cycle_id/slug 对应绝对开盘（UTC）；无法从 slug 解析则 NaT。
+
+    报表「下注时间距开盘差」、尾盘窗口按秒切分等应与 ``window_start_naive_utc_from_slug`` 一致。
+    """
+    naive = window_start_naive_utc_from_slug(str(cycle_id).strip())
+    if naive is None:
+        return pd.NaT
+    return pd.Timestamp(naive).tz_localize("UTC")
 
 # 与 analyze_polymarket_tracker / 批量绩效报告交易流水表一致，置于「成交价格」右侧
 SAME_OUTCOME_PRICE_MOVE_COL = "同向成交价波动幅度(%)"
@@ -213,9 +226,13 @@ def export_trade_ledger_to_excel(
     if "event_index" not in snapshots.columns:
         snapshots["event_index"] = range(1, len(snapshots) + 1)
 
-    executed["timestamp"] = pd.to_datetime(executed.get("timestamp"), errors="coerce")
-    snapshots["timestamp"] = pd.to_datetime(snapshots.get("timestamp"), errors="coerce")
-    cycle_starts = snapshots.groupby("cycle_id", dropna=False)["timestamp"].min().rename("cycle_start").reset_index()
+    executed["timestamp"] = pd.to_datetime(executed.get("timestamp"), errors="coerce", utc=True)
+    snapshots["timestamp"] = pd.to_datetime(snapshots.get("timestamp"), errors="coerce", utc=True)
+    cycle_starts_fb = snapshots.groupby("cycle_id", dropna=False)["timestamp"].min().rename("cycle_start_fb").reset_index()
+    cycle_starts_fb["cycle_start"] = cycle_starts_fb["cycle_id"].map(absolute_cycle_open_timestamp_utc_for_cycle_id)
+    miss = cycle_starts_fb["cycle_start"].isna() & cycle_starts_fb["cycle_start_fb"].notna()
+    cycle_starts_fb.loc[miss, "cycle_start"] = cycle_starts_fb.loc[miss, "cycle_start_fb"]
+    cycle_starts = cycle_starts_fb.drop(columns=["cycle_start_fb"])
     merged = executed.merge(
         snapshots,
         on="event_index",
@@ -237,11 +254,12 @@ def export_trade_ledger_to_excel(
         timestamp_col=ts_for_move,
     )
 
+    ts_ledger = "timestamp_decision" if "timestamp_decision" in merged.columns else "timestamp"
     ledger = pd.DataFrame(
         {
             "下注时间距开盘差(分，秒)": [
                 _format_elapsed(ts, start)
-                for ts, start in zip(merged["timestamp"], merged["cycle_start"])
+                for ts, start in zip(merged[ts_ledger], merged["cycle_start"])
             ],
             "市场标题": merged.get("market_id", pd.Series(dtype=object)).fillna(""),
             "时间周期": merged.get("cycle_id", pd.Series(dtype=object)).fillna(""),

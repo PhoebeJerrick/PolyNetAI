@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
+export PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}"
+
 PYTHON_BIN="${PYTHON:-python}"
 DEFAULT_OUTPUT_DIR="${RECORD_OUTPUT_DIR:-artifacts/live/record_job}"
 DEFAULT_SLUG_PREFIX="${RECORD_SLUG_PREFIX:-btc-updown-5m-}"

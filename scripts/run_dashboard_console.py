@@ -18,9 +18,12 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from polynet_ai.config_io import load_yaml_mapping, write_yaml_mapping  # noqa: E402
 from polynet_ai.launcher import apply_profile_overrides, build_launch_profiles, build_project_help_text, format_command, resolve_profile_values  # noqa: E402
+from scripts.run_recorded_live_paper import clear_streaming_csv_cache  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -206,11 +209,15 @@ class DashboardRunManager:
             self._refresh_locked()
             if self._process is not None:
                 raise RuntimeError("已有任务正在运行，请先停止当前任务。")
+            # 与 run_recorded_live_paper / 流式 batch 一致：新任务开始前清掉上次的 streaming_*.csv，避免与旧文件混写
+            _n_stream = clear_streaming_csv_cache(self._dashboard_dir)
             logs_dir = self._dashboard_dir / "runtime_logs"
             logs_dir.mkdir(parents=True, exist_ok=True)
             log_path = logs_dir / f"{profile.name}.log"
             log_handle = log_path.open("a", encoding="utf-8")
             log_handle.write(f"\n=== START {profile.title} ===\n")
+            if _n_stream:
+                log_handle.write(f"[cache] 已删除 {_n_stream} 个 streaming_*.csv\n")
             log_handle.write(format_command(profile.command) + "\n")
             log_handle.flush()
             self._process = subprocess.Popen(

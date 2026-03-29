@@ -40,6 +40,29 @@ class StrategyConfig:
         return StrategyConfig(raw=updated)
 
 
+def post_window_start_delay_seconds_from_config(config: StrategyConfig) -> float:
+    """读取 ``cycle.post_window_start_delay_seconds``（缺省与 ``cycle_window_timing.DEFAULT`` 一致）。"""
+    from polynet_ai.adapters.cycle_window_timing import DEFAULT_POST_WINDOW_START_DELAY_SECONDS
+
+    raw = config.get("cycle.post_window_start_delay_seconds", DEFAULT_POST_WINDOW_START_DELAY_SECONDS)
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        v = float(DEFAULT_POST_WINDOW_START_DELAY_SECONDS)
+    return max(0.0, v)
+
+
+def resolve_post_window_start_delay_seconds(
+    *,
+    config: StrategyConfig,
+    cli_seconds: float | None,
+) -> float:
+    """若 ``cli_seconds`` 非 None 则优先命令行，否则用配置。"""
+    if cli_seconds is not None:
+        return max(0.0, float(cli_seconds))
+    return post_window_start_delay_seconds_from_config(config)
+
+
 def load_strategy_config(path: str | Path) -> StrategyConfig:
     try:
         import yaml

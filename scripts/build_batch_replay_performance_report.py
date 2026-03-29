@@ -40,11 +40,31 @@ TRADE_PROCESS_PREF_COLS = (
 
 from polynet_ai.reporting.excel_export import (
     SAME_OUTCOME_PRICE_MOVE_COL,
+    absolute_cycle_open_timestamp_utc_for_cycle_id,
     _format_elapsed,
     compute_same_outcome_price_move_pct,
     get_version_tag,
     infer_decision_reason,
 )
+
+_TRADE_PROCESS_ELAPSED_COL = "下注时间距开盘差(分,秒)"
+
+
+def _cycle_starts_from_full_decision_frame(full: pd.DataFrame) -> pd.DataFrame:
+    """``full`` 须含 ``market_id``、``_pid``、``timestamp``（已 ``to_datetime(..., utc=True)``）。
+
+    返回各 (market_id, _pid) 的绝对开盘（slug epoch）UTC 时间；无法解析 slug 时回退为该组最早一条数据时间。
+    """
+    starts_min = full.groupby(["market_id", "_pid"], dropna=False)["timestamp"].min().reset_index(
+        name="_cycle_start_fallback"
+    )
+    key_open = full[["market_id", "_pid"]].drop_duplicates().copy()
+    key_open["_from_slug"] = key_open["_pid"].map(absolute_cycle_open_timestamp_utc_for_cycle_id)
+    key_open = key_open.merge(starts_min, on=["market_id", "_pid"], how="left")
+    key_open["_cycle_start"] = key_open["_from_slug"]
+    miss = key_open["_cycle_start"].isna() & key_open["_cycle_start_fallback"].notna()
+    key_open.loc[miss, "_cycle_start"] = key_open.loc[miss, "_cycle_start_fallback"]
+    return key_open[["market_id", "_pid", "_cycle_start"]]
 
 
 def parse_args() -> argparse.Namespace:
@@ -230,7 +250,7 @@ def summarize_tail_window_executions(
         full["_pid"] = full["cycle_id"].fillna(full.get("cycle_slug", "")).astype(str)
     else:
         full["_pid"] = full.get("cycle_slug", pd.Series(dtype=object)).fillna("").astype(str)
-    starts = full.groupby(["market_id", "_pid"], dropna=False)["timestamp"].min().reset_index(name="_cycle_start")
+    starts = _cycle_starts_from_full_decision_frame(full)
 
     dec = decision_df.copy()
     if "executed" in dec.columns:
@@ -344,7 +364,7 @@ def _batch_replay_decisions_to_tracker_input(
     else:
         full["_pid"] = full.get("cycle_slug", pd.Series(dtype=object)).fillna("").astype(str)
 
-    starts = full.groupby(["market_id", "_pid"], dropna=False)["timestamp"].min().reset_index(name="_cycle_start")
+    starts = _cycle_starts_from_full_decision_frame(full)
 
     if "market_id" not in dec.columns or dec["market_id"].isna().all():
         if not cycle_df.empty and "cycle_slug" in dec.columns and "market_id" in cycle_df.columns:
@@ -821,6 +841,21 @@ def _write_batch_trade_process_xlsx(
             "selected_action": "策略动作",
         }
     )
+
+    if "timestamp" in dec_out.columns and "cycle_slug" in dec_out.columns and not dec_out.empty:
+        ts_u = pd.to_datetime(dec_out["timestamp"], errors="coerce", utc=True)
+        abs_open = dec_out["cycle_slug"].map(absolute_cycle_open_timestamp_utc_for_cycle_id)
+        fb_min = dec_out.groupby("cycle_slug", dropna=False)["timestamp"].transform(
+            lambda s: pd.to_datetime(s, errors="coerce", utc=True).min()
+        )
+        cycle_ref = abs_open.where(abs_open.notna(), fb_min)
+        elapsed_series = pd.Series(
+            [_format_elapsed(t, c) for t, c in zip(ts_u, cycle_ref)],
+            index=dec_out.index,
+            dtype=object,
+        )
+        pos = int(dec_out.columns.get_loc("cycle_slug")) + 1
+        dec_out.insert(pos, _TRADE_PROCESS_ELAPSED_COL, elapsed_series)
 
     xlsx_path.parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
