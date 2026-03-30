@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from polynet_ai.domain.models import FeatureSnapshot, OrderIntent, Outcome
-from polynet_ai.strategy.cycle_windows import rule_disabled_in_cycle_tail
+from polynet_ai.strategy.cycle_windows import determine_phase, rule_disabled_in_cycle_tail
 from polynet_ai.strategy.spec import StrategyConfig
 from polynet_ai.strategy.price_reference import outcome_reference_price
 
@@ -209,42 +209,67 @@ def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Orde
         return []
     if abs(features.net_position) > float(config.get("exposure.max_grid_net_position", 20.0)):
         return []
+    # 首单由 opening_entries 负责；grid 仅在已有至少一笔策略成交后介入
+    if features.strategy_trades == 0:
+        return []
 
-    low = float(config.get("grid.grid_low_percentile", 0.25))
-    high = float(config.get("grid.grid_high_percentile", 0.75))
     size = _base_size(config, features)
     intents: list[OrderIntent] = []
     infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
-    if features.price_percentile <= low:
-        ref = outcome_reference_price(features, "up", infer_missing_with_binary_complement=infer_missing)
-        intents.append(
-            OrderIntent(
-                market_id=features.market_id,
-                cycle_id=features.cycle_id,
-                outcome="up",
-                action="buy",
-                shares=size,
-                reference_price=ref,
-                category="grid",
-                reason="震荡区间低位买入 Up",
-                priority=int(config.priorities.get("grid", 60)),
+    phase = determine_phase(features.cycle_elapsed_seconds, config)
+
+    if phase < 4:
+        # 阶段1-3：不限制 percentile，双向布仓（震荡区间积累双边敞口）
+        for outcome in ("up", "down"):
+            ref = outcome_reference_price(features, outcome, infer_missing_with_binary_complement=infer_missing)
+            label = "Up" if outcome == "up" else "Down"
+            intents.append(
+                OrderIntent(
+                    market_id=features.market_id,
+                    cycle_id=features.cycle_id,
+                    outcome=outcome,
+                    action="buy",
+                    shares=size,
+                    reference_price=ref,
+                    category="grid",
+                    reason=f"震荡区间双向建仓（阶段{phase}）买入 {label}",
+                    priority=int(config.priorities.get("grid", 60)),
+                )
             )
-        )
-    if features.price_percentile >= high:
-        ref = outcome_reference_price(features, "down", infer_missing_with_binary_complement=infer_missing)
-        intents.append(
-            OrderIntent(
-                market_id=features.market_id,
-                cycle_id=features.cycle_id,
-                outcome="down",
-                action="buy",
-                shares=size,
-                reference_price=ref,
-                category="grid",
-                reason="震荡区间高位买入 Down",
-                priority=int(config.priorities.get("grid", 60)),
+    else:
+        # 阶段4：仅在极值 percentile 选边入场
+        low = float(config.get("grid.grid_low_percentile", 0.25))
+        high = float(config.get("grid.grid_high_percentile", 0.75))
+        if features.price_percentile <= low:
+            ref = outcome_reference_price(features, "up", infer_missing_with_binary_complement=infer_missing)
+            intents.append(
+                OrderIntent(
+                    market_id=features.market_id,
+                    cycle_id=features.cycle_id,
+                    outcome="up",
+                    action="buy",
+                    shares=size,
+                    reference_price=ref,
+                    category="grid",
+                    reason="震荡区间低位买入 Up（阶段4）",
+                    priority=int(config.priorities.get("grid", 60)),
+                )
             )
-        )
+        if features.price_percentile >= high:
+            ref = outcome_reference_price(features, "down", infer_missing_with_binary_complement=infer_missing)
+            intents.append(
+                OrderIntent(
+                    market_id=features.market_id,
+                    cycle_id=features.cycle_id,
+                    outcome="down",
+                    action="buy",
+                    shares=size,
+                    reference_price=ref,
+                    category="grid",
+                    reason="震荡区间高位买入 Down（阶段4）",
+                    priority=int(config.priorities.get("grid", 60)),
+                )
+            )
     return intents
 
 

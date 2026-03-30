@@ -107,6 +107,10 @@ class StrategyRouter:
 
     def _snapshot_for_rule(self, base: FeatureSnapshot, path: tuple[str, ...]) -> FeatureSnapshot:
         interval = self._feed_interval_seconds(path)
+        if path == ("entries", "opening"):
+            opening_window = float(self.config.get("opening_entry.window_seconds", 30.0))
+            if base.cycle_elapsed_seconds <= opening_window:
+                return base
         if interval <= 0:
             return base
         key = self._feed_key(path)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from polynet_ai.domain.models import FeatureSnapshot, Outcome
 from polynet_ai.domain.settlement import settlement_summary
@@ -235,6 +235,7 @@ def build_feature_snapshot(
     engine: StateEngine,
     cycle_seconds: int,
     last_minute_seconds: int,
+    trend_window_secs: float = 6.0,
 ) -> FeatureSnapshot:
     if engine.state is None or engine.state.last_event_timestamp is None:
         raise RuntimeError("state engine has no market context")
@@ -249,10 +250,12 @@ def build_feature_snapshot(
     price_move = state.last_price - opening
     volatility_ratio = volatility / opening if opening > 1e-10 else 0.0
 
-    # ── 趋势强度重设计：基于最近 N 笔市场成交的同向比例 ──────────────────────────────────
-    # 旧方案（连续计数/总数）在高频二元市场中永远 << 0.5，新方案用滑动窗口比例
-    _TREND_WINDOW = 30  # 最近 30 笔市场成交（仅市场交易，不含策略成交）
-    _recent_tape = list(engine.market_tape)[-_TREND_WINDOW:]
+    # ── 趋势强度重设计：基于最近 N 秒内市场成交的同向比例 ──────────────────────────────────
+    # 用时间窗口而非枚举数量，确保在不同成交频率下覆盖相同时段
+    _trend_window_secs = trend_window_secs
+    _tape_all = list(engine.market_tape)
+    _cutoff = timestamp - timedelta(seconds=_trend_window_secs)
+    _recent_tape = [t for t in _tape_all if t.timestamp >= _cutoff]
     if len(_recent_tape) >= 3:
         _up_count = sum(1 for t in _recent_tape if t.outcome == "up")
         _total = len(_recent_tape)
@@ -289,13 +292,32 @@ def build_feature_snapshot(
         down_high=state.down_market_high,
         down_n=state.down_market_n,
     )
+    # ── 浮动盈亏：尾盘用结算估值，非尾盘用市价估值 ──────────────────────────────────────
+    # 非尾盘阶段无法确认最终获胜方向（当前赔率不足以判断结算结果），
+    # 强制结算估值会把另一方向持仓计为全损，误触发熔断机制（机制1）。
+    # 进入 last_minute 后时间不够反转，才切换为结算价值做最终风控。
+    _is_last_minute = elapsed >= max(0, cycle_seconds - last_minute_seconds)
+    if _is_last_minute:
+        _unrealized_up   = summary.unrealized_up_pnl
+        _unrealized_down = summary.unrealized_down_pnl
+        _cycle_net       = summary.cycle_net_profit
+    else:
+        _u = (state.up_position.held * (up_px - state.up_position.avg_price)
+              if state.up_position.avg_price > 0 else 0.0)
+        _d = (state.down_position.held * (down_px - state.down_position.avg_price)
+              if state.down_position.avg_price > 0 else 0.0)
+        _unrealized_up   = round(_u, 3)
+        _unrealized_down = round(_d, 3)
+        _cycle_net       = round(
+            state.up_position.realized_pnl + state.down_position.realized_pnl + _u + _d, 3
+        )
     return FeatureSnapshot(
         market_id=state.market_id,
         cycle_id=state.cycle_id,
         timestamp=timestamp,
         price=state.last_price,
         cycle_elapsed_seconds=elapsed,
-        is_last_minute=elapsed >= max(0, cycle_seconds - last_minute_seconds),
+        is_last_minute=_is_last_minute,
         trend_bias=trend_bias,
         trend_strength=trend_strength,
         net_direction=state.net_direction(),
@@ -311,11 +333,11 @@ def build_feature_snapshot(
         volatility_ratio=volatility_ratio,
         price_percentile=_price_percentile(up_px, up_low, up_high),
         realized_pnl=state.up_position.realized_pnl + state.down_position.realized_pnl,
-        unrealized_up_pnl=summary.unrealized_up_pnl,
-        unrealized_down_pnl=summary.unrealized_down_pnl,
-        cycle_net_profit=summary.cycle_net_profit,
+        unrealized_up_pnl=_unrealized_up,
+        unrealized_down_pnl=_unrealized_down,
+        cycle_net_profit=_cycle_net,
         opening_vs_last_move=price_move,
-        confidence_proxy=_confidence_proxy(summary.cycle_net_profit, price_move, volatility),
+        confidence_proxy=_confidence_proxy(_cycle_net, price_move, volatility),
         market_regime=market_regime,
         strategy_trades=state.strategy_trades,
         market_trades=state.market_trades,

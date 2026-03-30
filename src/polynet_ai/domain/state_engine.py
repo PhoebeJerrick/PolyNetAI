@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import re
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .models import CycleState, FillEvent, Outcome, TradeAction, TradeEvent
 from .settlement import settlement_summary
+
+# 从 cycle slug（如 btc-updown-5m-1774240200）解析名义开盘 epoch
+_SLUG_EPOCH_RE = re.compile(r"-updown-\d+m-(\d+)$")
 
 
 @dataclass(slots=True)
@@ -47,7 +51,19 @@ class StateEngine:
     def start_cycle(self, market_id: str, cycle_id: str, timestamp: datetime) -> CycleState:
         self.market_tape.clear()
         self.strategy_fills.clear()
-        self.state = CycleState(market_id=market_id, cycle_id=cycle_id, cycle_start=timestamp)
+        # 优先从 cycle_id slug 解析名义开盘时间，使 cycle_elapsed_seconds 与
+        # 报表「下注时间距开盘差」对齐；解析失败则回退到首条事件时间。
+        m = _SLUG_EPOCH_RE.search(str(cycle_id))
+        if m is not None:
+            try:
+                cycle_start: datetime = datetime.fromtimestamp(
+                    int(m.group(1)), tz=timezone.utc
+                ).replace(tzinfo=None)
+            except (ValueError, OSError):
+                cycle_start = timestamp
+        else:
+            cycle_start = timestamp
+        self.state = CycleState(market_id=market_id, cycle_id=cycle_id, cycle_start=cycle_start)
         self._snapshot_cache = None  # Invalidate cache on new cycle
         return self.state
 

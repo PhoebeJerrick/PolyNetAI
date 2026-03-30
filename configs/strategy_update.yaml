@@ -21,12 +21,12 @@ dynamic_priority:
   phase_3_grid_boost: 15             # 网格加仓优先级提升幅度
 opening_entry:
   enabled: true
-  window_seconds: 30             # 仅周期前30秒允许开仓入场
-  min_market_trades: 1           # 最小市场成交量（笔），低于此值不触发开仓入场
-  vwap_epsilon: 0.01             # 价格边界容忍度：入场价格必须优于（上涨）或劣于（下跌）vwap ± vwap_epsilon
-  range_low_fraction: 0.35       # 价格范围下边界位置：入场价格必须优于 vwap - (vwap - low) * range_low_fraction
-  min_range_width: 0.02          # 最小价格范围：入场价格必须优于 vwap - max((vwap - low) * range_low_fraction, vwap * min_range_width)
-  infer_missing_with_binary_complement: true      # 是否启用缺失数据推断：当市场成交量为0时，仍允许入场决策；通过二元互补推断价格位置（上涨或下跌）
+  window_seconds: 30
+  min_market_trades: 3
+  vwap_epsilon: 0.01
+  range_low_fraction: 0.35
+  min_range_width: 0.02
+  infer_missing_with_binary_complement: true
 order_sizing:
   # 兼容旧版键：base_order_size/min_order_size/max_order_size/volatility_order_scale
   buy:
@@ -147,14 +147,14 @@ last_minute:
   preferred_leg_min_ratio: 1.2
   # A+C联合方案：第四阶段方向确认参数
   direction_ratio_threshold: 1.5         # 优势侧仓位价值 ≥ 另一侧 × 此值
-  pnl_ratio_threshold: 2.0               # 优势侧浮盈 > 劣势侧浮盈 × 此值
+  pnl_ratio_threshold: 2.0              # 优势侧浮盈 > 劣势侧浮盈 × 此值
   min_trend_strength_for_direction: 0.6  # 趋势强度 ≥ 此值才确认方向
   conservative_max_exposure: 10.0        # 无法确认方向时的保守最大敞口
 execution:
   fee_rate: 0.002
-  slippage_bps: 5                        
-  min_seconds_between_orders: 2.0         
-  min_same_outcome_price_move_ratio: 0.005   
+  slippage_bps: 5
+  min_seconds_between_orders: 2.0
+  min_same_outcome_price_move_ratio: 0.005
 
 # 【新增】每日风险管理参数
 daily_limits:
@@ -169,19 +169,19 @@ daily_limits:
     enforce_sell_min_order_size: true
 # 各买入/卖出规则单独喂价：间隔内沿用上次刷新时的「最近价」；0 表示每 tick 用最新价（与旧行为一致）
 rule_price_feed:
-  last_minute:  2
+  last_minute: 1
   entries:
-    opening: 2
-    hedge: 2
-    grid: 2
-    mean_reversion: 2
-    trend: 2
+    opening: 1
+    hedge: 1
+    grid: 1
+    mean_reversion: 1
+    trend: 1
   exits:
-    stop_loss: 2
-    hedge: 2
-    take_profit: 2
-    grid: 2
-    mean_reversion: 2
+    stop_loss: 1
+    hedge: 1
+    take_profit: 1
+    grid: 1
+    mean_reversion: 1
 priorities:
   risk: 10
   last_minute: 20

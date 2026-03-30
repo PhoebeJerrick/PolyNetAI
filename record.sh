@@ -9,8 +9,16 @@ export PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}"
 PYTHON_BIN="${PYTHON:-python}"
 DEFAULT_OUTPUT_DIR="${RECORD_OUTPUT_DIR:-artifacts/live/record_job}"
 DEFAULT_SLUG_PREFIX="${RECORD_SLUG_PREFIX:-btc-updown-5m-}"
-DEFAULT_CONFIG="${RECORD_CONFIG:-configs/strategy.yaml}"
-DEFAULT_OVERRIDES="${RECORD_OVERRIDES:-artifacts/trial_022/overrides.json}"
+if [[ -z "${RECORD_CONFIG:-}" ]]; then
+  if [[ -f "configs/strategy_update.yaml" ]]; then
+    DEFAULT_CONFIG="configs/strategy_update.yaml"
+  else
+    DEFAULT_CONFIG="configs/strategy.yaml"
+  fi
+else
+  DEFAULT_CONFIG="$RECORD_CONFIG"
+fi
+DEFAULT_OVERRIDES="${RECORD_OVERRIDES:-}"
 DEFAULT_STARTING_CASH="${RECORD_STARTING_CASH:-100}"
 DEFAULT_PER_CYCLE_CASH="${RECORD_PER_CYCLE_CASH:-}"
 DEFAULT_ENV_FILE="${RECORD_ENV_FILE:-../APIs/ApiConfig.env}"

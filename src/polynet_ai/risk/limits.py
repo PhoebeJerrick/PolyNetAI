@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from polynet_ai.domain.models import FeatureSnapshot, OrderIntent
+from polynet_ai.strategy.cycle_windows import determine_phase
 from polynet_ai.strategy.spec import StrategyConfig
 
 
@@ -88,11 +89,16 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
             config.get("exposure.max_abs_exposure", 200.0),
         )
     )
+    # Phase 4（最后阶段）：方向已基本确定，允许扩大净敞口上限以充分获利
+    if determine_phase(features.cycle_elapsed_seconds, config) == 4:
+        max_exposure = float(
+            config.get("exposure.phase_4_max_abs_exposure_value", max_exposure)
+        )
     max_trades = int(config.get("exposure.max_strategy_trades_per_cycle", 12))
     fee_rate = float(config.get("execution.fee_rate", 0.002))
     slippage_bps = float(config.get("execution.slippage_bps", 10.0))
     max_cash_utilization = float(config.get("capital.max_cash_utilization", 0.95))
-    min_cash_buffer = float(config.get("capital.min_cash_buffer", 25.0))
+    min_cash_buffer = float(config.get("capital.min_cash_buffer", 0.0))
     if intent.action == "buy":
         clipped = intent.clipped(effective_buy_min_order, buy_max_order)
     else:

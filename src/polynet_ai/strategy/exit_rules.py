@@ -165,8 +165,9 @@ def stop_loss_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[O
         triggered = False
 
         # 机制2 — 触发2：双条件（条件A / 条件B 互斥）
-        if last_price <= near_zero_price:
-            # 条件A：近零价格，立即全平（无时间限制）
+        # 条件A：近零价格全平 —— 仅在 last_minute 阶段触发
+        # 原理：非尾盘阶段价格极值可能反转，保留仓位等待回归；尾盘无时间恢复才强制全平
+        if last_price <= near_zero_price and features.is_last_minute:
             intents.append(OrderIntent(
                 market_id=features.market_id,
                 cycle_id=features.cycle_id,
@@ -177,7 +178,7 @@ def stop_loss_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[O
                 category="stop_loss",
                 reason=(
                     f"{outcome.upper()} 价格{last_price:.4f}≤近零阈值{near_zero_price:.4f}"
-                    f"（阶段{phase}），条件A全平"
+                    f"（阶段{phase}，尾盘），条件A全平"
                 ),
                 priority=priority,
             ))

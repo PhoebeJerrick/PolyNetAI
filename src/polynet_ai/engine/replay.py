@@ -55,6 +55,7 @@ class ReplayEngine:
         # 优化 #2：缓存风控参数用于快速失败检查
         self.min_seconds_between_orders = float(config.get("execution.min_seconds_between_orders", 2.0))
         self.max_strategy_trades_per_cycle = int(config.get("exposure.max_strategy_trades_per_cycle", 40))
+        self.trend_window_secs = float(config.get("trend.trend_window", 6.0))
         self.state_engine = StateEngine()
         self.router = StrategyRouter(config)
         self.capital_reset_mode = str(capital_reset_mode).strip().lower() or "cumulative"
@@ -234,6 +235,7 @@ class ReplayEngine:
                 self.state_engine,
                 cycle_seconds=self.cycle_seconds,
                 last_minute_seconds=self.last_minute_seconds,
+                trend_window_secs=self.trend_window_secs,
             )
             self._feature_cache = features
             self._feature_cache_timestamp = now

@@ -60,10 +60,13 @@ def _cycle_starts_from_full_decision_frame(full: pd.DataFrame) -> pd.DataFrame:
     )
     key_open = full[["market_id", "_pid"]].drop_duplicates().copy()
     key_open["_from_slug"] = key_open["_pid"].map(absolute_cycle_open_timestamp_utc_for_cycle_id)
+    key_open["_from_slug"] = pd.to_datetime(key_open["_from_slug"], errors="coerce", utc=True)
+    starts_min["_cycle_start_fallback"] = pd.to_datetime(
+        starts_min["_cycle_start_fallback"], errors="coerce", utc=True
+    )
     key_open = key_open.merge(starts_min, on=["market_id", "_pid"], how="left")
-    key_open["_cycle_start"] = key_open["_from_slug"]
-    miss = key_open["_cycle_start"].isna() & key_open["_cycle_start_fallback"].notna()
-    key_open.loc[miss, "_cycle_start"] = key_open.loc[miss, "_cycle_start_fallback"]
+    # 优先使用更早的时间戳，避免 slug 解析结果偏晚时把有效成交排除在周期窗口外。
+    key_open["_cycle_start"] = key_open[["_from_slug", "_cycle_start_fallback"]].min(axis=1)
     return key_open[["market_id", "_pid", "_cycle_start"]]
 
 
@@ -212,6 +215,186 @@ def _infer_cycle_length_seconds(cycle_slug: object) -> int:
     if m:
         return int(m.group(1)) * 60
     return 300
+
+
+def _is_up_outcome(value: object) -> bool:
+    text = str(value or "").strip().lower()
+    return text in {"up", "yes"}
+
+
+def _is_down_outcome(value: object) -> bool:
+    text = str(value or "").strip().lower()
+    return text in {"down", "no"}
+
+
+def _build_cycle_price_frame(
+    decision_df: pd.DataFrame,
+    cycle_df: pd.DataFrame,
+    *,
+    complete_only: bool,
+) -> pd.DataFrame:
+    """构建每条行情事件对应的 Up/Down 价格明细，并补齐周期内秒数。"""
+    columns = [
+        "cycle_slug",
+        "timestamp",
+        "周期内秒数",
+        "下注时间距开盘差(分,秒)",
+        "market_outcome",
+        "market_price",
+        "Up价格",
+        "Down价格",
+        "selected_outcome",
+        "selected_action",
+        "executed",
+    ]
+    if decision_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    dec = decision_df.copy()
+    if "cycle_slug" not in dec.columns:
+        dec["cycle_slug"] = dec.get("cycle_id", pd.Series(dtype=object)).fillna("").astype(str)
+    else:
+        dec["cycle_slug"] = dec["cycle_slug"].fillna(dec.get("cycle_id", "")).astype(str)
+
+    if complete_only and not cycle_df.empty:
+        complete_cycle_slugs = set(
+            cycle_df.get("cycle_slug", cycle_df.get("cycle_id", pd.Series(dtype=object)))
+            .fillna("")
+            .astype(str)
+            .tolist()
+        )
+        dec = dec[dec["cycle_slug"].isin(complete_cycle_slugs)]
+    if dec.empty:
+        return pd.DataFrame(columns=columns)
+
+    dec["timestamp"] = pd.to_datetime(dec.get("timestamp"), errors="coerce", utc=True)
+
+    if "market_id" not in dec.columns or dec["market_id"].isna().all():
+        if not cycle_df.empty and "cycle_slug" in cycle_df.columns and "market_id" in cycle_df.columns:
+            dec = dec.merge(
+                cycle_df.drop_duplicates(subset=["cycle_slug"], keep="first")[["cycle_slug", "market_id"]],
+                on="cycle_slug",
+                how="left",
+            )
+    dec["market_id"] = dec.get("market_id", pd.Series(dtype=object)).fillna("").astype(str)
+    if "cycle_id" in dec.columns:
+        dec["_pid"] = dec["cycle_id"].fillna(dec.get("cycle_slug", "")).astype(str)
+    else:
+        dec["_pid"] = dec.get("cycle_slug", pd.Series(dtype=object)).fillna("").astype(str)
+
+    starts = _cycle_starts_from_full_decision_frame(dec)
+    dec = dec.merge(starts, on=["market_id", "_pid"], how="left")
+
+    dec["周期内秒数"] = (dec["timestamp"] - dec["_cycle_start"]).dt.total_seconds()
+    dec["周期内秒数"] = pd.to_numeric(dec["周期内秒数"], errors="coerce")
+    dec.loc[dec["周期内秒数"] < 0, "周期内秒数"] = 0.0
+    dec["下注时间距开盘差(分,秒)"] = [
+        _format_elapsed(ts, t0) for ts, t0 in zip(dec["timestamp"], dec["_cycle_start"])
+    ]
+
+    market_price = pd.to_numeric(dec.get("market_price", pd.Series(dtype=object)), errors="coerce")
+    if market_price.isna().all():
+        market_price = pd.to_numeric(dec.get("fill_price", pd.Series(dtype=object)), errors="coerce")
+    outcome = dec.get("market_outcome", pd.Series(dtype=object)).fillna("").astype(str)
+
+    up_price = pd.Series(pd.NA, index=dec.index, dtype="Float64")
+    down_price = pd.Series(pd.NA, index=dec.index, dtype="Float64")
+
+    up_mask = outcome.map(_is_up_outcome)
+    down_mask = outcome.map(_is_down_outcome)
+    up_price.loc[up_mask] = market_price.loc[up_mask]
+    down_price.loc[up_mask] = 1.0 - market_price.loc[up_mask]
+    down_price.loc[down_mask] = market_price.loc[down_mask]
+    up_price.loc[down_mask] = 1.0 - market_price.loc[down_mask]
+
+    result = pd.DataFrame(
+        {
+            "cycle_slug": dec["cycle_slug"],
+            "timestamp": dec["timestamp"].dt.tz_convert("UTC").dt.tz_localize(None),
+            "周期内秒数": dec["周期内秒数"],
+            "下注时间距开盘差(分,秒)": dec["下注时间距开盘差(分,秒)"],
+            "market_outcome": outcome,
+            "market_price": market_price,
+            "Up价格": up_price,
+            "Down价格": down_price,
+            "selected_outcome": dec.get("selected_outcome", pd.Series(dtype=object)).fillna("").astype(str),
+            "selected_action": dec.get("selected_action", pd.Series(dtype=object)).fillna("").astype(str),
+            "executed": dec.get("executed", pd.Series(dtype=object)),
+        }
+    )
+    result = result[result["timestamp"].notna()].copy()
+    result = result.sort_values(["cycle_slug", "timestamp"], kind="mergesort").reset_index(drop=True)
+    return result[columns]
+
+
+def _append_cycle_price_charts(
+    ws,
+    cycle_price_df: pd.DataFrame,
+    *,
+    title_prefix: str,
+) -> None:
+    """在同一 sheet 右侧追加每个周期的 Up/Down 价格折线图。"""
+    from openpyxl.chart import LineChart, Reference
+    from openpyxl.chart.series import SeriesLabel
+
+    if cycle_price_df.empty:
+        return
+
+    col_map = {name: idx + 1 for idx, name in enumerate(cycle_price_df.columns)}
+    cycle_col = col_map["cycle_slug"]
+    sec_col = col_map["周期内秒数"]
+    up_col = col_map["Up价格"]
+    down_col = col_map["Down价格"]
+
+    row_cursor = 2
+    chart_idx = 0
+    max_row = len(cycle_price_df) + 1
+    while row_cursor <= max_row:
+        cycle_value = ws.cell(row=row_cursor, column=cycle_col).value
+        row_end = row_cursor
+        while row_end + 1 <= max_row and ws.cell(row=row_end + 1, column=cycle_col).value == cycle_value:
+            row_end += 1
+
+        chart = LineChart()
+        chart.title = f"{title_prefix} - {cycle_value}"
+        chart.y_axis.title = "价格"
+        chart.x_axis.title = "周期内秒数"
+        chart.height = 6.5
+        chart.width = 11.5
+
+        up_ref = Reference(ws, min_col=up_col, min_row=row_cursor, max_row=row_end)
+        down_ref = Reference(ws, min_col=down_col, min_row=row_cursor, max_row=row_end)
+        x_ref = Reference(ws, min_col=sec_col, min_row=row_cursor, max_row=row_end)
+
+        chart.add_data(up_ref, titles_from_data=False)
+        chart.add_data(down_ref, titles_from_data=False)
+        chart.set_categories(x_ref)
+        if len(chart.series) >= 2:
+            chart.series[0].title = SeriesLabel(v=str(ws.cell(row=1, column=up_col).value or "Up价格"))
+            chart.series[1].title = SeriesLabel(v=str(ws.cell(row=1, column=down_col).value or "Down价格"))
+
+        anchor_row = 2 + chart_idx * 15
+        ws.add_chart(chart, f"N{anchor_row}")
+
+        chart_idx += 1
+        row_cursor = row_end + 1
+
+
+def _write_cycle_price_sheet(
+    writer: pd.ExcelWriter,
+    *,
+    sheet_name: str,
+    cycle_price_df: pd.DataFrame,
+    chart_title_prefix: str,
+) -> None:
+    if cycle_price_df.empty:
+        pd.DataFrame({"说明": ["无可用价格数据，未生成分周期价格图表。"]}).to_excel(
+            writer, sheet_name=sheet_name, index=False
+        )
+        return
+    cycle_price_df.to_excel(writer, sheet_name=sheet_name, index=False)
+    ws = writer.sheets[sheet_name]
+    _append_cycle_price_charts(ws, cycle_price_df, title_prefix=chart_title_prefix)
 
 
 def summarize_tail_window_executions(
@@ -615,6 +798,13 @@ def _write_performance_report_xlsx(
         direction_df.to_excel(writer, sheet_name="执行方向分布", index=False)
         winner_df.to_excel(writer, sheet_name="周期赢家分布", index=False)
         net_direction_df.to_excel(writer, sheet_name="周期净方向分布", index=False)
+        full_cycle_prices = _build_cycle_price_frame(decision_df, cycle_df, complete_only=True)
+        _write_cycle_price_sheet(
+            writer,
+            sheet_name="完整周期价格图",
+            cycle_price_df=full_cycle_prices,
+            chart_title_prefix="完整周期价格折线图",
+        )
         if tail_per_cycle_df is not None and not tail_per_cycle_df.empty:
             tail_per_cycle_df.to_excel(writer, sheet_name="尾盘窗口成交汇总", index=False)
         _append_tracker_style_sheet(writer, tracker_raw, cycle_df)
@@ -858,10 +1048,17 @@ def _write_batch_trade_process_xlsx(
         dec_out.insert(pos, _TRADE_PROCESS_ELAPSED_COL, elapsed_series)
 
     xlsx_path.parent.mkdir(parents=True, exist_ok=True)
+    cycle_prices = _build_cycle_price_frame(decision_df, cycle_df, complete_only=False)
     with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
         meta_df.to_excel(writer, sheet_name="元数据", index=False)
         snap_df.to_excel(writer, sheet_name="周期快照", index=False)
         dec_out.to_excel(writer, sheet_name="决策流水", index=False)
+        _write_cycle_price_sheet(
+            writer,
+            sheet_name="周期价格与图表",
+            cycle_price_df=cycle_prices,
+            chart_title_prefix="回放周期价格折线图",
+        )
     _finalize_xlsx_workbook(xlsx_path)
     return xlsx_path
 

@@ -116,9 +116,9 @@
 
 | 参数 | 值 |
 |-----|---|
-| 最大交易次数 | 40 次/周期（`max_strategy_trades_per_cycle`） |
-| 同方向订单最小间隔 | ≥ 2 秒 |
-| 同方向再入场价格波动要求 | ≥ 3% |
+| 最大交易次数 | 80 次/周期（`max_strategy_trades_per_cycle`，Last Minute 豁免） |
+| 同方向订单最小间隔 | ≥ 2 秒（按 UP/DOWN 方向独立计时；Hedge 类订单豁免） |
+| 同方向再入场价格波动要求（仅 buy 单）| ≥ 0.5% |
 
 ---
 
@@ -541,7 +541,7 @@ volatility_ratio = 当前波动率 / 历史平均波动率
 
 1. **订单规模检查**：5 份 ≤ 订单量 ≤ 45 份
 2. **下单间隔检查**：同方向订单间隔 ≥ min_seconds_between_orders 秒
-3. **价格波动检查**：同方向上次成交后价格变化 ≥ 3%
+3. **价格波动检查（仅 buy 单）**：同方向上次买入成交后价格变化 ≥ 0.5%（卖出单豁免）
 4. **敞口检查**：预计下单后净敞口 ≤ 40 USDT
 5. **资金检查**：可用资金 ≥ 最小订单所需资金（5 份 × 当前价格）
 6. **仓位检查（卖出）**：可卖份数 ≥ 订单份数
@@ -576,12 +576,12 @@ volatility_ratio = 当前波动率 / 历史平均波动率
 | `take_profit_fraction` | **0.30** | 单次止盈比例 |
 | `grid_exit_fraction` | 0.25 | 网格减仓比例 |
 | `mean_reversion_sell_fraction` | 0.40 | 均值回归减仓比例 |
-| `min_seconds_between_orders` | 1.0 | 同方向订单间隔（秒） |
+| `min_seconds_between_orders` | 2.0 | 同方向订单间隔（秒，UP/DOWN 独立计时，Hedge 豁免） |
 | `last_minute_seconds` | 30 | 最后收仓触发时长（秒） |
 | `last_minute_min_confidence` | 0.90 | 最后收仓置信度门槛 |
 | `max_tail_exposure` | 25 USDT | 尾部最大留仓敞口 |
 | `preferred_leg_min_ratio` | 1.2 | 优势侧确认比例阈值 |
-| `max_strategy_trades_per_cycle` | 40 | 每周期最大交易次数 |
+| `max_strategy_trades_per_cycle` | 80 | 每周期最大交易次数（Last Minute 豁免） |
 
 ---
 
