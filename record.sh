@@ -6,7 +6,17 @@ cd "$ROOT_DIR"
 
 export PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}"
 
-PYTHON_BIN="${PYTHON:-python}"
+PROJECTS_VENV_PY="$ROOT_DIR/../../.projects-venv/Scripts/python.exe"
+if [[ -n "${PYTHON:-}" ]]; then
+  PYTHON_BIN="$PYTHON"
+elif [[ -f "$PROJECTS_VENV_PY" ]]; then
+  # 在 Windows + bash 下，优先使用 .projects-venv，避免命中 WindowsApps 的 python shim。
+  PYTHON_BIN="$PROJECTS_VENV_PY"
+elif [[ -n "${VIRTUAL_ENV:-}" && -f "${VIRTUAL_ENV}/Scripts/python.exe" ]]; then
+  PYTHON_BIN="${VIRTUAL_ENV}/Scripts/python.exe"
+else
+  PYTHON_BIN="python"
+fi
 DEFAULT_OUTPUT_DIR="${RECORD_OUTPUT_DIR:-artifacts/live/record_job}"
 DEFAULT_SLUG_PREFIX="${RECORD_SLUG_PREFIX:-btc-updown-5m-}"
 if [[ -z "${RECORD_CONFIG:-}" ]]; then
@@ -837,7 +847,11 @@ except Exception:
       fi
       if [[ "${MS_TAIL_LINES}" -gt 0 ]] && [[ -f "$reg_log" ]]; then
         echo "  --- 最近 $MS_TAIL_LINES 行日志 ---"
-        tail -n "$MS_TAIL_LINES" "$reg_log" 2>/dev/null | sed 's/^/  /'
+        tail -n "$MS_TAIL_LINES" "$reg_log" 2>/dev/null \
+          | sed '/^[[:space:]]*total_cycles[[:space:]]\+total_net_profit[[:space:]]\+average_cycle_profit/,/^[[:space:]]*$/d' \
+          | sed '0,/^[[:space:]]*======================================================================/s//\
+&/' \
+          | sed 's/^/  /'
       fi
       echo ""
     done < "$BATCH_REGISTRY"

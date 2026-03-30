@@ -21,7 +21,7 @@ dynamic_priority:
   phase_3_grid_boost: 15             # 网格加仓优先级提升幅度
 opening_entry:
   enabled: true
-  window_seconds: 60             # 周期前60秒进入开仓入场逻辑
+  window_seconds: 30             # 周期前30秒进入开仓入场逻辑
   min_market_trades: 1           # 最小市场成交量（笔），低于此值不触发开仓入场
   vwap_epsilon: 0.01             # 价格边界容忍度：入场价格必须优于（上涨）或劣于（下跌）vwap ± vwap_epsilon
   range_low_fraction: 0.35       # 价格范围下边界位置：入场价格必须优于 vwap - (vwap - low) * range_low_fraction

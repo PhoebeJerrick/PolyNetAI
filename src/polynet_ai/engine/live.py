@@ -60,6 +60,7 @@ class LivePaperRunner:
         on_event: Callable[[TradeEvent], None] | None = None,
         on_progress: Callable[[LiveRunnerResult], None] | None = None,
         progress_interval_seconds: float = 0.0,
+        on_cycle_complete: Callable[[dict[str, object]], None] | None = None,
     ) -> LiveRunnerResult:
         return self._consume_events(
             events,
@@ -67,6 +68,7 @@ class LivePaperRunner:
             on_event=on_event,
             on_progress=on_progress,
             progress_interval_seconds=progress_interval_seconds,
+            on_cycle_complete=on_cycle_complete,
         )
 
     def _apply_replay_delay(
@@ -94,6 +96,7 @@ class LivePaperRunner:
         previous_event_ref: list[TradeEvent | None] | None = None,
         on_progress: Callable[[LiveRunnerResult], None] | None = None,
         progress_interval_seconds: float = 0.0,
+        on_cycle_complete: Callable[[dict[str, object]], None] | None = None,
     ) -> LiveRunnerResult:
         decision_rows: list[dict[str, object]] = []
         cycle_rows: list[dict[str, object]] = []
@@ -111,6 +114,8 @@ class LivePaperRunner:
             step = self.engine.process_event(event)
             if step.finalized_cycle_row is not None:
                 cycle_rows.append(step.finalized_cycle_row)
+                if on_cycle_complete is not None:
+                    on_cycle_complete(step.finalized_cycle_row)
             decision_row = dict(step.decision_row)
             decision_row["event_index"] = index
             decision_rows.append(decision_row)
@@ -139,6 +144,8 @@ class LivePaperRunner:
         pending = self.engine.finalize_pending_cycle()
         if pending is not None:
             cycle_rows.append(pending)
+            if on_cycle_complete is not None:
+                on_cycle_complete(pending)
 
         return self._build_live_result(cycle_rows, decision_rows, snapshot_rows)
 

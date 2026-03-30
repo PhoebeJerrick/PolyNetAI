@@ -44,9 +44,18 @@ class ReplayEngine:
         self,
         config: StrategyConfig,
         starting_cash: float = 1000.0,
+        capital_reset_mode: str = "cumulative",
+        per_cycle_cash: float | None = None,
         broker: object | None = None,
     ) -> None:
         self.config = config
+        if capital_reset_mode not in {"fixed", "cumulative"}:
+            raise ValueError("capital_reset_mode must be 'fixed' or 'cumulative'")
+        self.capital_reset_mode = capital_reset_mode
+        self.per_cycle_cash = float(per_cycle_cash) if per_cycle_cash is not None else None
+        if self.per_cycle_cash is not None and self.per_cycle_cash <= 0:
+            self.per_cycle_cash = None
+        self._equity_curve_cash = float(starting_cash)
         # 优化 #1：缓存配置参数，避免每事件都做 dict lookup
         self.cycle_seconds = int(config.get("cycle.cycle_seconds", 300))
         self.last_minute_seconds = int(config.get("cycle.last_minute_seconds", 60))
@@ -64,13 +73,30 @@ class ReplayEngine:
     def reset(self) -> None:
         self.state_engine = StateEngine()
         self.account = Account(starting_cash=self.account.starting_cash)
+        self._equity_curve_cash = float(self.account.starting_cash)
         self._last_strategy_fill_at = None
         self._last_strategy_fill_price_up = None
         self._last_strategy_fill_price_down = None
 
     @classmethod
-    def from_yaml(cls, path: str | Path, starting_cash: float = 1000.0) -> "ReplayEngine":
-        return cls(load_strategy_config(path), starting_cash=starting_cash)
+    def from_yaml(
+        cls,
+        path: str | Path,
+        starting_cash: float = 1000.0,
+        capital_reset_mode: str = "cumulative",
+        per_cycle_cash: float | None = None,
+    ) -> "ReplayEngine":
+        return cls(
+            load_strategy_config(path),
+            starting_cash=starting_cash,
+            capital_reset_mode=capital_reset_mode,
+            per_cycle_cash=per_cycle_cash,
+        )
+
+    def display_cash(self, cycle_net_profit: float) -> float:
+        if self.capital_reset_mode == "fixed":
+            return float(self._equity_curve_cash + float(cycle_net_profit))
+        return float(self.account.cash)
 
     def run(self, events: list[TradeEvent]) -> ReplayResult:
         cycle_rows: list[dict[str, object]] = []
@@ -268,6 +294,17 @@ class ReplayEngine:
         elif summary.winner == "down":
             settlement_cash = state.down_position.held
         self.account.cash += settlement_cash
+
+        if self.capital_reset_mode == "fixed":
+            self._equity_curve_cash += float(summary.cycle_net_profit)
+            account_cash_display = float(self._equity_curve_cash)
+            next_cycle_cash = self.per_cycle_cash if self.per_cycle_cash is not None else self.account.starting_cash
+            self.account.cash = float(next_cycle_cash)
+            self.account.reserved_cash = 0.0
+        else:
+            account_cash_display = float(self.account.cash)
+            self._equity_curve_cash = account_cash_display
+
         row = {
             "market_id": state.market_id,
             "cycle_id": state.cycle_id,
@@ -291,7 +328,7 @@ class ReplayEngine:
             "market_trades": state.market_trades,
             "strategy_trades": state.strategy_trades,
             "max_abs_net_exposure": state.max_abs_net_exposure,
-            "account_cash": self.account.cash,
+            "account_cash": account_cash_display,
         }
         self.state_engine.state = None
         self.state_engine.market_tape.clear()
