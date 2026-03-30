@@ -170,7 +170,7 @@ def main() -> int:
     print(f"总绩效报告 (Excel): {xlsx_report}")
     if not xlsx_report.exists():
         print(
-            "警告: 未找到 Excel 总绩效文件。请确认已使用包含 batch_replay_performance_report_zh.xlsx 生成的最新代码。",
+            "警告: 未找到 Excel 总绩效文件。请确认已使用包含 batch_replay_performance_report.xlsx 生成的最新代码。",
             file=sys.stderr,
         )
     return 0

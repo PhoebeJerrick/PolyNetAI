@@ -310,7 +310,7 @@ def _print_status(args: argparse.Namespace) -> int:
     batch_dir = output_dir / "batch_replay_outputs"
     summary_csv = batch_dir / "batch_replay_summary.csv"
     report_md = batch_dir / "batch_replay_performance_report_zh.md"
-    report_xlsx = _latest_matching_file(batch_dir, "batch_replay_performance_report_zh*.xlsx")
+    report_xlsx = _latest_matching_file(batch_dir, "*batch_replay_performance_report*.xlsx")
     trade_md = batch_dir / "batch_replay_trade_process_zh.md"
     trade_xlsx = _latest_matching_file(batch_dir, "batch_replay_trade_process_zh*.xlsx")
     report_ready = bool(report_xlsx is not None) or report_md.exists()

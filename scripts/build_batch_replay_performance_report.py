@@ -91,7 +91,7 @@ def _resolve_batch_replay_dir(input_dir: str | Path) -> Path:
         raise FileNotFoundError(f"未找到输入目录: {path}")
     nested = path / "batch_replay_outputs"
     report_markers = ("batch_replay_summary.csv",)
-    report_globs = ("batch_replay_performance_report_zh*.xlsx",)
+    report_globs = ("*batch_replay_performance_report*.xlsx",)
     has_report_in_path = any((path / name).exists() for name in report_markers) or any(
         next(path.glob(pattern), None) is not None for pattern in report_globs
     )
@@ -816,6 +816,18 @@ def _today_suffix() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
+def _normalize_report_name_prefix(report_name_prefix: str) -> str:
+    """归一化前缀，缩短常用名称并清理空白。"""
+    safe_prefix = str(report_name_prefix or "").strip().replace(" ", "_")
+    if not safe_prefix:
+        return ""
+    alias = {
+        "simulation_streaming": "sim",
+        "simulation": "sim",
+    }
+    return alias.get(safe_prefix, safe_prefix)
+
+
 def build_performance_report_zh(
     resolved_batch_dir: Path,
     summary_df: pd.DataFrame,
@@ -864,16 +876,13 @@ def build_performance_report_zh(
             enriched_summary["estimated_cash_from_cum"] = first_start_cash + enriched_summary["cumulative_profit"]
 
     suffix = _today_suffix()
-    base_name = "batch_replay_performance_report_zh"
+    base_name = "batch_replay_performance_report"
     if report_name_prefix:
-        safe_prefix = str(report_name_prefix).strip().replace(" ", "_")
+        safe_prefix = _normalize_report_name_prefix(report_name_prefix)
         if safe_prefix:
             base_name = f"{safe_prefix}_{base_name}"
     _vtag = get_version_tag()
-    if cycle_count > 0:
-        report_xlsx = output_path / f"{base_name}_{cycle_count}_{_vtag}_{suffix}.xlsx"
-    else:
-        report_xlsx = output_path / f"{base_name}_{_vtag}_{suffix}.xlsx"
+    report_xlsx = output_path / f"{base_name}_{_vtag}_{suffix}.xlsx"
     shown_dir = display_batch_dir or resolved_batch_dir
 
     tail_per_cycle, tail_overview = summarize_tail_window_executions(
@@ -909,7 +918,7 @@ def build_performance_report_zh(
 def _find_latest_report(report_dir: Path) -> Path | None:
     """在目录中查找最新的绩效报告 xlsx 文件。"""
     candidates = sorted(
-        report_dir.glob("batch_replay_performance_report_zh_*.xlsx"),
+        report_dir.glob("*batch_replay_performance_report_*.xlsx"),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
