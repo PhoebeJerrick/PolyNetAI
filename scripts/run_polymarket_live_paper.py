@@ -461,6 +461,7 @@ def main() -> int:
 
     stage_6_start = datetime.now()
     live_report_path: Path | None = None
+    replay_temp_dir: Path | None = None
     new_cycle_slugs: list[str] = []
     if cycle_record_dir is not None and cycle_record_dir.exists():
         all_cycle_dirs = list(cycle_record_dir.glob("btc-updown-5m-*"))
@@ -475,6 +476,7 @@ def main() -> int:
                 # 创建临时目录用于仅放新周期数据
                 temp_replay_dir = cycle_record_dir / f"replay_new_cycles_{run_start_timestamp.strftime('%Y%m%d_%H%M%S')}"
                 temp_replay_dir.mkdir(exist_ok=True)
+                replay_temp_dir = temp_replay_dir
                 
                 # 复制新周期数据到临时目录
                 for cycle_dir in new_cycle_dirs:
@@ -515,36 +517,32 @@ def main() -> int:
     else:
         stage_times["6_report"] = (datetime.now() - stage_6_start).total_seconds()
 
-    # --- [7/7] 流式处理 vs 批量回放 对比报告 ---
-    # 对比 step-4 流式处理结果（引擎跨周期连续运行）与 step-6 批量回放结果
-    # （每周期独立引擎），同一份行情数据，检验两种执行方式的一致性。
+    # --- [7/7] per-cycle 模拟下单 vs per-cycle 实盘验证 对比报告 ---
     stage_7_start = datetime.now()
-    if live_report_path and live_report_path.exists():
+    if live_report_path and live_report_path.exists() and replay_temp_dir is not None:
         comparison_output_dir = cycle_record_dir / "batch_replay_outputs" if cycle_record_dir else Path("artifacts/live/record_job_market/batch_replay_outputs")
         n_live_cycles = len(new_cycle_slugs) if new_cycle_slugs else 0
         if n_live_cycles > 0:
-            print(f"\n[7/7] 生成「流式处理 vs 批量回放」对比报告...")
-            print(f"  ℹ 流式处理结果（引擎跨周期连续状态）与批量回放（每周期独立引擎）对比")
+            print(f"\n[7/7] 生成「per-cycle 模拟下单 vs per-cycle 实盘验证」对比报告...")
+            print(f"  ℹ 两侧均使用 per-cycle（每周期独立引擎）口径进行对比")
             print(f"  ℹ 周期数: {n_live_cycles}")
             try:
-                summary_df, sim_cycle_df, sim_decision_df = _build_summary_from_live_result(
-                    result.replay_result, new_cycle_slugs,
-                )
-                sim_report_path = build_performance_report_zh(
-                    resolved_batch_dir=comparison_output_dir,
-                    summary_df=summary_df,
-                    cycle_df=sim_cycle_df,
-                    decision_df=sim_decision_df,
-                    output_path=comparison_output_dir,
-                    display_batch_dir=cycle_record_dir,
-                    cycle_count=n_live_cycles,
-                    report_source="实盘行情（流式处理）",
-                    report_name_prefix="simulation",
-                    capital_reset_mode=args.capital_reset_mode,
+                sim_report_path = run_batch_replay(
+                    input_dir=replay_temp_dir,
+                    config_path=args.config,
+                    output_dir=comparison_output_dir,
                     starting_cash=args.starting_cash,
+                    capital_reset_mode=args.capital_reset_mode,
+                    per_cycle_cash=args.per_cycle_cash,
+                    include_trade_process=False,
+                    cycle_count=n_live_cycles,
+                    report_source="实盘行情（模拟下单 per-cycle）",
+                    report_name_prefix="simulation",
+                    post_window_start_delay_seconds=_pwd,
+                    processing_mode="per-cycle",
                 )
                 if sim_report_path and sim_report_path.exists():
-                    print(f"  ✓ 流式处理绩效报告: {sim_report_path.name}")
+                    print(f"  ✓ 模拟下单(per-cycle)绩效报告: {sim_report_path.name}")
                     comparison_path = build_comparison_report_zh(
                         sim_report_path=sim_report_path,
                         live_report_path=live_report_path,
