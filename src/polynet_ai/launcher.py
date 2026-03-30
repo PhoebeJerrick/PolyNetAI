@@ -22,7 +22,6 @@ class LaunchField:
     required: bool = False
     example: str = ""
     detail: str = ""
-    show_when: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -39,7 +38,6 @@ class LaunchField:
             "required": self.required,
             "example": self.example,
             "detail": self.detail,
-            "show_when": dict(self.show_when),
         }
 
 
@@ -155,8 +153,6 @@ def apply_profile_overrides(profile: LaunchProfile, overrides: dict[str, Any] | 
         if launch_field.kind == "checkbox":
             updated_command = _set_checkbox_flag(updated_command, launch_field.cli_flag, bool(value))
             continue
-        if value is None:
-            continue
         updated_command = _set_option(updated_command, launch_field.cli_flag, value)
     return LaunchProfile(
         name=profile.name,
@@ -186,7 +182,7 @@ def build_launch_profiles(
                 python_cmd,
                 "scripts/run_recorded_live_paper.py",
                 "--input-dirs",
-                "artifacts/live/record_job;artifacts/live/record_job/More_RawData",
+                "artifacts/live/record_job",
                 "--cycle-glob",
                 "btc-updown-5m-*",
                 "--max-cycles",
@@ -196,29 +192,25 @@ def build_launch_profiles(
                 "--output-dir",
                 dashboard_output,
                 "--pace-factor",
-                "1000000",
+                "20",
                 "--status-every",
                 "100",
                 "--dashboard-refresh-seconds",
                 "1",
                 "--starting-cash",
-                "100",
-                "--capital-reset-mode",
-                "fixed",
-                "--per-cycle-cash",
-                "100",
+                "1000",
             ],
             fields=[
                 LaunchField(
                     name="input_dirs",
                     label="数据源根目录（多路径）",
                     kind="text",
-                    default="artifacts/live/record_job;artifacts/live/record_job/More_RawData",
+                    default="artifacts/live/record_job",
                     description="逗号或分号分隔多个输入根目录；每个目录下会扫描匹配周期子目录并合并回放事件。",
                     cli_flag="--input-dirs",
                     required=False,
                     example="artifacts/live/record_job;artifacts/live/record_job_v2",
-                    detail="用于“模拟下单回放测试”。多个根目录下可能出现同名 btc-updown-5m-* 子目录；流式报告里 cycle_slug 会用相对项目根的路径区分。",
+                    detail="用于“模拟下单回放测试”。如果你只用一个目录，直接填默认值即可。",
                 ),
                 LaunchField(
                     name="cycle_glob",
@@ -235,39 +227,14 @@ def build_launch_profiles(
                     name="starting_cash",
                     label="起始本金",
                     kind="number",
-                    default=100,
-                    description="资金曲线起始本金。",
+                    default=1000,
+                    description="模拟账户初始资金，影响可下单规模和资金曲线。",
                     cli_flag="--starting-cash",
                     min_value=10,
                     max_value=1000000,
                     step=10,
-                    example="1000 表示资金曲线从 1000 开始",
-                    detail="fixed 模式下，资金曲线从该值起步；每周期实际投注额由“每周期固定投注资金”决定。cumulative 模式下，账户从该值起步并跨周期滚动。",
-                ),
-                LaunchField(
-                    name="capital_reset_mode",
-                    label="周期资金处理模式",
-                    kind="select",
-                    default="fixed",
-                    description="多周期测试中，是否每个周期重置资金为固定投注额。",
-                    cli_flag="--capital-reset-mode",
-                    options=["fixed", "cumulative"],
-                    example="fixed — 每周期投注金额固定，盈亏累计到曲线",
-                    detail="fixed: 每周期投注本金固定，周期盈亏累计到资金曲线；cumulative: 账户资金跨周期连续滚动。",
-                ),
-                LaunchField(
-                    name="per_cycle_cash",
-                    label="每周期固定投注资金",
-                    kind="number",
-                    default=100,
-                    description="fixed 模式下每周期分配给策略的实际投注本金。",
-                    cli_flag="--per-cycle-cash",
-                    min_value=1,
-                    max_value=1000000,
-                    step=10,
-                    example="100 — 起始本金=1000时，每周期投注100，曲线仍从1000起算",
-                    detail="不填则默认等于起始本金。",
-                    show_when={"capital_reset_mode": "fixed"},
+                    example="1000 表示用 1000 USDC 等名义资金开跑",
+                    detail="仅影响 paper 账户规模与曲线刻度；与实盘资金无关。过小可能导致频繁因资金不足拒单。",
                 ),
                 LaunchField(
                     name="max_cycles",
@@ -296,8 +263,8 @@ def build_launch_profiles(
         ),
         "market-paper": LaunchProfile(
             name="market-paper",
-            title="实盘行情验证（含自动对比）",
-            description="连接 Polymarket 实时公开行情做 robot-mode paper 验证，完成后自动生成对比报告。不会真实发单。",
+            title="实盘行情验证",
+            description="连接 Polymarket 实时公开行情做 robot-mode paper 验证，不会真实发单。",
             mode="market_validation",
             command=[
                 python_cmd,
@@ -312,29 +279,12 @@ def build_launch_profiles(
                 "configs/strategy.yaml",
                 "--output-dir",
                 dashboard_output,
-                "--record-events-dir",
-                "artifacts/live/record_job/record_job_market",
                 "--dashboard-refresh-seconds",
                 "1",
                 "--starting-cash",
-                "100",
-                "--capital-reset-mode",
-                "fixed",
-                "--per-cycle-cash",
-                "100",
+                "1000",
             ],
             fields=[
-                LaunchField(
-                    name="record_events_dir",
-                    label="实时事件落盘目录",
-                    kind="text",
-                    default="artifacts/live/record_job/record_job_market",
-                    description="可选：把实时行情流按周期目录落盘，结构兼容 record_job，便于离线回放对比。",
-                    cli_flag="--record-events-dir",
-                    required=False,
-                    example="artifacts/live/record_job/record_job_market",
-                    detail="目录下会生成 btc-updown-5m-*/ws_trade_events.ndjson，可直接和模拟下单测试的数据源做同结构对比。",
-                ),
                 LaunchField(
                     name="slug_prefix",
                     label="市场前缀",
@@ -363,39 +313,14 @@ def build_launch_profiles(
                     name="starting_cash",
                     label="起始本金",
                     kind="number",
-                    default=100,
+                    default=1000,
                     description="paper 验证账户的初始资金。",
                     cli_flag="--starting-cash",
                     min_value=10,
                     max_value=1000000,
                     step=10,
-                    example="100 — 与模拟下单、资金曲线展示一致",
-                    detail="fixed 模式下，资金曲线从该值起步；每周期实际投注额由“每周期固定投注资金”决定。cumulative 模式下，账户从该值起步并跨周期滚动。",
-                ),
-                LaunchField(
-                    name="capital_reset_mode",
-                    label="周期资金处理模式",
-                    kind="select",
-                    default="fixed",
-                    description="多周期行情验证中，是否每个周期重置资金。",
-                    cli_flag="--capital-reset-mode",
-                    options=["fixed", "cumulative"],
-                    example="fixed — 每个周期用相同初始金额开始",
-                    detail="fixed: 每周期投注本金固定为起始值，但周期盈亏会累计到资金曲线；cumulative: 账户资金跨周期连续滚动。",
-                ),
-                LaunchField(
-                    name="per_cycle_cash",
-                    label="每周期固定投注资金",
-                    kind="number",
-                    default=100,
-                    description="fixed 模式下每周期分配给策略的实际投注本金。",
-                    cli_flag="--per-cycle-cash",
-                    min_value=1,
-                    max_value=1000000,
-                    step=10,
-                    example="100 — 起始本金=1000时，每周期投注100，曲线仍从1000起算",
-                    detail="不填则默认等于起始本金。",
-                    show_when={"capital_reset_mode": "fixed"},
+                    example="1000 — 与模拟下单、资金曲线展示一致",
+                    detail="robot-mode 下仍为模拟资金；与 Polymarket 账户余额无自动关联。",
                 ),
             ],
         ),

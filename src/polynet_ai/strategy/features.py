@@ -18,6 +18,14 @@ def _deviation(price: float, avg_price: float) -> float:
     return (price - avg_price) / avg_price
 
 
+def _signal_basis_price(avg_price: float, reentry_anchor_price: float) -> float:
+    if avg_price > 1e-10:
+        return avg_price
+    if reentry_anchor_price > 1e-10:
+        return reentry_anchor_price
+    return 0.0
+
+
 def _price_percentile(price: float, low: float, high: float) -> float:
     if high - low <= 1e-10:
         return 0.5
@@ -141,8 +149,10 @@ def snapshot_with_effective_price(
             effective_price,
             infer_missing_with_binary_complement=True,
         )
-    up_deviation = _deviation(up_px, features.up_avg_price)
-    down_deviation = _deviation(down_px, features.down_avg_price)
+    up_basis = _signal_basis_price(features.up_avg_price, features.up_signal_basis_price)
+    down_basis = _signal_basis_price(features.down_avg_price, features.down_signal_basis_price)
+    up_deviation = _deviation(up_px, up_basis)
+    down_deviation = _deviation(down_px, down_basis)
     up_low, up_high = _implied_up_price_bounds(
         up_low=features.up_market_low,
         up_high=features.up_market_high,
@@ -200,8 +210,10 @@ def snapshot_with_effective_quotes(
 
     opening_level = features.price - features.opening_vs_last_move
     price_move = effective_price - opening_level
-    up_deviation = _deviation(up_px, features.up_avg_price)
-    down_deviation = _deviation(down_px, features.down_avg_price)
+    up_basis = _signal_basis_price(features.up_avg_price, features.up_signal_basis_price)
+    down_basis = _signal_basis_price(features.down_avg_price, features.down_signal_basis_price)
+    up_deviation = _deviation(up_px, up_basis)
+    down_deviation = _deviation(down_px, down_basis)
     up_low, up_high = _implied_up_price_bounds(
         up_low=features.up_market_low,
         up_high=features.up_market_high,
@@ -311,6 +323,14 @@ def build_feature_snapshot(
         _cycle_net       = round(
             state.up_position.realized_pnl + state.down_position.realized_pnl + _u + _d, 3
         )
+    up_signal_basis = _signal_basis_price(
+        state.up_position.avg_price,
+        state.reentry_anchor_up_price if state.reentry_armed_at is not None else 0.0,
+    )
+    down_signal_basis = _signal_basis_price(
+        state.down_position.avg_price,
+        state.reentry_anchor_down_price if state.reentry_armed_at is not None else 0.0,
+    )
     return FeatureSnapshot(
         market_id=state.market_id,
         cycle_id=state.cycle_id,
@@ -327,8 +347,8 @@ def build_feature_snapshot(
         down_held=state.down_position.held,
         up_avg_price=state.up_position.avg_price,
         down_avg_price=state.down_position.avg_price,
-        up_deviation=_deviation(up_px, state.up_position.avg_price),
-        down_deviation=_deviation(down_px, state.down_position.avg_price),
+        up_deviation=_deviation(up_px, up_signal_basis),
+        down_deviation=_deviation(down_px, down_signal_basis),
         volatility=volatility,
         volatility_ratio=volatility_ratio,
         price_percentile=_price_percentile(up_px, up_low, up_high),
@@ -353,4 +373,7 @@ def build_feature_snapshot(
         down_market_low=state.down_market_low,
         tape_low=state.low_price,
         tape_high=state.high_price,
+        up_signal_basis_price=up_signal_basis,
+        down_signal_basis_price=down_signal_basis,
+        reentry_armed=state.reentry_armed_at is not None,
     )

@@ -82,6 +82,9 @@ stop_loss:
   # 单周期亏损 > stop_loss_cycle_loss → 对亏损仓位按 stop_loss_fraction 强制平仓
   stop_loss_cycle_loss: 18.0       # 周期累计亏损触发额（USDT）
   stop_loss_fraction: 0.5          # 触发1 平仓比例（50%）
+  # 第四阶段以前禁止一次性全平；当减仓意图过大时，至少保留一小笔仓位给后续再评估。
+  pre_phase_4_max_exit_fraction: 0.95
+  pre_phase_4_min_remaining_shares: 0.25
 
   # ── 触发2：单仓止损（按周期阶段独立配置，双条件） ────────────────────────────
   # 条件A：当前价格 ≤ near_zero_price → 立即全平（无时间门槛）
@@ -91,19 +94,19 @@ stop_loss:
   phase_1_near_zero_price: 0.06               # 条件A 绝对价格阈值
   phase_1_stop_loss_pct: 0.15                 # 条件B 浮亏%阈值（15%）
   phase_1_min_hold_seconds: 20                # 条件B 时间门槛（秒），防入场噪声误触
-  phase_1_stop_loss_action_fraction: 1.0      # 触发后全平比例
+  phase_1_stop_loss_action_fraction: 0.50     # phase 1 只部分止损，避免过早出清
 
   # 阶段2（70–160s）：减仓阶段，提升保护力度
   phase_2_near_zero_price: 0.06
   phase_2_stop_loss_pct: 0.12                 # 条件B 浮亏%阈值（12%）
   phase_2_min_hold_seconds: 40                # 需要持仓更久才触发条件B
-  phase_2_stop_loss_action_fraction: 1.0
+  phase_2_stop_loss_action_fraction: 0.65
 
   # 阶段3（160–240s）：顺势加仓，保持一定容忍度
   phase_3_near_zero_price: 0.06
   phase_3_stop_loss_pct: 0.12                 # 条件B 浮亏%阈值（12%）
   phase_3_min_hold_seconds: 45
-  phase_3_stop_loss_action_fraction: 1.0
+  phase_3_stop_loss_action_fraction: 0.80
 
   # 阶段4（240–290s）：临近结束，更激进止损
   phase_4_near_zero_price: 0.08               # 条件A 提高阈值（允许更早识别失败方向）
@@ -118,17 +121,17 @@ stop_loss:
   # 阶段1（0–70s）
   phase_1_high_vol_trigger_ratio: 1.5         # 波动率比率触发门槛
   phase_1_high_vol_price_threshold: 0.15      # 绝对价格阈值（价格≤此值时止损）
-  phase_1_high_vol_action_fraction: 1.0       # 全平
+  phase_1_high_vol_action_fraction: 0.50
 
   # 阶段2（70–160s）
   phase_2_high_vol_trigger_ratio: 1.5
   phase_2_high_vol_price_threshold: 0.12      # 阶段2更严，价格需更低才触发
-  phase_2_high_vol_action_fraction: 1.0
+  phase_2_high_vol_action_fraction: 0.65
 
   # 阶段3（160–240s）
   phase_3_high_vol_trigger_ratio: 1.5
   phase_3_high_vol_price_threshold: 0.12
-  phase_3_high_vol_action_fraction: 1.0
+  phase_3_high_vol_action_fraction: 0.80
 
   # 阶段4（240–290s）：临近结束对高波动更敏感
   phase_4_high_vol_trigger_ratio: 1.3         # 触发门槛降低（更敏感）
@@ -154,7 +157,7 @@ execution:
   fee_rate: 0.002
   slippage_bps: 5                        
   min_seconds_between_orders: 2.0         
-  min_same_outcome_price_move_ratio: 0.005   
+  min_same_outcome_price_move_ratio: 0.005      # 同一方向连续下单的价格必须移动至少0.5%，避免过度交易
 
 # 【新增】每日风险管理参数
 daily_limits:

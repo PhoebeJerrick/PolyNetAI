@@ -170,6 +170,9 @@ class CycleState:
     consecutive_action_count: int = 0
     last_event_timestamp: datetime | None = None
     max_abs_net_exposure: float = 0.0
+    reentry_anchor_up_price: float = 0.0
+    reentry_anchor_down_price: float = 0.0
+    reentry_armed_at: datetime | None = None
 
     def price_range(self) -> float:
         if self.market_trades == 0:
@@ -244,6 +247,9 @@ class FeatureSnapshot:
     down_market_low: float
     tape_low: float
     tape_high: float
+    up_signal_basis_price: float = 0.0
+    down_signal_basis_price: float = 0.0
+    reentry_armed: bool = False
 
 
 @dataclass(slots=True)

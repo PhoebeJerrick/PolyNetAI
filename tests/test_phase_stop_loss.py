@@ -75,6 +75,10 @@ def _cfg() -> StrategyConfig:
     return StrategyConfig(
         raw={
             "opening_entry": {"infer_missing_with_binary_complement": True},
+            "order_sizing": {
+                "buy": {"min_order_size": 2.0},
+                "sell": {"min_order_size": 2.0},
+            },
             "cycle": {
                 "cycle_seconds": 300,
                 "phase_end_seconds_1": 70,
@@ -85,21 +89,23 @@ def _cfg() -> StrategyConfig:
                 # 触发1
                 "stop_loss_cycle_loss": 18.0,
                 "stop_loss_fraction": 0.5,
+                "pre_phase_4_max_exit_fraction": 0.95,
+                "pre_phase_4_min_remaining_shares": 0.25,
                 # 触发2 — 阶段1
                 "phase_1_near_zero_price": 0.06,
                 "phase_1_stop_loss_pct": 0.15,
                 "phase_1_min_hold_seconds": 20,
-                "phase_1_stop_loss_action_fraction": 1.0,
+                "phase_1_stop_loss_action_fraction": 0.5,
                 # 触发2 — 阶段2
                 "phase_2_near_zero_price": 0.06,
                 "phase_2_stop_loss_pct": 0.12,
                 "phase_2_min_hold_seconds": 40,
-                "phase_2_stop_loss_action_fraction": 1.0,
+                "phase_2_stop_loss_action_fraction": 0.65,
                 # 触发2 — 阶段3
                 "phase_3_near_zero_price": 0.06,
                 "phase_3_stop_loss_pct": 0.12,
                 "phase_3_min_hold_seconds": 45,
-                "phase_3_stop_loss_action_fraction": 1.0,
+                "phase_3_stop_loss_action_fraction": 0.8,
                 # 触发2 — 阶段4
                 "phase_4_near_zero_price": 0.08,
                 "phase_4_stop_loss_pct": 0.08,
@@ -108,15 +114,15 @@ def _cfg() -> StrategyConfig:
                 # 触发3 — 阶段1
                 "phase_1_high_vol_trigger_ratio": 1.5,
                 "phase_1_high_vol_price_threshold": 0.15,
-                "phase_1_high_vol_action_fraction": 1.0,
+                "phase_1_high_vol_action_fraction": 0.5,
                 # 触发3 — 阶段2
                 "phase_2_high_vol_trigger_ratio": 1.5,
                 "phase_2_high_vol_price_threshold": 0.12,
-                "phase_2_high_vol_action_fraction": 1.0,
+                "phase_2_high_vol_action_fraction": 0.65,
                 # 触发3 — 阶段3
                 "phase_3_high_vol_trigger_ratio": 1.5,
                 "phase_3_high_vol_price_threshold": 0.12,
-                "phase_3_high_vol_action_fraction": 1.0,
+                "phase_3_high_vol_action_fraction": 0.8,
                 # 触发3 — 阶段4
                 "phase_4_high_vol_trigger_ratio": 1.3,
                 "phase_4_high_vol_price_threshold": 0.15,
@@ -271,12 +277,12 @@ class TestTrigger2ConditionA:
         for r in stop_loss_exits(f, _cfg()):
             assert "条件A" not in r.reason
 
-    def test_condition_a_sells_full_position(self):
-        """条件A 卖出 100%（stop_loss_action_fraction=1.0）"""
+    def test_condition_a_sells_partial_position_before_phase4(self):
+        """第四阶段前条件A 只允许部分止损"""
         f = _f(30.0, up_last_price=0.04, up_held=15.0, is_last_minute=True)
         result = stop_loss_exits(f, _cfg())
         assert len(result) == 1
-        assert result[0].shares == pytest.approx(15.0)   # 15 × 1.0
+        assert result[0].shares == pytest.approx(7.5)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -428,8 +434,8 @@ class TestTrigger3HighVol:
         result = stop_loss_exits(f, _cfg())
         assert len(result) == 0
 
-    def test_trigger3_sells_full_position(self):
-        """触发3 卖出 100%（phase_N_high_vol_action_fraction=1.0）"""
+    def test_trigger3_sells_partial_position_before_phase4(self):
+        """第四阶段前触发3 只允许部分止损"""
         f = _f(30.0, up_last_price=0.10, up_held=8.0, volatility_ratio=2.0)
         # elapsed=30 >= min_hold=20，price=0.10 > near_zero=0.06（排除条件A）
         # pnl = (0.10-0.50)/0.50 = -80%，条件B：-80% >= -15% 且 30 >= 20 → 条件B先触发
@@ -442,7 +448,7 @@ class TestTrigger3HighVol:
         # elapsed=5 < min_hold=20 → 条件B不触; 0.10 > 0.06 → 条件A不触; vol=2>1.5 + price=0.10≤0.15 → 触发3
         result = stop_loss_exits(f, _cfg())
         assert len(result) == 1
-        assert result[0].shares == pytest.approx(8.0)         # 8 × 1.0
+        assert result[0].shares == pytest.approx(4.0)
         assert "触发3" in result[0].reason
 
     def test_trigger3_skipped_when_trigger2_fires(self):
@@ -517,6 +523,20 @@ class TestFallbackBehavior:
         f = _f(50.0, up_last_price=0.425)    # -15%
         result = stop_loss_exits(f, _cfg_no_phase())
         assert len(result) == 1
+
+
+def test_phase3_condition_b_keeps_residual_position() -> None:
+    f = _f(200.0, up_last_price=0.40, up_held=10.0)
+    result = stop_loss_exits(f, _cfg())
+    assert len(result) == 1
+    assert result[0].shares == pytest.approx(8.0)
+
+
+def test_phase4_condition_b_can_still_sell_entire_position() -> None:
+    f = _f(260.0, up_last_price=0.40, up_held=10.0)
+    result = stop_loss_exits(f, _cfg())
+    assert len(result) == 1
+    assert result[0].shares == pytest.approx(10.0)
 
     def test_condition_b_no_trigger_when_elapsed_below_default_min_hold(self):
         """无阶段配置：elapsed=30s < 默认 min_hold=45s，止损不触发"""

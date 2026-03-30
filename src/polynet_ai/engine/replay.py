@@ -43,76 +43,34 @@ class ReplayEngine:
     def __init__(
         self,
         config: StrategyConfig,
-        starting_cash: float = 100.0,
-        capital_reset_mode: str = "cumulative",
+        starting_cash: float = 1000.0,
         broker: object | None = None,
-        per_cycle_cash: float | None = None,
     ) -> None:
         self.config = config
         # 优化 #1：缓存配置参数，避免每事件都做 dict lookup
         self.cycle_seconds = int(config.get("cycle.cycle_seconds", 300))
         self.last_minute_seconds = int(config.get("cycle.last_minute_seconds", 60))
-        # 优化 #2：缓存风控参数用于快速失败检查
-        self.min_seconds_between_orders = float(config.get("execution.min_seconds_between_orders", 2.0))
-        self.max_strategy_trades_per_cycle = int(config.get("exposure.max_strategy_trades_per_cycle", 40))
-        self.trend_window_secs = float(config.get("trend.trend_window", 6.0))
         self.state_engine = StateEngine()
         self.router = StrategyRouter(config)
-        self.capital_reset_mode = str(capital_reset_mode).strip().lower() or "cumulative"
-        if self.capital_reset_mode not in {"fixed", "cumulative"}:
-            raise ValueError("capital_reset_mode must be 'fixed' or 'cumulative'")
-        # fixed 模式下，_equity_baseline 是资金曲线的起始锚点（总权益基准）；
-        # _per_cycle_cash 是每周期分配给策略的实际投注资金（账户重置目标值）。
-        # cumulative 模式下两者设为相同值，account.cash 自然累积。
-        self._equity_baseline = float(starting_cash)
-        self._per_cycle_cash = float(per_cycle_cash) if per_cycle_cash is not None else float(starting_cash)
-        self.account = Account(starting_cash=self._per_cycle_cash)
-        self._closed_cycle_net_profit = 0.0
+        self.account = Account(starting_cash=starting_cash)
         self.broker = broker or PaperBroker(
             fee_rate=float(config.get("execution.fee_rate", 0.002)),
             slippage_bps=float(config.get("execution.slippage_bps", 10)),
         )
-        # 按方向独立追踪最后成交时间
-        self._last_strategy_fill_at_up: datetime | None = None
-        self._last_strategy_fill_at_down: datetime | None = None
+        self._last_strategy_fill_at: datetime | None = None
         self._last_strategy_fill_price_up: float | None = None
         self._last_strategy_fill_price_down: float | None = None
-        # 优化 #3：特征快照缓存
-        self._feature_cache: object | None = None
-        self._feature_cache_timestamp: datetime | None = None
-        self._feature_cache_ttl_seconds = 0.5  # 缓存0.5秒
 
     def reset(self) -> None:
         self.state_engine = StateEngine()
-        self.account = Account(starting_cash=self._per_cycle_cash)
-        self._closed_cycle_net_profit = 0.0
-        self._last_strategy_fill_at_up = None
-        self._last_strategy_fill_at_down = None
+        self.account = Account(starting_cash=self.account.starting_cash)
+        self._last_strategy_fill_at = None
         self._last_strategy_fill_price_up = None
         self._last_strategy_fill_price_down = None
-        # 优化 #3：重置缓存
-        self._feature_cache = None
-        self._feature_cache_timestamp = None
 
     @classmethod
-    def from_yaml(
-        cls,
-        path: str | Path,
-        starting_cash: float = 100.0,
-        capital_reset_mode: str = "cumulative",
-        per_cycle_cash: float | None = None,
-    ) -> "ReplayEngine":
-        return cls(
-            load_strategy_config(path),
-            starting_cash=starting_cash,
-            capital_reset_mode=capital_reset_mode,
-            per_cycle_cash=per_cycle_cash,
-        )
-
-    def display_cash(self, current_cycle_net_profit: float = 0.0) -> float:
-        if self.capital_reset_mode == "fixed":
-            return self._equity_baseline + self._closed_cycle_net_profit + float(current_cycle_net_profit)
-        return self.account.cash
+    def from_yaml(cls, path: str | Path, starting_cash: float = 1000.0) -> "ReplayEngine":
+        return cls(load_strategy_config(path), starting_cash=starting_cash)
 
     def run(self, events: list[TradeEvent]) -> ReplayResult:
         cycle_rows: list[dict[str, object]] = []
@@ -141,105 +99,13 @@ class ReplayEngine:
             incoming_cycle_key = (event.market_id, event.cycle_id)
             if incoming_cycle_key != current_cycle_key:
                 finalized_cycle_row = self._finalize_cycle()
-                # 优化 #3：新周期开始时清除缓存
-                self._feature_cache = None
-                self._feature_cache_timestamp = None
 
         self.state_engine.apply_market_trade(event)
-
-        # 优化 #2：快速失败检查 - 在昂贵的特征计算和规则评估之前
-        # 时间间隔按方向独立追踪，由 limits.py 精细处理，此处仅做 <0.1s 极短重复的快速拦截
-        _min_any_delta = min(
-            (event.timestamp - self._last_strategy_fill_at_up).total_seconds() if self._last_strategy_fill_at_up else float("inf"),
-            (event.timestamp - self._last_strategy_fill_at_down).total_seconds() if self._last_strategy_fill_at_down else float("inf"),
+        features = build_feature_snapshot(
+            self.state_engine,
+            cycle_seconds=self.cycle_seconds,
+            last_minute_seconds=self.last_minute_seconds,
         )
-        if _min_any_delta < 0.1:
-            row: dict[str, object] = {
-                "market_id": event.market_id,
-                "cycle_id": event.cycle_id,
-                "timestamp": event.timestamp,
-                "market_price": event.price,
-                "market_outcome": event.outcome,
-                "selected_rule": "",
-                "selected_action": "",
-                "selected_outcome": "",
-                "selected_shares": 0.0,
-                "risk_status": "blocked_fast",
-                "risk_reason": "快速检查：下单过于频繁（<0.1s）",
-                "executed": False,
-                "submitted": False,
-                "confirmed": False,
-                "broker_status": "",
-                "broker_order_id": "",
-                "fill_price": 0.0,
-                "fill_fee": 0.0,
-                "cycle_net_profit": 0.0,
-                "account_cash": self.account.cash,
-                "available_cash": self.account.available_cash,
-            }
-            snapshot = self.state_engine.snapshot()
-            return ReplayStepResult(
-                decision_row=row,
-                finalized_cycle_row=finalized_cycle_row,
-                snapshot=snapshot,
-            )
-
-        # 检查周期成交次数限制（Last Minute 阶段豁免，确保收仓规则能执行）
-        _state_now = self.state_engine.state
-        _elapsed_now = (
-            (event.timestamp - _state_now.cycle_start).total_seconds()
-            if _state_now.cycle_start else 0.0
-        )
-        _is_last_minute_now = _elapsed_now >= (self.cycle_seconds - self.last_minute_seconds)
-        if _state_now.strategy_trades >= self.max_strategy_trades_per_cycle and not _is_last_minute_now:
-            row: dict[str, object] = {
-                "market_id": event.market_id,
-                "cycle_id": event.cycle_id,
-                "timestamp": event.timestamp,
-                "market_price": event.price,
-                "market_outcome": event.outcome,
-                "selected_rule": "",
-                "selected_action": "",
-                "selected_outcome": "",
-                "selected_shares": 0.0,
-                "risk_status": "blocked_fast",
-                "risk_reason": "快速检查：本周期策略成交次数已达上限",
-                "executed": False,
-                "submitted": False,
-                "confirmed": False,
-                "broker_status": "",
-                "broker_order_id": "",
-                "fill_price": 0.0,
-                "fill_fee": 0.0,
-                "cycle_net_profit": 0.0,
-                "account_cash": self.account.cash,
-                "available_cash": self.account.available_cash,
-            }
-            snapshot = self.state_engine.snapshot()
-            return ReplayStepResult(
-                decision_row=row,
-                finalized_cycle_row=finalized_cycle_row,
-                snapshot=snapshot,
-            )
-
-        # 优化 #3：特征快照缓存 - 检查是否可以使用缓存
-        now = event.timestamp
-        if (self._feature_cache is not None and
-            self._feature_cache_timestamp is not None and
-            (now - self._feature_cache_timestamp).total_seconds() < self._feature_cache_ttl_seconds):
-            # 使用缓存的特征
-            features = self._feature_cache
-        else:
-            # 重新计算并缓存
-            features = build_feature_snapshot(
-                self.state_engine,
-                cycle_seconds=self.cycle_seconds,
-                last_minute_seconds=self.last_minute_seconds,
-                trend_window_secs=self.trend_window_secs,
-            )
-            self._feature_cache = features
-            self._feature_cache_timestamp = now
-
         decision = self.router.route(features, strategy_trades=self.state_engine.state.strategy_trades)
         row: dict[str, object] = {
             "market_id": event.market_id,
@@ -261,7 +127,7 @@ class ReplayEngine:
             "fill_price": 0.0,
             "fill_fee": 0.0,
             "cycle_net_profit": features.cycle_net_profit,
-            "account_cash": self.display_cash(features.cycle_net_profit),
+            "account_cash": self.account.cash,
             "available_cash": self.account.available_cash,
         }
         if decision.selected is not None:
@@ -271,8 +137,7 @@ class ReplayEngine:
             decision.selected.metadata["market_price"] = event.price
             decision.selected.metadata.update(event.metadata)
             decision.selected.metadata.update(pending_context)
-            decision.selected.metadata["last_strategy_fill_at_up"] = self._last_strategy_fill_at_up
-            decision.selected.metadata["last_strategy_fill_at_down"] = self._last_strategy_fill_at_down
+            decision.selected.metadata["last_strategy_fill_at"] = self._last_strategy_fill_at
             decision.selected.metadata["last_strategy_fill_price_up"] = self._last_strategy_fill_price_up
             decision.selected.metadata["last_strategy_fill_price_down"] = self._last_strategy_fill_price_down
             row["selected_rule"] = decision.selected.category
@@ -304,7 +169,7 @@ class ReplayEngine:
                         row["confirmed"] = True
                         row["fill_price"] = execution.fill.price
                         row["fill_fee"] = execution.fill.fee
-                        row["account_cash"] = self.display_cash(features.cycle_net_profit)
+                        row["account_cash"] = self.account.cash
                         row["available_cash"] = self.account.available_cash
                     elif execution.status != "filled":
                         self._sync_account_reservations()
@@ -351,11 +216,10 @@ class ReplayEngine:
     def _apply_fill(self, fill) -> None:
         self.account.apply_fill(fill)
         self.state_engine.apply_strategy_fill(fill)
+        self._last_strategy_fill_at = fill.timestamp
         if fill.outcome == "up":
-            self._last_strategy_fill_at_up = fill.timestamp
             self._last_strategy_fill_price_up = fill.price
         else:
-            self._last_strategy_fill_at_down = fill.timestamp
             self._last_strategy_fill_price_down = fill.price
 
     def _pending_context(self) -> dict[str, object]:
@@ -404,9 +268,6 @@ class ReplayEngine:
         elif summary.winner == "down":
             settlement_cash = state.down_position.held
         self.account.cash += settlement_cash
-        if self.capital_reset_mode == "fixed":
-            self._closed_cycle_net_profit += float(summary.cycle_net_profit)
-        cycle_account_cash = self.display_cash()
         row = {
             "market_id": state.market_id,
             "cycle_id": state.cycle_id,
@@ -430,16 +291,9 @@ class ReplayEngine:
             "market_trades": state.market_trades,
             "strategy_trades": state.strategy_trades,
             "max_abs_net_exposure": state.max_abs_net_exposure,
-            "account_cash": cycle_account_cash,
+            "account_cash": self.account.cash,
         }
         self.state_engine.state = None
         self.state_engine.market_tape.clear()
         self.state_engine.strategy_fills.clear()
-        if self.capital_reset_mode == "fixed":
-            self.account.cash = self._per_cycle_cash
-            self.account.reserved_cash = 0.0
-            self._last_strategy_fill_at_up = None
-            self._last_strategy_fill_at_down = None
-            self._last_strategy_fill_price_up = None
-            self._last_strategy_fill_price_down = None
         return row
