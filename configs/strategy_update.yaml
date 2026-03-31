@@ -8,6 +8,9 @@ cycle:
   # 每个时间桶（如 btc-updown-5m-<unix>）绝对开始后，推迟多少秒再把成交流喂给策略/规则。
   # 模拟下单、实盘验证、批量回放、单周期复盘均读取此项；命令行传参可覆盖。
   post_window_start_delay_seconds: 10.0
+batch_replay:
+  # 处理模式：per-cycle（逐周期独立回放，默认）| merged（合并事件流回放）
+  processing_mode: per-cycle
 position:
   max_position_value: 85.0           # 目标总仓位价值（USDT）
 dynamic_priority:
@@ -21,12 +24,12 @@ dynamic_priority:
   phase_3_grid_boost: 15             # 网格加仓优先级提升幅度
 opening_entry:
   enabled: true
-  window_seconds: 30
-  min_market_trades: 3
-  vwap_epsilon: 0.01
-  range_low_fraction: 0.35
-  min_range_width: 0.02
-  infer_missing_with_binary_complement: true
+  window_seconds: 30             # 周期前30秒进入开仓入场逻辑
+  min_market_trades: 1           # 最小市场成交量（笔），低于此值不触发开仓入场
+  vwap_epsilon: 0.01             # 价格边界容忍度：入场价格必须优于（上涨）或劣于（下跌）vwap ± vwap_epsilon
+  range_low_fraction: 0.35       # 价格范围下边界位置：入场价格必须优于 vwap - (vwap - low) * range_low_fraction
+  min_range_width: 0.02          # 最小价格范围：入场价格必须优于 vwap - max((vwap - low) * range_low_fraction, vwap * min_range_width)
+  infer_missing_with_binary_complement: true      # 是否启用缺失数据推断：当市场成交量为0时，仍允许入场决策；通过二元互补推断价格位置（上涨或下跌）
 order_sizing:
   # 兼容旧版键：base_order_size/min_order_size/max_order_size/volatility_order_scale
   buy:
@@ -82,6 +85,9 @@ stop_loss:
   # 单周期亏损 > stop_loss_cycle_loss → 对亏损仓位按 stop_loss_fraction 强制平仓
   stop_loss_cycle_loss: 18.0       # 周期累计亏损触发额（USDT）
   stop_loss_fraction: 0.5          # 触发1 平仓比例（50%）
+  # 第四阶段以前禁止一次性全平；当减仓意图过大时，至少保留一小笔仓位给后续再评估。
+  pre_phase_4_max_exit_fraction: 0.95
+  pre_phase_4_min_remaining_shares: 0.25
 
   # ── 触发2：单仓止损（按周期阶段独立配置，双条件） ────────────────────────────
   # 条件A：当前价格 ≤ near_zero_price → 立即全平（无时间门槛）
@@ -91,7 +97,7 @@ stop_loss:
   phase_1_near_zero_price: 0.06               # 条件A 绝对价格阈值
   phase_1_stop_loss_pct: 0.15                 # 条件B 浮亏%阈值（15%）
   phase_1_min_hold_seconds: 20                # 条件B 时间门槛（秒），防入场噪声误触
-  phase_1_stop_loss_action_fraction: 1.0      # 触发后全平比例
+  phase_1_stop_loss_action_fraction: 1.0        # phase 1 只部分止损，避免过早出清
 
   # 阶段2（70–160s）：减仓阶段，提升保护力度
   phase_2_near_zero_price: 0.06
@@ -118,7 +124,7 @@ stop_loss:
   # 阶段1（0–70s）
   phase_1_high_vol_trigger_ratio: 1.5         # 波动率比率触发门槛
   phase_1_high_vol_price_threshold: 0.15      # 绝对价格阈值（价格≤此值时止损）
-  phase_1_high_vol_action_fraction: 1.0       # 全平
+  phase_1_high_vol_action_fraction: 1.0
 
   # 阶段2（70–160s）
   phase_2_high_vol_trigger_ratio: 1.5
@@ -147,14 +153,14 @@ last_minute:
   preferred_leg_min_ratio: 1.2
   # A+C联合方案：第四阶段方向确认参数
   direction_ratio_threshold: 1.5         # 优势侧仓位价值 ≥ 另一侧 × 此值
-  pnl_ratio_threshold: 2.0              # 优势侧浮盈 > 劣势侧浮盈 × 此值
+  pnl_ratio_threshold: 2.0               # 优势侧浮盈 > 劣势侧浮盈 × 此值
   min_trend_strength_for_direction: 0.6  # 趋势强度 ≥ 此值才确认方向
   conservative_max_exposure: 10.0        # 无法确认方向时的保守最大敞口
 execution:
   fee_rate: 0.002
-  slippage_bps: 5
-  min_seconds_between_orders: 2.0
-  min_same_outcome_price_move_ratio: 0.005
+  slippage_bps: 5                        
+  min_seconds_between_orders: 2.0         
+  min_same_outcome_price_move_ratio: 0.005      # 同一方向连续下单的价格必须移动至少0.5%，避免过度交易
 
 # 【新增】每日风险管理参数
 daily_limits:
@@ -169,19 +175,19 @@ daily_limits:
     enforce_sell_min_order_size: true
 # 各买入/卖出规则单独喂价：间隔内沿用上次刷新时的「最近价」；0 表示每 tick 用最新价（与旧行为一致）
 rule_price_feed:
-  last_minute: 1
+  last_minute:  2
   entries:
-    opening: 1
-    hedge: 1
-    grid: 1
-    mean_reversion: 1
-    trend: 1
+    opening: 2
+    hedge: 2
+    grid: 2
+    mean_reversion: 2
+    trend: 2
   exits:
-    stop_loss: 1
-    hedge: 1
-    take_profit: 1
-    grid: 1
-    mean_reversion: 1
+    stop_loss: 2
+    hedge: 2
+    take_profit: 2
+    grid: 2
+    mean_reversion: 2
 priorities:
   risk: 10
   last_minute: 20
