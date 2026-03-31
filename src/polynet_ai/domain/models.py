@@ -172,7 +172,8 @@ class CycleState:
     max_abs_net_exposure: float = 0.0
     reentry_anchor_up_price: float = 0.0
     reentry_anchor_down_price: float = 0.0
-    reentry_armed_at: datetime | None = None
+    up_reentry_armed_at: datetime | None = None
+    down_reentry_armed_at: datetime | None = None
 
     def price_range(self) -> float:
         if self.market_trades == 0:
@@ -250,6 +251,8 @@ class FeatureSnapshot:
     up_signal_basis_price: float = 0.0
     down_signal_basis_price: float = 0.0
     reentry_armed: bool = False
+    up_reentry_armed: bool = False
+    down_reentry_armed: bool = False
 
 
 @dataclass(slots=True)

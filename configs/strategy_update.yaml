@@ -7,7 +7,7 @@ cycle:
   phase_end_seconds_3: 240
   # 每个时间桶（如 btc-updown-5m-<unix>）绝对开始后，推迟多少秒再把成交流喂给策略/规则。
   # 模拟下单、实盘验证、批量回放、单周期复盘均读取此项；命令行传参可覆盖。
-  post_window_start_delay_seconds: 10.0
+  post_window_start_delay_seconds: 1.0
 batch_replay:
   # 处理模式：per-cycle（逐周期独立回放，默认）| merged（合并事件流回放）
   processing_mode: per-cycle
@@ -24,7 +24,7 @@ dynamic_priority:
   phase_3_grid_boost: 15             # 网格加仓优先级提升幅度
 opening_entry:
   enabled: true
-  window_seconds: 30             # 周期前30秒进入开仓入场逻辑
+  window_seconds: 50             # 周期前30秒进入开仓入场逻辑
   min_market_trades: 1           # 最小市场成交量（笔），低于此值不触发开仓入场
   vwap_epsilon: 0.01             # 价格边界容忍度：入场价格必须优于（上涨）或劣于（下跌）vwap ± vwap_epsilon
   range_low_fraction: 0.35       # 价格范围下边界位置：入场价格必须优于 vwap - (vwap - low) * range_low_fraction

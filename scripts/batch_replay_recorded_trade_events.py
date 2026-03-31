@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -32,6 +33,33 @@ from scripts.run_recorded_live_paper import (  # noqa: E402
     clear_streaming_csv_cache,
     recording_slug_for_path,
 )
+
+
+_CYCLE_DIR_RE = re.compile(r".+-updown-\d+m-\d+$")
+
+
+def _event_file_matches_cycle_dir(path: Path) -> bool:
+    """空文件保留给后续 skip；非空文件必须能读到匹配目录名的 cycle_id。"""
+    saw_nonblank_line = False
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                text = line.strip()
+                if not text:
+                    continue
+                saw_nonblank_line = True
+                try:
+                    payload = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                cycle_id = str(payload.get("cycle_id") or "").strip()
+                if cycle_id:
+                    return cycle_id == path.parent.name
+    except OSError:
+        return False
+    return not saw_nonblank_line
 
 
 def _resolve_existing_path(label: str, path: str | Path) -> Path:
@@ -83,13 +111,6 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="若指定则覆盖 strategy.yaml 的 cycle.post_window_start_delay_seconds。",
     )
-    parser.add_argument(
-        "--processing-mode",
-        type=str,
-        choices=["per-cycle", "merged"],
-        default=None,
-        help="处理模式：per-cycle=逐周期独立回放（默认，亦可由 strategy.yaml 的 batch_replay.processing_mode 控制）；merged=合并事件流回放。",
-    )
     return parser.parse_args()
 
 
@@ -110,22 +131,9 @@ def _discover_cycle_event_files(input_dir: Path) -> list[Path]:
     files = sorted(
         path
         for path in input_dir.glob("*/ws_trade_events.ndjson")
-        if path.is_file()
+        if path.is_file() and _CYCLE_DIR_RE.fullmatch(path.parent.name) is not None
     )
-    return files
-
-
-def _resolve_processing_mode(config, cli_mode: str | None) -> str:
-    raw = cli_mode if cli_mode is not None else config.get("batch_replay.processing_mode", "per-cycle")
-    mode = str(raw).strip().lower()
-    aliases = {
-        "per-cycle": "per-cycle",
-        "per_cycle": "per-cycle",
-        "streaming": "per-cycle",
-        "merged": "merged",
-        "merge": "merged",
-    }
-    return aliases.get(mode, "per-cycle")
+    return [path for path in files if _event_file_matches_cycle_dir(path)]
 
 
 class StreamingAggregator:
@@ -201,9 +209,8 @@ def run_batch_replay(
     report_source: str = "",
     max_cycles: int | None = None,
     report_name_prefix: str = "",
-    use_streaming: bool = True,  # 兼容旧参数：True=per-cycle, False=merged
+    use_streaming: bool = True,  # 新增参数：默认使用流式处理
     post_window_start_delay_seconds: float | None = None,
-    processing_mode: str | None = None,
 ) -> Path | None:
     """核心 batch replay 逻辑，可被外部脚本调用。返回 Excel 绩效报告路径。"""
     input_resolved = _resolve_existing_path("输入目录", input_dir)
@@ -211,8 +218,6 @@ def run_batch_replay(
     output_resolved.mkdir(parents=True, exist_ok=True)
 
     config = _load_config(config_path, overrides_path)
-    mode = _resolve_processing_mode(config, processing_mode)
-    use_streaming = (mode == "per-cycle")
     _pwd = resolve_post_window_start_delay_seconds(
         config=config,
         cli_seconds=post_window_start_delay_seconds,
@@ -225,7 +230,6 @@ def run_batch_replay(
 
     total_files = len(event_files)
     print(f"  ℹ 共需回放 {total_files} 个周期文件")
-    print(f"  ℹ 处理模式: {mode}")
     print(f"  ℹ 窗起点后策略推迟: {_pwd:g}s（与实盘/WebSocket 路径一致）")
 
     # 引擎内部根据 capital_reset_mode 处理周期资金
@@ -487,7 +491,6 @@ def main() -> int:
         per_cycle_cash=args.per_cycle_cash,
         include_trade_process=args.include_trade_process,
         post_window_start_delay_seconds=args.post_window_start_delay_seconds,
-        processing_mode=args.processing_mode,
     )
     return 0
 

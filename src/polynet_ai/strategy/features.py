@@ -248,6 +248,7 @@ def build_feature_snapshot(
     cycle_seconds: int,
     last_minute_seconds: int,
     trend_window_secs: float = 6.0,
+    phase_3_end_seconds: float = 240.0,
 ) -> FeatureSnapshot:
     if engine.state is None or engine.state.last_event_timestamp is None:
         raise RuntimeError("state engine has no market context")
@@ -323,13 +324,17 @@ def build_feature_snapshot(
         _cycle_net       = round(
             state.up_position.realized_pnl + state.down_position.realized_pnl + _u + _d, 3
         )
+    # Re-entry 仅在 phase1~3 生效；phase4 不再使用清仓锚点恢复信号基准。
+    phase_4_started = elapsed > float(phase_3_end_seconds)
+    up_reentry_armed = (state.up_reentry_armed_at is not None) and (not phase_4_started)
+    down_reentry_armed = (state.down_reentry_armed_at is not None) and (not phase_4_started)
     up_signal_basis = _signal_basis_price(
         state.up_position.avg_price,
-        state.reentry_anchor_up_price if state.reentry_armed_at is not None else 0.0,
+        state.reentry_anchor_up_price if up_reentry_armed else 0.0,
     )
     down_signal_basis = _signal_basis_price(
         state.down_position.avg_price,
-        state.reentry_anchor_down_price if state.reentry_armed_at is not None else 0.0,
+        state.reentry_anchor_down_price if down_reentry_armed else 0.0,
     )
     return FeatureSnapshot(
         market_id=state.market_id,
@@ -375,5 +380,7 @@ def build_feature_snapshot(
         tape_high=state.high_price,
         up_signal_basis_price=up_signal_basis,
         down_signal_basis_price=down_signal_basis,
-        reentry_armed=state.reentry_armed_at is not None,
+        reentry_armed=up_reentry_armed or down_reentry_armed,
+        up_reentry_armed=up_reentry_armed,
+        down_reentry_armed=down_reentry_armed,
     )

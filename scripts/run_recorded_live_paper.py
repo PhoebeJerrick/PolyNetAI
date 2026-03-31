@@ -218,16 +218,6 @@ class StreamingAggregator:
         return self.win_count / self.total_cycles
 
 
-def _read_streaming_csv(path: Path) -> pd.DataFrame:
-    """读取流式增量 CSV。
-
-    文本列（如 ``risk_reason``、``broker_status``）常为空；空单元格被默认解析为 ``NaN``（float），
-    与有内容的字符串混在同一列。``read_csv`` 在 ``low_memory=True`` 时分块推断类型，块间不一致即触发
-    ``DtypeWarning``。整表单次推断可避免该噪声警告。
-    """
-    return pd.read_csv(path, low_memory=False)
-
-
 def _append_dataframe_to_csv(path: Path, df: pd.DataFrame) -> None:
     """追加 DataFrame 到 CSV，列顺序与已有表头严格一致。
 
@@ -242,7 +232,7 @@ def _append_dataframe_to_csv(path: Path, df: pd.DataFrame) -> None:
     cols = list(header.columns)
     extra = [c for c in df.columns if c not in cols]
     if extra:
-        old = _read_streaming_csv(path)
+        old = pd.read_csv(path)
         all_cols = list(dict.fromkeys(list(old.columns) + list(df.columns)))
         old = old.reindex(columns=all_cols)
         df = df.reindex(columns=all_cols)
@@ -464,10 +454,10 @@ def _export_dashboard_from_streaming(
     decision_csv = output_dir / "streaming_decision_results.csv"
     if not cycle_csv.exists():
         return False
-    cycle_df = _read_streaming_csv(cycle_csv)
+    cycle_df = pd.read_csv(cycle_csv)
     if cycle_df.empty:
         return False
-    decision_df = _read_streaming_csv(decision_csv) if decision_csv.exists() else pd.DataFrame()
+    decision_df = pd.read_csv(decision_csv) if decision_csv.exists() else pd.DataFrame()
 
     if not cycle_df.empty and "cycle_slug" not in cycle_df.columns and "cycle_id" in cycle_df.columns:
         cycle_df = cycle_df.copy()
@@ -629,6 +619,14 @@ def main_streaming(args: argparse.Namespace | None = None) -> int:
                   f"{len(sorted_events)}/{len(cycle_events)} 事件, 盈亏 {profit:.2f}, 耗时 {cycle_elapsed:.1f}s")
 
             accumulated_snapshot_rows.extend(result.snapshot_df.to_dict(orient="records"))
+            if args.dashboard_refresh_seconds > 0:
+                _export_dashboard_from_streaming(
+                    engine=engine,
+                    output_dir=output_dir,
+                    snapshot_rows=accumulated_snapshot_rows,
+                    refresh_seconds=args.dashboard_refresh_seconds,
+                    write_excel=False,
+                )
 
         # 释放内存
         del cycle_events, sorted_events, result
@@ -653,8 +651,8 @@ def main_streaming(args: argparse.Namespace | None = None) -> int:
     decision_csv = output_dir / "streaming_decision_results.csv"
 
     if cycle_csv.exists():
-        cycle_df = _read_streaming_csv(cycle_csv)
-        decision_df = _read_streaming_csv(decision_csv) if decision_csv.exists() else pd.DataFrame()
+        cycle_df = pd.read_csv(cycle_csv)
+        decision_df = pd.read_csv(decision_csv) if decision_csv.exists() else pd.DataFrame()
 
         # 兼容旧版流式输出：若缺失 cycle_slug，则从 cycle_id 补齐。
         if not cycle_df.empty and "cycle_slug" not in cycle_df.columns and "cycle_id" in cycle_df.columns:
@@ -785,7 +783,7 @@ def main(args: argparse.Namespace | None = None) -> int:
     )
     progress_callback = None
     if args.dashboard_refresh_seconds > 0:
-        print("  ✓ dashboard 导出已启用：为避免大批量回放退化，将在回放结束后统一写盘")
+        print(f"  ✓ 实时 dashboard 已启用：每 {args.dashboard_refresh_seconds:.1f}s 写盘一次")
 
         def _flush_progress(result: LiveRunnerResult) -> None:
             export_live_result(

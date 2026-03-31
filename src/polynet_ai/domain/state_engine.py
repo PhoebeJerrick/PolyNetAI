@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import re
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .models import CycleState, FillEvent, Outcome, TradeAction, TradeEvent
 from .settlement import settlement_summary
+
+# 从 cycle slug（如 btc-updown-5m-1774240200）解析名义开盘 epoch
+_SLUG_EPOCH_RE = re.compile(r"-updown-\d+m-(\d+)$")
+
+
+def _clamp_binary_price(price: float) -> float:
+    return max(0.01, min(0.99, float(price)))
 
 
 @dataclass(slots=True)
@@ -47,7 +55,19 @@ class StateEngine:
     def start_cycle(self, market_id: str, cycle_id: str, timestamp: datetime) -> CycleState:
         self.market_tape.clear()
         self.strategy_fills.clear()
-        self.state = CycleState(market_id=market_id, cycle_id=cycle_id, cycle_start=timestamp)
+        # 优先从 cycle_id slug 解析名义开盘时间，使 cycle_elapsed_seconds 与
+        # 报表「下注时间距开盘差」对齐；解析失败则回退到首条事件时间。
+        m = _SLUG_EPOCH_RE.search(str(cycle_id))
+        if m is not None:
+            try:
+                cycle_start: datetime = datetime.fromtimestamp(
+                    int(m.group(1)), tz=timezone.utc
+                ).replace(tzinfo=None)
+            except (ValueError, OSError):
+                cycle_start = timestamp
+        else:
+            cycle_start = timestamp
+        self.state = CycleState(market_id=market_id, cycle_id=cycle_id, cycle_start=cycle_start)
         self._snapshot_cache = None  # Invalidate cache on new cycle
         return self.state
 
@@ -77,10 +97,22 @@ class StateEngine:
 
     def apply_strategy_fill(self, fill: FillEvent) -> CycleState:
         state = self.ensure_cycle(fill)
+        prev_up_held = state.up_position.held
+        prev_down_held = state.down_position.held
         self._update_price_stats(state, fill.price, fill.timestamp)
         self._update_market_price(state, fill.outcome, fill.price)
         self._update_balances(state, fill.outcome, fill.action, fill.shares)
         self._update_position_book(state, fill.outcome, fill.action, fill.price, fill.shares)
+        if fill.action == "buy":
+            if fill.outcome == "up" and state.up_position.held > 1e-10:
+                self._clear_reentry_anchor(state, "up")
+            elif fill.outcome == "down" and state.down_position.held > 1e-10:
+                self._clear_reentry_anchor(state, "down")
+        elif fill.action == "sell":
+            if fill.outcome == "up" and prev_up_held > 1e-10 and state.up_position.held <= 1e-10:
+                self._arm_reentry_anchors(state, fill.timestamp)
+            elif fill.outcome == "down" and prev_down_held > 1e-10 and state.down_position.held <= 1e-10:
+                self._arm_reentry_anchors(state, fill.timestamp)
         state.strategy_trades += 1
         state.last_event_timestamp = fill.timestamp
         self.strategy_fills.append(fill)
@@ -224,3 +256,25 @@ class StateEngine:
             state.max_abs_net_exposure,
             abs(state.net_position_value()),
         )
+
+    @staticmethod
+    def _clear_reentry_anchor(state: CycleState, outcome: Outcome) -> None:
+        if outcome == "up":
+            state.reentry_anchor_up_price = 0.0
+            state.up_reentry_armed_at = None
+            return
+        state.reentry_anchor_down_price = 0.0
+        state.down_reentry_armed_at = None
+
+    @staticmethod
+    def _arm_reentry_anchors(state: CycleState, timestamp: datetime) -> None:
+        up_price = float(state.up_last_price or 0.0)
+        down_price = float(state.down_last_price or 0.0)
+        if up_price <= 1e-10 and down_price > 1e-10:
+            up_price = _clamp_binary_price(1.0 - down_price)
+        if down_price <= 1e-10 and up_price > 1e-10:
+            down_price = _clamp_binary_price(1.0 - up_price)
+        state.reentry_anchor_up_price = up_price
+        state.reentry_anchor_down_price = down_price
+        state.up_reentry_armed_at = timestamp
+        state.down_reentry_armed_at = timestamp
