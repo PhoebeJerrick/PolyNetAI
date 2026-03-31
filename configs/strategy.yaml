@@ -96,7 +96,7 @@ stop_loss:
   # 阶段1（0–70s）：建仓阶段，容忍最大波动，但要防近零价死亡
   phase_1_near_zero_price: 0.06               # 条件A 绝对价格阈值
   phase_1_stop_loss_pct: 0.15                 # 条件B 浮亏%阈值（15%）
-  phase_1_min_hold_seconds: 20                # 条件B 时间门槛（秒），防入场噪声误触，防止过早出清，保护初始仓位
+  phase_1_min_hold_seconds: 60                # 条件B 时间门槛（秒）；第一阶段以建仓为主，延后至 phase1 结束后再触发
   phase_1_stop_loss_action_fraction: 0.50     # phase 1 只部分止损，避免过早出清
 
   # 阶段2（70–160s）：减仓阶段，提升保护力度
@@ -159,7 +159,8 @@ last_minute:
 execution:
   fee_rate: 0.002                               # 手续费率，默认0.2%
   slippage_bps: 5                               # 滑点bps，默认5bps
-  min_seconds_between_orders: 2.0               # 两次下单至少间隔2秒
+  min_seconds_between_orders: 2.0               # 两次下单至少间隔2秒（按UP/DOWN方向独立计时）
+  max_same_direction_buy_fills_per_second: 0    # 同1秒内同方向买入成交次数上限（UP/DOWN分别统计），为0，不限制
   min_same_outcome_price_move_ratio: 0.005      # 同一方向连续下单的价格必须移动至少0.5%，避免过度交易
 
 # 【新增】每日风险管理参数

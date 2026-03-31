@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime
+import json
 from pathlib import Path
+from collections import deque
 
 import pandas as pd
 
@@ -22,6 +24,34 @@ from polynet_ai.risk.limits import apply_risk_limits
 from polynet_ai.strategy.features import build_feature_snapshot
 from polynet_ai.strategy.router import StrategyRouter
 from polynet_ai.strategy.spec import StrategyConfig, load_strategy_config
+
+
+# region agent log
+def _debug_log(
+    *,
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict[str, object],
+    run_id: str = "pre-fix",
+) -> None:
+    payload = {
+        "sessionId": "4c25d8",
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(datetime.now().timestamp() * 1000),
+    }
+    try:
+        with open("debug-4c25d8.log", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+# endregion
 
 
 @dataclass(slots=True)
@@ -67,16 +97,24 @@ class ReplayEngine:
             slippage_bps=float(config.get("execution.slippage_bps", 10)),
         )
         self._last_strategy_fill_at: datetime | None = None
+        self._last_strategy_fill_at_up: datetime | None = None
+        self._last_strategy_fill_at_down: datetime | None = None
         self._last_strategy_fill_price_up: float | None = None
         self._last_strategy_fill_price_down: float | None = None
+        self._recent_buy_fill_times_up: deque[datetime] = deque()
+        self._recent_buy_fill_times_down: deque[datetime] = deque()
 
     def reset(self) -> None:
         self.state_engine = StateEngine()
         self.account = Account(starting_cash=self.account.starting_cash)
         self._equity_curve_cash = float(self.account.starting_cash)
         self._last_strategy_fill_at = None
+        self._last_strategy_fill_at_up = None
+        self._last_strategy_fill_at_down = None
         self._last_strategy_fill_price_up = None
         self._last_strategy_fill_price_down = None
+        self._recent_buy_fill_times_up.clear()
+        self._recent_buy_fill_times_down.clear()
 
     @classmethod
     def from_yaml(
@@ -134,6 +172,28 @@ class ReplayEngine:
             phase_3_end_seconds=float(self.config.get("cycle.phase_end_seconds_3", 240.0)),
         )
         decision = self.router.route(features, strategy_trades=self.state_engine.state.strategy_trades)
+        # region agent log
+        if (
+            features.cycle_elapsed_seconds <= 70.0
+            and decision.selected is None
+            and features.market_trades in {1, 50, 100, 200, 400, 800}
+        ):
+            _debug_log(
+                hypothesis_id="H1",
+                location="replay.py:process_event:no_signal_phase1",
+                message="Phase1 no signal checkpoint",
+                data={
+                    "cycle_id": event.cycle_id,
+                    "elapsed": round(float(features.cycle_elapsed_seconds), 6),
+                    "market_trades": int(features.market_trades),
+                    "strategy_trades": int(features.strategy_trades),
+                    "phase_candidate_count": len(decision.candidates),
+                    "up_price": float(features.up_last_price),
+                    "down_price": float(features.down_last_price),
+                    "trend_strength": float(features.trend_strength),
+                },
+            )
+        # endregion
         row: dict[str, object] = {
             "market_id": event.market_id,
             "cycle_id": event.cycle_id,
@@ -158,6 +218,24 @@ class ReplayEngine:
             "available_cash": self.account.available_cash,
         }
         if decision.selected is not None:
+            # region agent log
+            if features.cycle_elapsed_seconds <= 70.0:
+                _debug_log(
+                    hypothesis_id="H2",
+                    location="replay.py:process_event:selected_phase1",
+                    message="Phase1 selected candidate before risk",
+                    data={
+                        "cycle_id": event.cycle_id,
+                        "elapsed": round(float(features.cycle_elapsed_seconds), 6),
+                        "selected_rule": decision.selected.category,
+                        "action": decision.selected.action,
+                        "outcome": decision.selected.outcome,
+                        "shares": float(decision.selected.shares),
+                        "strategy_trades": int(features.strategy_trades),
+                        "candidate_count": len(decision.candidates),
+                    },
+                )
+            # endregion
             pending_context = self._pending_context()
             decision.selected.metadata["account_cash"] = self.account.cash
             decision.selected.metadata["account_available_cash"] = self.account.available_cash
@@ -165,8 +243,13 @@ class ReplayEngine:
             decision.selected.metadata.update(event.metadata)
             decision.selected.metadata.update(pending_context)
             decision.selected.metadata["last_strategy_fill_at"] = self._last_strategy_fill_at
+            decision.selected.metadata["last_strategy_fill_at_up"] = self._last_strategy_fill_at_up
+            decision.selected.metadata["last_strategy_fill_at_down"] = self._last_strategy_fill_at_down
             decision.selected.metadata["last_strategy_fill_price_up"] = self._last_strategy_fill_price_up
             decision.selected.metadata["last_strategy_fill_price_down"] = self._last_strategy_fill_price_down
+            self._prune_recent_buy_fill_times(event.timestamp)
+            decision.selected.metadata["recent_buy_fill_count_1s_up"] = len(self._recent_buy_fill_times_up)
+            decision.selected.metadata["recent_buy_fill_count_1s_down"] = len(self._recent_buy_fill_times_down)
             row["selected_rule"] = decision.selected.category
             row["selected_action"] = decision.selected.action
             row["selected_outcome"] = decision.selected.outcome
@@ -174,6 +257,25 @@ class ReplayEngine:
             risk_decision = apply_risk_limits(features, decision.selected, self.config)
             row["risk_status"] = "accepted" if risk_decision.accepted else "blocked"
             row["risk_reason"] = risk_decision.reason
+            # region agent log
+            if not risk_decision.accepted:
+                _debug_log(
+                    hypothesis_id="H3",
+                    location="replay.py:process_event:risk_blocked",
+                    message="Signal blocked by risk limits",
+                    data={
+                        "cycle_id": event.cycle_id,
+                        "elapsed": round(float(features.cycle_elapsed_seconds), 6),
+                        "selected_rule": decision.selected.category,
+                        "action": decision.selected.action,
+                        "outcome": decision.selected.outcome,
+                        "reason": risk_decision.reason,
+                        "ref_price": float(decision.selected.reference_price),
+                        "last_fill_up": self._last_strategy_fill_price_up,
+                        "last_fill_down": self._last_strategy_fill_price_down,
+                    },
+                )
+            # endregion
             if risk_decision.accepted and risk_decision.intent is not None:
                 row["selected_shares"] = risk_decision.intent.shares
                 try:
@@ -192,6 +294,22 @@ class ReplayEngine:
                     elif execution.fill is not None:
                         self._apply_fill(execution.fill)
                         self._sync_account_reservations()
+                        # region agent log
+                        _debug_log(
+                            hypothesis_id="H2",
+                            location="replay.py:process_event:fill_executed",
+                            message="Signal executed",
+                            data={
+                                "cycle_id": event.cycle_id,
+                                "elapsed": round(float(features.cycle_elapsed_seconds), 6),
+                                "rule": risk_decision.intent.category,
+                                "action": risk_decision.intent.action,
+                                "outcome": risk_decision.intent.outcome,
+                                "shares": float(risk_decision.intent.shares),
+                                "fill_price": float(execution.fill.price),
+                            },
+                        )
+                        # endregion
                         row["executed"] = True
                         row["confirmed"] = True
                         row["fill_price"] = execution.fill.price
@@ -245,9 +363,27 @@ class ReplayEngine:
         self.state_engine.apply_strategy_fill(fill)
         self._last_strategy_fill_at = fill.timestamp
         if fill.outcome == "up":
+            self._last_strategy_fill_at_up = fill.timestamp
             self._last_strategy_fill_price_up = fill.price
         else:
+            self._last_strategy_fill_at_down = fill.timestamp
             self._last_strategy_fill_price_down = fill.price
+        if fill.action == "buy":
+            self._record_buy_fill(fill.outcome, fill.timestamp)
+
+    def _record_buy_fill(self, outcome: str, timestamp: datetime) -> None:
+        queue = self._recent_buy_fill_times_up if outcome == "up" else self._recent_buy_fill_times_down
+        queue.append(timestamp)
+        self._prune_queue(queue, timestamp, window_seconds=1.0)
+
+    def _prune_recent_buy_fill_times(self, now: datetime) -> None:
+        self._prune_queue(self._recent_buy_fill_times_up, now, window_seconds=1.0)
+        self._prune_queue(self._recent_buy_fill_times_down, now, window_seconds=1.0)
+
+    @staticmethod
+    def _prune_queue(queue: deque[datetime], now: datetime, *, window_seconds: float) -> None:
+        while queue and (now - queue[0]).total_seconds() > window_seconds:
+            queue.popleft()
 
     def _pending_context(self) -> dict[str, object]:
         if not hasattr(self.broker, "pending_context"):
@@ -331,6 +467,23 @@ class ReplayEngine:
             "max_abs_net_exposure": state.max_abs_net_exposure,
             "account_cash": account_cash_display,
         }
+        # region agent log
+        elapsed_total = 0.0
+        if state.cycle_start is not None and state.last_event_timestamp is not None:
+            elapsed_total = max(0.0, (state.last_event_timestamp - state.cycle_start).total_seconds())
+        _debug_log(
+            hypothesis_id="H4",
+            location="replay.py:_finalize_cycle",
+            message="Cycle finalized timing/profile",
+            data={
+                "cycle_id": state.cycle_id,
+                "elapsed_total_seconds": round(float(elapsed_total), 6),
+                "market_trades": int(state.market_trades),
+                "strategy_trades": int(state.strategy_trades),
+                "cycle_net_profit": float(summary.cycle_net_profit),
+            },
+        )
+        # endregion
         self.state_engine.state = None
         self.state_engine.market_tape.clear()
         self.state_engine.strategy_fills.clear()

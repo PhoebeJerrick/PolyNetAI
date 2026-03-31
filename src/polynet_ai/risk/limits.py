@@ -2,10 +2,39 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+import json
 
 from polynet_ai.domain.models import FeatureSnapshot, OrderIntent
 from polynet_ai.strategy.cycle_windows import determine_phase
 from polynet_ai.strategy.spec import StrategyConfig
+
+
+# region agent log
+def _debug_log(
+    *,
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict[str, object],
+    run_id: str = "pre-fix",
+) -> None:
+    payload = {
+        "sessionId": "4c25d8",
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(datetime.now(tz=timezone.utc).timestamp() * 1000),
+    }
+    try:
+        with open("debug-4c25d8.log", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+# endregion
 
 
 def _coerce_datetime(value: object) -> datetime | None:
@@ -108,13 +137,26 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
 
     min_gap = float(config.get("execution.min_seconds_between_orders", 2.0))
     if min_gap > 0:
-        # 按方向独立追踪下单间隔：买 UP 检查 up 最后成交时间，买/卖 DOWN 检查 down
+        # 按方向独立追踪下单间隔：UP 与 DOWN 分开计时。
         direction_key = "last_strategy_fill_at_up" if clipped.outcome == "up" else "last_strategy_fill_at_down"
         last_at = _coerce_datetime(clipped.metadata.get(direction_key))
         if last_at is not None:
             delta = (features.timestamp - last_at).total_seconds()
             if delta <= min_gap:
                 return RiskDecision(False, None, f"策略下单间隔不足{min_gap:g}秒（{clipped.outcome}方向）")
+
+    # 同方向买入成交限频（可配置）：1 秒内最多 N 次（UP/DOWN 分别独立统计）
+    buy_fill_window_seconds = 1.0
+    max_buy_fills_per_window = int(config.get("execution.max_same_direction_buy_fills_per_second", 1))
+    if clipped.action == "buy" and max_buy_fills_per_window > 0:
+        count_key = "recent_buy_fill_count_1s_up" if clipped.outcome == "up" else "recent_buy_fill_count_1s_down"
+        recent_buy_fill_count = int(clipped.metadata.get(count_key, 0))
+        if recent_buy_fill_count >= max_buy_fills_per_window:
+            return RiskDecision(
+                False,
+                None,
+                f"同方向买入成交限频：{buy_fill_window_seconds:g}秒内最多{max_buy_fills_per_window}次（{clipped.outcome}方向）",
+            )
 
     # 卖出限频（新增）：同方向在任意 1 秒内最多触发一次卖出
     # 这里用“最后一次卖出订单提交/成交时间”（由引擎注入的 metadata）来判断，
@@ -138,7 +180,16 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
 
     # 价格波动检查：仅对买入单生效；卖出单（止盈/止损/减仓）不受此约束
     min_move = float(config.get("execution.min_same_outcome_price_move_ratio", 0.005))
-    if clipped.action == "buy" and min_move > 0 and clipped.reference_price > 1e-12:
+    phase = determine_phase(features.cycle_elapsed_seconds, config)
+    # 第一阶段以建仓为主，放宽同向买入价格波动约束，避免连续加仓被“同价位”拦截。
+    phase1_relaxed_categories = {"trend", "grid", "mean_reversion", "hedge"}
+    skip_min_move_check = phase == 1 and clipped.category in phase1_relaxed_categories
+    if (
+        clipped.action == "buy"
+        and min_move > 0
+        and clipped.reference_price > 1e-12
+        and not skip_min_move_check
+    ):
         key = "last_strategy_fill_price_up" if clipped.outcome == "up" else "last_strategy_fill_price_down"
         raw_last = clipped.metadata.get(key)
         if raw_last is not None:
@@ -147,6 +198,23 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
                 move = abs(clipped.reference_price - last_px) / last_px
                 if move <= min_move:
                     pct = min_move * 100.0
+                    # region agent log
+                    _debug_log(
+                        hypothesis_id="H3",
+                        location="limits.py:apply_risk_limits:min_move_block",
+                        message="Blocked by same-outcome price move rule",
+                        data={
+                            "cycle_id": str(clipped.cycle_id),
+                            "outcome": clipped.outcome,
+                            "reference_price": float(clipped.reference_price),
+                            "last_fill_price": float(last_px),
+                            "move_ratio": float(move),
+                            "threshold": float(min_move),
+                            "phase": int(phase),
+                            "elapsed": round(float(features.cycle_elapsed_seconds), 6),
+                        },
+                    )
+                    # endregion
                     return RiskDecision(False, None, f"同方向买入价格相对上次成交价波动不足{pct:g}%")
 
     if features.net_position_value and abs(features.net_position_value) > max_exposure and clipped.action == "buy":
@@ -167,6 +235,27 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
         return RiskDecision(False, None, "下单后净敞口超过风控阈值")
 
     if clipped.action == "buy":
+        phase = determine_phase(features.cycle_elapsed_seconds, config)
+        # 第一阶段建仓上限：对齐策略文档“0-70s 建仓到 65%”目标，避免在 phase1 过度加仓耗尽现金。
+        if phase == 1 and clipped.category in {"opening", "grid", "mean_reversion", "trend", "hedge"}:
+            max_position_value = float(config.get("position.max_position_value", 85.0))
+            phase1_target_ratio = float(
+                config.get("dynamic_priority.phase_1_position_threshold", 0.65)
+            )
+            phase1_target_value = max(0.0, max_position_value * max(0.0, phase1_target_ratio))
+            current_position_value = max(
+                0.0,
+                float(features.up_held * features.up_avg_price + features.down_held * features.down_avg_price),
+            )
+            remaining_phase1_value = phase1_target_value - current_position_value
+            if remaining_phase1_value <= 0:
+                return RiskDecision(False, None, "第一阶段建仓已达目标仓位上限")
+            if clipped.reference_price > 1e-12:
+                phase1_max_shares = remaining_phase1_value / clipped.reference_price
+                if phase1_max_shares < clipped.shares:
+                    clipped = replace(clipped, shares=max(0.0, phase1_max_shares))
+                    clipped.metadata["phase1_target_limited"] = True
+
         account_cash = float(clipped.metadata.get("account_available_cash", clipped.metadata.get("account_cash", 0.0)))
         reserved_cash = max(0.0, min_cash_buffer)
         spendable_cash = max(0.0, account_cash * max(0.0, min(max_cash_utilization, 1.0)) - reserved_cash)

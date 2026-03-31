@@ -212,3 +212,40 @@ def test_fixed_mode_keeps_curve_but_resets_betting_cash_per_cycle() -> None:
     assert round(float(row_b["account_cash"]), 3) == round(expected_curve_cash, 3)
     # 每周期投注本金仍保持固定值。
     assert round(engine.account.cash, 3) == 100.0
+
+
+def test_buy_fill_frequency_limit_blocks_same_direction_within_one_second() -> None:
+    base = build_config().to_dict()
+    base["execution"]["min_seconds_between_orders"] = 0.0
+    base["execution"]["max_same_direction_buy_fills_per_second"] = 1
+    engine = ReplayEngine(StrategyConfig(raw=base))
+
+    class StubRouter:
+        def route(self, features, strategy_trades):
+            return DecisionOutcome(
+                selected=OrderIntent(
+                    market_id=features.market_id,
+                    cycle_id=features.cycle_id,
+                    outcome="up",
+                    action="buy",
+                    shares=5.0,
+                    reference_price=features.price,
+                    category="grid",
+                    reason="test buy fill rate limit",
+                    priority=10,
+                ),
+                candidates=[],
+            )
+
+    engine.router = StubRouter()
+    t0 = datetime(2026, 3, 20, 12, 0, 0)
+    first = TradeEvent("BTC", "cycle-a", t0, price=0.45, shares=10, outcome="up", action="buy")
+    second = TradeEvent("BTC", "cycle-a", t0 + timedelta(milliseconds=500), price=0.451, shares=9, outcome="up", action="buy")
+
+    first_step = engine.process_event(first)
+    second_step = engine.process_event(second)
+
+    assert first_step.decision_row["executed"] is True
+    assert second_step.decision_row["executed"] is False
+    assert second_step.decision_row["risk_status"] == "blocked"
+    assert "同方向买入成交限频" in str(second_step.decision_row["risk_reason"])

@@ -205,7 +205,11 @@ def hedge_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Ord
 def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
     if rule_disabled_in_cycle_tail(features, config, "grid"):
         return []
-    if features.is_last_minute or features.market_regime != "range":
+    phase = determine_phase(features.cycle_elapsed_seconds, config)
+    # 第一阶段是“加仓建仓”窗口，允许在 trend/range 下都进行双边 grid 补仓。
+    if features.is_last_minute:
+        return []
+    if phase != 1 and features.market_regime != "range":
         return []
     if abs(features.net_position) > float(config.get("exposure.max_grid_net_position", 20.0)):
         return []
@@ -216,8 +220,6 @@ def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Orde
     size = _base_size(config, features)
     intents: list[OrderIntent] = []
     infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
-    phase = determine_phase(features.cycle_elapsed_seconds, config)
-
     if phase < 4:
         # 阶段1-3：不限制 percentile，双向布仓（震荡区间积累双边敞口）
         for outcome in ("up", "down"):
