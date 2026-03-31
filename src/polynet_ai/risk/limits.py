@@ -116,6 +116,26 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
             if delta <= min_gap:
                 return RiskDecision(False, None, f"策略下单间隔不足{min_gap:g}秒（{clipped.outcome}方向）")
 
+    # 卖出限频（新增）：同方向在任意 1 秒内最多触发一次卖出
+    # 这里用“最后一次卖出订单提交/成交时间”（由引擎注入的 metadata）来判断，
+    # 用于实盘 broker 的 pending 状态下也能正确抑制重复下发。
+    sell_same_direction_window_seconds = 1.0
+    if sell_same_direction_window_seconds > 0 and clipped.action == "sell":
+        direction_key = (
+            "last_strategy_sell_submitted_at_up"
+            if clipped.outcome == "up"
+            else "last_strategy_sell_submitted_at_down"
+        )
+        last_sell_at = _coerce_datetime(clipped.metadata.get(direction_key))
+        if last_sell_at is not None:
+            delta = (features.timestamp - last_sell_at).total_seconds()
+            if delta <= sell_same_direction_window_seconds:
+                return RiskDecision(
+                    False,
+                    None,
+                    f"同方向卖出限频：{sell_same_direction_window_seconds:g}秒内仅允许一次（{clipped.outcome}方向）",
+                )
+
     # 价格波动检查：仅对买入单生效；卖出单（止盈/止损/减仓）不受此约束
     min_move = float(config.get("execution.min_same_outcome_price_move_ratio", 0.005))
     if clipped.action == "buy" and min_move > 0 and clipped.reference_price > 1e-12:

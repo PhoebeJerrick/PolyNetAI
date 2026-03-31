@@ -69,6 +69,8 @@ class ReplayEngine:
         self._last_strategy_fill_at: datetime | None = None
         self._last_strategy_fill_price_up: float | None = None
         self._last_strategy_fill_price_down: float | None = None
+        self._last_strategy_sell_submitted_at_up: datetime | None = None
+        self._last_strategy_sell_submitted_at_down: datetime | None = None
 
     def reset(self) -> None:
         self.state_engine = StateEngine()
@@ -77,6 +79,8 @@ class ReplayEngine:
         self._last_strategy_fill_at = None
         self._last_strategy_fill_price_up = None
         self._last_strategy_fill_price_down = None
+        self._last_strategy_sell_submitted_at_up = None
+        self._last_strategy_sell_submitted_at_down = None
 
     @classmethod
     def from_yaml(
@@ -166,6 +170,8 @@ class ReplayEngine:
             decision.selected.metadata["last_strategy_fill_at"] = self._last_strategy_fill_at
             decision.selected.metadata["last_strategy_fill_price_up"] = self._last_strategy_fill_price_up
             decision.selected.metadata["last_strategy_fill_price_down"] = self._last_strategy_fill_price_down
+            decision.selected.metadata["last_strategy_sell_submitted_at_up"] = self._last_strategy_sell_submitted_at_up
+            decision.selected.metadata["last_strategy_sell_submitted_at_down"] = self._last_strategy_sell_submitted_at_down
             row["selected_rule"] = decision.selected.category
             row["selected_action"] = decision.selected.action
             row["selected_outcome"] = decision.selected.outcome
@@ -185,10 +191,20 @@ class ReplayEngine:
                     row["broker_order_id"] = execution.order_id
                     if execution.status == "submitted":
                         row["submitted"] = True
+                        if risk_decision.intent.action == "sell":
+                            if risk_decision.intent.outcome == "up":
+                                self._last_strategy_sell_submitted_at_up = event.timestamp
+                            else:
+                                self._last_strategy_sell_submitted_at_down = event.timestamp
                         self._sync_account_reservations()
                         row["risk_status"] = "submitted"
                         row["available_cash"] = self.account.available_cash
                     elif execution.fill is not None:
+                        if risk_decision.intent.action == "sell":
+                            if risk_decision.intent.outcome == "up":
+                                self._last_strategy_sell_submitted_at_up = execution.fill.timestamp
+                            else:
+                                self._last_strategy_sell_submitted_at_down = execution.fill.timestamp
                         self._apply_fill(execution.fill)
                         self._sync_account_reservations()
                         row["executed"] = True
