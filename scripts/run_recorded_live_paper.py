@@ -629,14 +629,6 @@ def main_streaming(args: argparse.Namespace | None = None) -> int:
                   f"{len(sorted_events)}/{len(cycle_events)} 事件, 盈亏 {profit:.2f}, 耗时 {cycle_elapsed:.1f}s")
 
             accumulated_snapshot_rows.extend(result.snapshot_df.to_dict(orient="records"))
-            if args.dashboard_refresh_seconds > 0:
-                _export_dashboard_from_streaming(
-                    engine=engine,
-                    output_dir=output_dir,
-                    snapshot_rows=accumulated_snapshot_rows,
-                    refresh_seconds=args.dashboard_refresh_seconds,
-                    write_excel=False,
-                )
 
         # 释放内存
         del cycle_events, sorted_events, result
@@ -793,7 +785,7 @@ def main(args: argparse.Namespace | None = None) -> int:
     )
     progress_callback = None
     if args.dashboard_refresh_seconds > 0:
-        print(f"  ✓ 实时 dashboard 已启用：每 {args.dashboard_refresh_seconds:.1f}s 写盘一次")
+        print("  ✓ dashboard 导出已启用：为避免大批量回放退化，将在回放结束后统一写盘")
 
         def _flush_progress(result: LiveRunnerResult) -> None:
             export_live_result(
