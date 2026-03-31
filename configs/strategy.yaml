@@ -22,6 +22,76 @@ dynamic_priority:
   phase_3_position_threshold: 0.85   # 第三阶段仓位 < 此值时提升加仓优先级
   phase_3_trend_boost: 25            # 趋势加仓优先级提升幅度
   phase_3_grid_boost: 15             # 网格加仓优先级提升幅度
+rule_enablement:
+  entries:
+    opening:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
+    hedge:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
+    grid:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
+    mean_reversion:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
+    trend:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
+  exits:
+    stop_loss:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
+    hedge:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
+    take_profit:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
+    grid:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
+    mean_reversion:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
+  last_minute:
+    last_minute:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
 opening_entry:
   enabled: true
   window_seconds: 50             # 周期前30秒进入开仓入场逻辑

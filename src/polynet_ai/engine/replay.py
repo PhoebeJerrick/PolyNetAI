@@ -217,7 +217,7 @@ class ReplayEngine:
             "account_cash": self.account.cash,
             "available_cash": self.account.available_cash,
         }
-        if decision.selected is not None:
+        if decision.candidates:
             # region agent log
             if features.cycle_elapsed_seconds <= 70.0:
                 _debug_log(
@@ -227,36 +227,80 @@ class ReplayEngine:
                     data={
                         "cycle_id": event.cycle_id,
                         "elapsed": round(float(features.cycle_elapsed_seconds), 6),
-                        "selected_rule": decision.selected.category,
-                        "action": decision.selected.action,
-                        "outcome": decision.selected.outcome,
-                        "shares": float(decision.selected.shares),
+                        "selected_rule": decision.selected.category if decision.selected is not None else "",
+                        "action": decision.selected.action if decision.selected is not None else "",
+                        "outcome": decision.selected.outcome if decision.selected is not None else "",
+                        "shares": float(decision.selected.shares) if decision.selected is not None else 0.0,
                         "strategy_trades": int(features.strategy_trades),
                         "candidate_count": len(decision.candidates),
                     },
                 )
             # endregion
             pending_context = self._pending_context()
-            decision.selected.metadata["account_cash"] = self.account.cash
-            decision.selected.metadata["account_available_cash"] = self.account.available_cash
-            decision.selected.metadata["market_price"] = event.price
-            decision.selected.metadata.update(event.metadata)
-            decision.selected.metadata.update(pending_context)
-            decision.selected.metadata["last_strategy_fill_at"] = self._last_strategy_fill_at
-            decision.selected.metadata["last_strategy_fill_at_up"] = self._last_strategy_fill_at_up
-            decision.selected.metadata["last_strategy_fill_at_down"] = self._last_strategy_fill_at_down
-            decision.selected.metadata["last_strategy_fill_price_up"] = self._last_strategy_fill_price_up
-            decision.selected.metadata["last_strategy_fill_price_down"] = self._last_strategy_fill_price_down
             self._prune_recent_buy_fill_times(event.timestamp)
-            decision.selected.metadata["recent_buy_fill_count_1s_up"] = len(self._recent_buy_fill_times_up)
-            decision.selected.metadata["recent_buy_fill_count_1s_down"] = len(self._recent_buy_fill_times_down)
-            row["selected_rule"] = decision.selected.category
-            row["selected_action"] = decision.selected.action
-            row["selected_outcome"] = decision.selected.outcome
-            row["selected_shares"] = decision.selected.shares
-            risk_decision = apply_risk_limits(features, decision.selected, self.config)
+            blocked_reasons: list[str] = []
+            selected_for_risk = decision.candidates[0]
+            selected_for_risk.metadata["account_cash"] = self.account.cash
+            selected_for_risk.metadata["account_available_cash"] = self.account.available_cash
+            selected_for_risk.metadata["market_price"] = event.price
+            selected_for_risk.metadata.update(event.metadata)
+            selected_for_risk.metadata.update(pending_context)
+            selected_for_risk.metadata["last_strategy_fill_at"] = self._last_strategy_fill_at
+            selected_for_risk.metadata["last_strategy_fill_at_up"] = self._last_strategy_fill_at_up
+            selected_for_risk.metadata["last_strategy_fill_at_down"] = self._last_strategy_fill_at_down
+            selected_for_risk.metadata["last_strategy_fill_price_up"] = self._last_strategy_fill_price_up
+            selected_for_risk.metadata["last_strategy_fill_price_down"] = self._last_strategy_fill_price_down
+            selected_for_risk.metadata["recent_buy_fill_count_1s_up"] = len(self._recent_buy_fill_times_up)
+            selected_for_risk.metadata["recent_buy_fill_count_1s_down"] = len(self._recent_buy_fill_times_down)
+            risk_decision = apply_risk_limits(features, selected_for_risk, self.config)
+            if not risk_decision.accepted and len(decision.candidates) > 1:
+                blocked_reasons.append(
+                    f"{selected_for_risk.category}:{selected_for_risk.action}:{selected_for_risk.outcome}:{risk_decision.reason}"
+                )
+                for fallback in decision.candidates[1:]:
+                    fallback.metadata["account_cash"] = self.account.cash
+                    fallback.metadata["account_available_cash"] = self.account.available_cash
+                    fallback.metadata["market_price"] = event.price
+                    fallback.metadata.update(event.metadata)
+                    fallback.metadata.update(pending_context)
+                    fallback.metadata["last_strategy_fill_at"] = self._last_strategy_fill_at
+                    fallback.metadata["last_strategy_fill_at_up"] = self._last_strategy_fill_at_up
+                    fallback.metadata["last_strategy_fill_at_down"] = self._last_strategy_fill_at_down
+                    fallback.metadata["last_strategy_fill_price_up"] = self._last_strategy_fill_price_up
+                    fallback.metadata["last_strategy_fill_price_down"] = self._last_strategy_fill_price_down
+                    fallback.metadata["recent_buy_fill_count_1s_up"] = len(self._recent_buy_fill_times_up)
+                    fallback.metadata["recent_buy_fill_count_1s_down"] = len(self._recent_buy_fill_times_down)
+                    fallback_risk = apply_risk_limits(features, fallback, self.config)
+                    if fallback_risk.accepted:
+                        selected_for_risk = fallback
+                        risk_decision = fallback_risk
+                        break
+                    blocked_reasons.append(
+                        f"{fallback.category}:{fallback.action}:{fallback.outcome}:{fallback_risk.reason}"
+                    )
+
+            if "account_cash" not in selected_for_risk.metadata:
+                selected_for_risk.metadata["account_cash"] = self.account.cash
+                selected_for_risk.metadata["account_available_cash"] = self.account.available_cash
+                selected_for_risk.metadata["market_price"] = event.price
+                selected_for_risk.metadata.update(event.metadata)
+                selected_for_risk.metadata.update(pending_context)
+                selected_for_risk.metadata["last_strategy_fill_at"] = self._last_strategy_fill_at
+                selected_for_risk.metadata["last_strategy_fill_at_up"] = self._last_strategy_fill_at_up
+                selected_for_risk.metadata["last_strategy_fill_at_down"] = self._last_strategy_fill_at_down
+                selected_for_risk.metadata["last_strategy_fill_price_up"] = self._last_strategy_fill_price_up
+                selected_for_risk.metadata["last_strategy_fill_price_down"] = self._last_strategy_fill_price_down
+                selected_for_risk.metadata["recent_buy_fill_count_1s_up"] = len(self._recent_buy_fill_times_up)
+                selected_for_risk.metadata["recent_buy_fill_count_1s_down"] = len(self._recent_buy_fill_times_down)
+
+            row["selected_rule"] = selected_for_risk.category
+            row["selected_action"] = selected_for_risk.action
+            row["selected_outcome"] = selected_for_risk.outcome
+            row["selected_shares"] = selected_for_risk.shares
             row["risk_status"] = "accepted" if risk_decision.accepted else "blocked"
             row["risk_reason"] = risk_decision.reason
+            if blocked_reasons:
+                row["risk_reason"] = f"{row['risk_reason']} | fallback尝试: {' || '.join(blocked_reasons)}"
             # region agent log
             if not risk_decision.accepted:
                 _debug_log(
@@ -266,11 +310,11 @@ class ReplayEngine:
                     data={
                         "cycle_id": event.cycle_id,
                         "elapsed": round(float(features.cycle_elapsed_seconds), 6),
-                        "selected_rule": decision.selected.category,
-                        "action": decision.selected.action,
-                        "outcome": decision.selected.outcome,
+                        "selected_rule": selected_for_risk.category,
+                        "action": selected_for_risk.action,
+                        "outcome": selected_for_risk.outcome,
                         "reason": risk_decision.reason,
-                        "ref_price": float(decision.selected.reference_price),
+                        "ref_price": float(selected_for_risk.reference_price),
                         "last_fill_up": self._last_strategy_fill_price_up,
                         "last_fill_down": self._last_strategy_fill_price_down,
                     },

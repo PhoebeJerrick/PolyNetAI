@@ -78,3 +78,28 @@ def determine_phase(cycle_elapsed_seconds: float, config: StrategyConfig) -> int
     if cycle_elapsed_seconds <= e3:
         return 3
     return 4
+
+
+def is_rule_enabled_for_phase(
+    config: StrategyConfig,
+    *,
+    section: str,
+    rule: str,
+    phase: int,
+) -> bool:
+    """
+    判断某规则在指定阶段是否使能。
+
+    配置路径：
+    - rule_enablement.<section>.<rule>.enabled
+    - rule_enablement.<section>.<rule>.phase_<n>
+    """
+    root = f"rule_enablement.{section}.{rule}"
+    enabled = config.get(f"{root}.enabled", True)
+    if isinstance(enabled, bool) and not enabled:
+        return False
+    phase_key = f"{root}.phase_{int(phase)}"
+    phase_enabled = config.get(phase_key, None)
+    if isinstance(phase_enabled, bool):
+        return phase_enabled
+    return True

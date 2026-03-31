@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from datetime import datetime
 
 from polynet_ai.domain.models import DecisionOutcome, FeatureSnapshot, OrderIntent, Outcome
@@ -18,6 +19,7 @@ from polynet_ai.strategy.exit_rules import (
     stop_loss_exits,
     take_profit_exits,
 )
+from polynet_ai.strategy.cycle_windows import determine_phase, is_rule_enabled_for_phase
 from polynet_ai.strategy.features import snapshot_with_effective_price, snapshot_with_effective_quotes
 from polynet_ai.strategy.last_minute import build_last_minute_candidate
 from polynet_ai.strategy.spec import StrategyConfig
@@ -90,6 +92,7 @@ class StrategyRouter:
 
     def route(self, features: FeatureSnapshot, strategy_trades: int = 0) -> DecisionOutcome:
         self._reset_feed_context(features)
+        phase = determine_phase(features.cycle_elapsed_seconds, self.config)
         
         # 优化 #4：并行化规则评估，11个规则可独立并行执行
         # 定义所有规则及其对应的路径配置
@@ -111,20 +114,29 @@ class StrategyRouter:
         
         # 使用线程池并行执行所有规则（受GIL影响较小，主要是I/O和数据处理）
         with ThreadPoolExecutor(max_workers=4) as executor:
+            filtered_specs = [
+                (rule_func, path)
+                for rule_func, path in rule_specs
+                if self._rule_spec_enabled(path, phase)
+            ]
             futures = {
                 executor.submit(
                     rule_func,
                     self._snapshot_for_rule(features, path),
                     self.config
-                ): rule_func
-                for rule_func, path in rule_specs
+                ): path
+                for rule_func, path in filtered_specs
             }
             
             # 按完成顺序收集结果（不一定是提交顺序）
             for future in as_completed(futures):
                 try:
+                    path = futures[future]
                     result = future.result()
                     if result:
+                        rule_scope = ":".join(path)
+                        for item in result:
+                            item.metadata["_rule_scope"] = rule_scope
                         candidates.extend(result)
                 except Exception as e:
                     # 如果规则执行错误，记录但继续处理其他规则
@@ -135,5 +147,89 @@ class StrategyRouter:
         for candidate in candidates:
             candidate.metadata["strategy_trades"] = strategy_trades
         candidates = [candidate for candidate in candidates if candidate.shares > 0]
+        candidates = self._apply_dynamic_priorities(features, candidates)
         candidates.sort(key=lambda item: (item.priority, -item.shares))
-        return DecisionOutcome(selected=candidates[0] if candidates else None, candidates=candidates)
+        if not candidates:
+            return DecisionOutcome(selected=None, candidates=[])
+
+        # 仅允许“规则内候选”：锁定最优先候选所属规则作用域，
+        # 回退仅在该规则作用域内进行，不跨规则尝试。
+        top_scope = str(candidates[0].metadata.get("_rule_scope", ""))
+        scoped_candidates = [
+            item
+            for item in candidates
+            if str(item.metadata.get("_rule_scope", "")) == top_scope
+        ]
+        scoped_candidates.sort(key=lambda item: (item.priority, -item.shares))
+        return DecisionOutcome(
+            selected=scoped_candidates[0] if scoped_candidates else None,
+            candidates=scoped_candidates,
+        )
+
+    def _rule_spec_enabled(self, path: tuple[str, ...], phase: int) -> bool:
+        if path == ("last_minute",):
+            return is_rule_enabled_for_phase(
+                self.config,
+                section="last_minute",
+                rule="last_minute",
+                phase=phase,
+            )
+        section, rule = path[0], path[1]
+        return is_rule_enabled_for_phase(
+            self.config,
+            section=section,
+            rule=rule,
+            phase=phase,
+        )
+
+    def _apply_dynamic_priorities(
+        self,
+        features: FeatureSnapshot,
+        candidates: list[OrderIntent],
+    ) -> list[OrderIntent]:
+        phase_1_end = float(self.config.get("cycle.phase_end_seconds_1", 70.0))
+        if not candidates or features.cycle_elapsed_seconds > phase_1_end:
+            return candidates
+
+        max_position_value = float(self.config.get("position.max_position_value", 85.0))
+        phase_1_target_ratio = float(self.config.get("dynamic_priority.phase_1_position_threshold", 0.65))
+        phase_1_boost = int(self.config.get("dynamic_priority.phase_1_boost", 0))
+        if max_position_value <= 0 or phase_1_boost <= 0:
+            return candidates
+
+        current_up_value = max(0.0, float(features.up_held * features.up_avg_price))
+        current_down_value = max(0.0, float(features.down_held * features.down_avg_price))
+        current_total_value = current_up_value + current_down_value
+        phase_1_target_value = max(0.0, max_position_value * max(0.0, phase_1_target_ratio))
+        if current_total_value >= phase_1_target_value:
+            return candidates
+
+        # 第一阶段双边建仓仲裁：
+        # 当存在仓位不平衡时，优先让欠配方向的买单获得更高优先级。
+        # 这里按文档的 30% 差值上限，换算为方向价值占比阈值 35%/65%。
+        up_ratio = current_up_value / current_total_value if current_total_value > 1e-9 else 0.5
+        down_ratio = current_down_value / current_total_value if current_total_value > 1e-9 else 0.5
+        underweight_side: Outcome | None = None
+        if up_ratio < 0.35:
+            underweight_side = "up"
+        elif down_ratio < 0.35:
+            underweight_side = "down"
+
+        boosted: list[OrderIntent] = []
+        for candidate in candidates:
+            new_priority = int(candidate.priority)
+            if candidate.action == "buy" and candidate.category in {
+                "opening",
+                "grid",
+                "mean_reversion",
+                "trend",
+                "hedge",
+            }:
+                new_priority = max(1, new_priority - phase_1_boost)
+                if underweight_side is not None and candidate.outcome == underweight_side:
+                    new_priority = max(1, new_priority - phase_1_boost)
+            if new_priority != candidate.priority:
+                boosted.append(replace(candidate, priority=new_priority))
+            else:
+                boosted.append(candidate)
+        return boosted
