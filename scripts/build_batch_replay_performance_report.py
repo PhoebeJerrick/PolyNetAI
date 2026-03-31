@@ -386,6 +386,7 @@ def _write_cycle_price_sheet(
     sheet_name: str,
     cycle_price_df: pd.DataFrame,
     chart_title_prefix: str,
+    include_charts: bool = True,
 ) -> None:
     if cycle_price_df.empty:
         pd.DataFrame({"说明": ["无可用价格数据，未生成分周期价格图表。"]}).to_excel(
@@ -393,8 +394,46 @@ def _write_cycle_price_sheet(
         )
         return
     cycle_price_df.to_excel(writer, sheet_name=sheet_name, index=False)
-    ws = writer.sheets[sheet_name]
-    _append_cycle_price_charts(ws, cycle_price_df, title_prefix=chart_title_prefix)
+    if include_charts:
+        ws = writer.sheets[sheet_name]
+        _append_cycle_price_charts(ws, cycle_price_df, title_prefix=chart_title_prefix)
+
+
+def _resolve_trade_process_chart_mode(
+    *,
+    cycle_df: pd.DataFrame,
+    decision_df: pd.DataFrame,
+) -> bool:
+    """决定交易过程 Excel 是否生成图表。大批量默认关闭以缩短耗时。"""
+    import os
+
+    raw = str(os.getenv("POLYNET_TRADE_PROCESS_CHARTS", "auto")).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+
+    cycle_count = int(cycle_df.get("cycle_slug", pd.Series(dtype=object)).nunique()) if not cycle_df.empty else 0
+    decision_rows = int(len(decision_df))
+    # auto: 大规模任务默认禁用图表（图表构建是 openpyxl 最耗时部分）
+    return not (cycle_count >= 25 or decision_rows >= 120_000)
+
+
+def _apply_basic_sheet_style(
+    writer: pd.ExcelWriter,
+    *,
+    skip_sheet_titles: frozenset[str] | None = None,
+) -> None:
+    """在同一次写盘中完成首行冻结/加粗，避免再次 load_workbook 全量重写。"""
+    from openpyxl.styles import Font
+
+    skip = skip_sheet_titles or frozenset()
+    for name, ws in writer.sheets.items():
+        if name in skip or ws.max_row == 0:
+            continue
+        ws.freeze_panes = "A2"
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
 
 
 def summarize_tail_window_executions(
@@ -1058,6 +1097,7 @@ def _write_batch_trade_process_xlsx(
 
     xlsx_path.parent.mkdir(parents=True, exist_ok=True)
     cycle_prices = _build_cycle_price_frame(decision_df, cycle_df, complete_only=False)
+    include_charts = _resolve_trade_process_chart_mode(cycle_df=cycle_df, decision_df=decision_df)
     with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
         meta_df.to_excel(writer, sheet_name="元数据", index=False)
         snap_df.to_excel(writer, sheet_name="周期快照", index=False)
@@ -1067,8 +1107,11 @@ def _write_batch_trade_process_xlsx(
             sheet_name="周期价格与图表",
             cycle_price_df=cycle_prices,
             chart_title_prefix="回放周期价格折线图",
+            include_charts=include_charts,
         )
-    _finalize_xlsx_workbook(xlsx_path)
+        _apply_basic_sheet_style(writer)
+    if not include_charts:
+        print("  ℹ 交易过程图表已自动关闭（大批量优化模式）。可设置 POLYNET_TRADE_PROCESS_CHARTS=1 强制开启。")
     return xlsx_path
 
 
