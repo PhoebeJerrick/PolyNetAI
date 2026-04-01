@@ -5,7 +5,7 @@ Polymarket 交易明细 Excel 持仓分析 + 盈亏汇总。
 插入到"成交价格"后的列（若输入中存在）：
   同向成交价波动幅度(%) — 相对本周期内上一次同结果代币成交价的涨跌幅百分比，首笔为空；
   其后为 Up积累份数 / Up的加权均价 / Down积累份数 / Down加权均价 /
-  当前总持仓份数 / 净持仓份数 / 净持仓价值 / 净持仓方向 /
+  当前总持仓份数 / 持仓价值占比 / 净持仓份数 / 净持仓价值 / 净持仓方向 /
   Up已成交差价盈亏 / Down已成交差价盈亏 / 浮动盈亏
 
 净持仓价值 = 净持仓份数 × 净持仓方向对应方向的加权均价（空仓/平衡为 0）。
@@ -33,6 +33,7 @@ from typing import Iterable, Sequence
 
 import pandas as pd
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+import yaml
 
 
 # ── column-name aliases ──────────────────────────────────────────────
@@ -73,6 +74,7 @@ INSERTED_COLUMNS = (
     "Down积累份数",
     "Down加权均价",
     "当前总持仓份数",
+    "持仓价值占比",
     "净持仓份数",
     "净持仓价值",
     "净持仓方向",
@@ -83,6 +85,7 @@ INSERTED_COLUMNS = (
 SETTLEMENT_COLUMNS = ("未平仓UP盈亏", "未平仓Down盈亏", "周期净利润")
 SETTLEMENT_META_COLUMNS = ("最终Winner方向",)
 ALL_PNL_COLUMNS = ("Up已成交差价盈亏", "Down已成交差价盈亏", "浮动盈亏") + SETTLEMENT_COLUMNS
+DEFAULT_POSITION_VALUE_DENOMINATOR = 85.0
 
 # ── styles ───────────────────────────────────────────────────────────
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="1F4E78")
@@ -126,6 +129,7 @@ COL_FILLS = {
     "Down积累份数": DOWN_FILL,
     "Down加权均价": DOWN_FILL,
     "当前总持仓份数": TOTAL_FILL,
+    "持仓价值占比": TOTAL_FILL,
     "净持仓份数": NET_POS_FILL,
     "净持仓价值": NET_POS_FILL,
     "净持仓方向": DIRECTION_FILL,
@@ -427,6 +431,7 @@ def compute(df: pd.DataFrame, args: argparse.Namespace) -> tuple[pd.DataFrame, d
     dn_v: list[object] = []
     dn_avg_v: list[object] = []
     tot_v: list[object] = []
+    pos_ratio_v: list[object] = []
     net_v: list[object] = []
     net_val_v: list[object] = []
     dir_v: list[str] = []
@@ -490,6 +495,16 @@ def compute(df: pd.DataFrame, args: argparse.Namespace) -> tuple[pd.DataFrame, d
                 b["dn_cost"] = b["dn_held"] * b["dn_avg"]
             b["last_dn"] = price
 
+        # 持仓价值占比 = 当前总持仓成本价值 / 分母（默认对齐 position.max_position_value）
+        ratio_denominator = float(
+            getattr(args, "position_value_denominator", DEFAULT_POSITION_VALUE_DENOMINATOR)
+            or DEFAULT_POSITION_VALUE_DENOMINATOR
+        )
+        if ratio_denominator <= 1e-12:
+            ratio_denominator = DEFAULT_POSITION_VALUE_DENOMINATOR
+        total_cost_value = b["up_cost"] + b["dn_cost"]
+        pos_ratio_v.append(total_cost_value / ratio_denominator)
+
         up_pnl_v.append(trade_pnl_up)
         dn_pnl_v.append(trade_pnl_dn)
 
@@ -516,6 +531,7 @@ def compute(df: pd.DataFrame, args: argparse.Namespace) -> tuple[pd.DataFrame, d
     res["Down积累份数"] = dn_v
     res["Down加权均价"] = dn_avg_v
     res["当前总持仓份数"] = tot_v
+    res["持仓价值占比"] = pos_ratio_v
     res["净持仓份数"] = net_v
     res["净持仓价值"] = net_val_v
     res["净持仓方向"] = dir_v
@@ -649,6 +665,15 @@ def format_ws(ws, marker_col: str | None = None) -> None:
                 c.number_format = "0.000"
             c.alignment = Alignment(horizontal="right")
 
+    # 持仓价值占比列使用百分比格式（例如 23.4%）
+    ratio_ci = cm.get("持仓价值占比")
+    if ratio_ci:
+        for ri in range(2, ws.max_row + 1):
+            c = ws.cell(ri, ratio_ci)
+            if isinstance(c.value, (int, float)):
+                c.number_format = "0.0%"
+            c.alignment = Alignment(horizontal="right")
+
 
 # ═══════════════════════ CLI ═════════════════════════════════════════
 
@@ -675,11 +700,35 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--coin-col", default=None)
     p.add_argument("--cycle-col", default=None)
     p.add_argument("--group-cols", type=split_group_cols, default=None)
+    p.add_argument("--config", default="configs/strategy.yaml")
+    p.add_argument("--position-value-denominator", type=float, default=None)
     return p.parse_args()
+
+
+def _resolve_position_value_denominator(args: argparse.Namespace) -> float:
+    explicit = getattr(args, "position_value_denominator", None)
+    if explicit is not None:
+        value = float(explicit)
+        if value <= 1e-12:
+            raise ValueError("--position-value-denominator 必须 > 0")
+        return value
+
+    cfg_path = Path(getattr(args, "config", "configs/strategy.yaml"))
+    if cfg_path.exists():
+        data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        if isinstance(data, dict):
+            position = data.get("position", {})
+            if isinstance(position, dict) and position.get("max_position_value") is not None:
+                value = float(position["max_position_value"])
+                if value > 1e-12:
+                    return value
+
+    raise ValueError("未能解析持仓占比分母，请传 --position-value-denominator 或提供有效 --config")
 
 
 def main() -> int:
     args = parse_args()
+    args.position_value_denominator = _resolve_position_value_denominator(args)
     inp = Path(args.input)
     out = build_out(inp, args.output)
     if not inp.exists():

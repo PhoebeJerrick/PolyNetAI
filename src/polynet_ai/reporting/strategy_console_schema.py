@@ -139,8 +139,9 @@ def build_strategy_dashboard_sections() -> list[dict[str, Any]]:
             "fields": [
                 _field("dynamic_priority.phase_1_position_threshold", "阶段1 仓位阈值（比例）", "低于则提升部分买单优先级。", ui="range", min=0.1, max=1.0, step=0.01, risk="medium"),
                 _field("dynamic_priority.phase_1_boost", "阶段1 提升幅度", "从优先级数值中减去。", min=0, max=50, step=1, risk="medium"),
-                _field("dynamic_priority.phase_2_position_threshold", "阶段2 仓位阈值", "高于则提升部分卖单。", ui="range", min=0.1, max=1.0, step=0.01, risk="medium"),
-                _field("dynamic_priority.phase_2_boost", "阶段2 提升幅度", "", min=0, max=50, step=1, risk="medium"),
+                _field("dynamic_priority.phase_2_position_threshold", "阶段2 减仓仓位阈值", "高于则提升部分卖单。", ui="range", min=0.1, max=1.0, step=0.01, risk="medium"),
+                _field("dynamic_priority.phase_2_low_position_threshold", "阶段2 加仓仓位阈值", "低于则提升所有买单（幅度同阶段2 提升）。", ui="range", min=0.05, max=0.9, step=0.01, risk="medium"),
+                _field("dynamic_priority.phase_2_boost", "阶段2 提升幅度", "减仓侧与低仓位加仓侧共用。", min=0, max=50, step=1, risk="medium"),
                 _field("dynamic_priority.phase_3_position_threshold", "阶段3 仓位阈值", "低于则提升 trend/grid 买单。", ui="range", min=0.1, max=1.0, step=0.01, risk="medium"),
                 _field("dynamic_priority.phase_3_trend_boost", "阶段3 趋势买单幅度", "", min=0, max=50, step=1, risk="medium"),
                 _field("dynamic_priority.phase_3_grid_boost", "阶段3 网格买单幅度", "", min=0, max=50, step=1, risk="medium"),

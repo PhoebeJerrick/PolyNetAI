@@ -24,10 +24,11 @@ position:
 # =============================================================================
 dynamic_priority:
   # 阶段性动态优先级调整参数（A+C联合方案 — 方案C）
-  phase_1_position_threshold: 0.65   # 第一阶段仓位 < 此值时提升加仓优先级
+  phase_1_position_threshold: 0.70   # 第一阶段仓位 < 此值时提升加仓优先级
   phase_1_boost: 15                  # 优先级提升幅度
-  phase_2_position_threshold: 0.50   # 第二阶段仓位 > 此值时提升减仓优先级
-  phase_2_boost: 15
+  phase_2_position_threshold: 0.40   # 第二阶段仓位 > 此值时提升减仓优先级
+  phase_2_low_position_threshold: 0.25   # 第二阶段仓位 < 此值时提升加仓优先级（与 phase_2_boost 共用幅度）
+  phase_2_boost: 15 
   phase_3_position_threshold: 0.85   # 第三阶段仓位 < 此值时提升加仓优先级
   phase_3_trend_boost: 25            # 趋势加仓优先级提升幅度
   phase_3_grid_boost: 15             # 网格加仓优先级提升幅度
@@ -50,7 +51,7 @@ rule_enablement:
       phase_4: true
     grid:
       enabled: true
-      phase_1: false
+      phase_1: true
       phase_2: true
       phase_3: true
       phase_4: true
@@ -277,19 +278,19 @@ priorities:
     phase_1:
       risk: 10
       last_minute: 20
-      stop_loss: 30
-      hedge: 40
-      take_profit: 50
+      stop_loss: 40
+      take_profit: 40
+      hedge: 50
       opening: 52
-      grid: 60
-      mean_reversion: 70
+      mean_reversion: 51
+      grid: 70
       trend: 80
     phase_2:
       risk: 10
       last_minute: 20
-      stop_loss: 30
-      hedge: 40
-      take_profit: 50
+      take_profit: 40
+      stop_loss: 40
+      hedge: 50
       opening: 52
       grid: 60
       mean_reversion: 70
@@ -297,9 +298,9 @@ priorities:
     phase_3:
       risk: 10
       last_minute: 20
-      stop_loss: 30
-      hedge: 40
-      take_profit: 50
+      stop_loss: 40
+      take_profit: 40
+      hedge: 50
       opening: 52
       grid: 60
       mean_reversion: 70
@@ -307,10 +308,10 @@ priorities:
     phase_4:
       risk: 10
       last_minute: 20
-      stop_loss: 30
-      hedge: 40
-      take_profit: 50
+      stop_loss: 40
       opening: 52
+      trend: 50
+      take_profit: 55
       grid: 60
-      mean_reversion: 70
-      trend: 80
+      hedge: 70
+      mean_reversion: 80

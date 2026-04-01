@@ -572,7 +572,8 @@ except Exception:
     mkdir -p "data/processed"
     "$PYTHON_BIN" analyze_polymarket_tracker.py \
       --input data/raw/polymarket_tracker_collection.xlsx \
-      --output "$OUT_XLSX"
+      --output "$OUT_XLSX" \
+      --position-value-denominator 1000
     "$PYTHON_BIN" scripts/_update_floating_pnl_columns_in_xlsx.py --processed-v5 "$OUT_XLSX"
     ;;
   s|start)

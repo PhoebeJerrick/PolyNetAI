@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -48,6 +49,7 @@ from polynet_ai.reporting.excel_export import (
 )
 
 _TRADE_PROCESS_ELAPSED_COL = "下注时间距开盘差(分,秒)"
+DEFAULT_POSITION_VALUE_DENOMINATOR = 85.0
 
 
 def _cycle_starts_from_full_decision_frame(full: pd.DataFrame) -> pd.DataFrame:
@@ -86,6 +88,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="默认输出到解析后的 batch_replay_outputs 目录",
     )
+    parser.add_argument("--config", default="configs/strategy.yaml", help="策略配置文件，用于读取 position.max_position_value")
+    parser.add_argument("--position-value-denominator", type=float, default=None, help="持仓价值占比分母，优先级高于 --config")
     return parser.parse_args()
 
 
@@ -120,6 +124,30 @@ def _discover_cycle_result_dirs(batch_dir: Path) -> list[Path]:
         and (path / "decisions.csv").exists()
         and (path / "metrics.csv").exists()
     )
+
+
+def resolve_position_value_denominator(
+    *,
+    config_path: str | Path = "configs/strategy.yaml",
+    explicit: float | None = None,
+) -> float:
+    """统一持仓价值占比分母：优先显式参数，否则读取 position.max_position_value。"""
+    if explicit is not None:
+        value = float(explicit)
+        if value <= 1e-12:
+            raise ValueError("position_value_denominator 必须 > 0")
+        return value
+
+    cfg_path = Path(config_path)
+    if cfg_path.exists():
+        data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        if isinstance(data, dict):
+            position = data.get("position", {})
+            if isinstance(position, dict) and position.get("max_position_value") is not None:
+                value = float(position["max_position_value"])
+                if value > 1e-12:
+                    return value
+    return DEFAULT_POSITION_VALUE_DENOMINATOR
 
 
 def _compute_max_drawdown(profits: list[float]) -> float:
@@ -547,7 +575,10 @@ def summarize_tail_window_executions(
     return per_cycle, overview_rows
 
 
-def _tracker_compute_args() -> argparse.Namespace:
+def _tracker_compute_args(
+    *,
+    position_value_denominator: float = DEFAULT_POSITION_VALUE_DENOMINATOR,
+) -> argparse.Namespace:
     """与 analyze_polymarket_tracker.compute 默认列名一致。"""
     return argparse.Namespace(
         group_cols=None,
@@ -557,6 +588,7 @@ def _tracker_compute_args() -> argparse.Namespace:
         outcome_col="结果代币类型",
         action_col="操作方向",
         price_col="成交价格",
+        position_value_denominator=position_value_denominator,
     )
 
 
@@ -720,6 +752,8 @@ def _append_tracker_style_sheet(
     writer: pd.ExcelWriter,
     raw_input: pd.DataFrame,
     cycle_df: pd.DataFrame,
+    *,
+    position_value_denominator: float = DEFAULT_POSITION_VALUE_DENOMINATOR,
 ) -> None:
     """调用 analyze_polymarket_tracker.compute + format_ws，生成与 v5 一致的累计持仓表。"""
     import analyze_polymarket_tracker as apt
@@ -730,7 +764,10 @@ def _append_tracker_style_sheet(
             writer, sheet_name=name, index=False
         )
         return
-    proc, meta = apt.compute(raw_input.copy(), _tracker_compute_args())
+    proc, meta = apt.compute(
+        raw_input.copy(),
+        _tracker_compute_args(position_value_denominator=position_value_denominator),
+    )
     proc = _align_tracker_subtotals_with_cycle_snapshot(proc, cycle_df)
     proc.to_excel(writer, sheet_name=name, index=False)
     apt.format_ws(writer.sheets[name], meta.get("marker_col"))
@@ -776,6 +813,7 @@ def _write_performance_report_xlsx(
     tail_per_cycle_df: pd.DataFrame | None = None,
     tail_overview_rows: list[tuple[str, object]] | None = None,
     report_source: str = "",
+    position_value_denominator: float = DEFAULT_POSITION_VALUE_DENOMINATOR,
 ) -> None:
     overview_rows: list[tuple[str, object]] = []
     if report_source:
@@ -853,7 +891,12 @@ def _write_performance_report_xlsx(
         )
         if tail_per_cycle_df is not None and not tail_per_cycle_df.empty:
             tail_per_cycle_df.to_excel(writer, sheet_name="尾盘窗口成交汇总", index=False)
-        _append_tracker_style_sheet(writer, tracker_raw, cycle_df)
+        _append_tracker_style_sheet(
+            writer,
+            tracker_raw,
+            cycle_df,
+            position_value_denominator=position_value_denominator,
+        )
 
     _finalize_xlsx_workbook(xlsx_path, skip_sheet_titles=frozenset({TRACKER_STYLE_SHEET}))
 
@@ -888,6 +931,7 @@ def build_performance_report_zh(
     report_name_prefix: str = "",
     capital_reset_mode: str = "cumulative",
     starting_cash: float | None = None,
+    position_value_denominator: float = DEFAULT_POSITION_VALUE_DENOMINATOR,
 ) -> Path:
     direction_df = _summarize_direction_distribution(decision_df)
     winner_df = _value_counts_frame(cycle_df.get("winner", pd.Series(dtype=object)), "winner")
@@ -956,6 +1000,7 @@ def build_performance_report_zh(
         tail_per_cycle_df=tail_per_cycle,
         tail_overview_rows=tail_overview,
         report_source=report_source,
+        position_value_denominator=position_value_denominator,
     )
 
     return report_xlsx
@@ -1154,7 +1199,13 @@ def _cleanup_batch_replay_markdown(output_path: Path) -> None:
             pass
 
 
-def build_report(batch_dir: str | Path, output_dir: str | Path | None = None) -> Path:
+def build_report(
+    batch_dir: str | Path,
+    output_dir: str | Path | None = None,
+    *,
+    config_path: str | Path = "configs/strategy.yaml",
+    position_value_denominator: float | None = None,
+) -> Path:
     resolved_batch_dir = _resolve_batch_replay_dir(batch_dir)
     cycle_dirs = _discover_cycle_result_dirs(resolved_batch_dir)
     if not cycle_dirs:
@@ -1173,6 +1224,10 @@ def build_report(batch_dir: str | Path, output_dir: str | Path | None = None) ->
         decision_df,
         output_path,
         display_batch_dir=resolved_batch_dir,
+        position_value_denominator=resolve_position_value_denominator(
+            config_path=config_path,
+            explicit=position_value_denominator,
+        ),
     )
     _cleanup_batch_replay_markdown(output_path)
     return report_path
@@ -1180,7 +1235,12 @@ def build_report(batch_dir: str | Path, output_dir: str | Path | None = None) ->
 
 def main() -> int:
     args = parse_args()
-    report_path = build_report(args.input_dir, args.output_dir)
+    report_path = build_report(
+        args.input_dir,
+        args.output_dir,
+        config_path=args.config,
+        position_value_denominator=args.position_value_denominator,
+    )
     print(f"已生成中文总绩效报告: {report_path}")
     return 0
 

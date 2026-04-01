@@ -127,6 +127,11 @@ def test_build_report_writes_xlsx_and_trade_process(tmp_path) -> None:
     assert "决策原因" in cols
     assert "Up积累份数" in tracker.columns
     assert "周期净利润" in tracker.columns
+    ratio_series = pd.to_numeric(tracker["持仓价值占比"], errors="coerce").dropna()
+    assert not ratio_series.empty
+    # 导出链路会在写回前统一 round(3)，断言按三位小数口径比较。
+    expected_ratio = round((10.0 * 0.55) / 85.0, 3)
+    assert abs(float(ratio_series.iloc[0]) - expected_ratio) < 1e-9
     marker_col = "下注时间距开盘差(分，秒)"
     assert marker_col in tracker.columns
     sub = tracker[tracker[marker_col].astype(str) == "【周期小计】"]

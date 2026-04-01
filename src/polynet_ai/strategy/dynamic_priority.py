@@ -33,12 +33,15 @@ def compute_dynamic_priority(
         return int(priority)
 
     if phase == 2:
-        thr = float(config.get("dynamic_priority.phase_2_position_threshold", 0.50))
+        sell_thr = float(config.get("dynamic_priority.phase_2_position_threshold", 0.50))
+        low_thr = float(config.get("dynamic_priority.phase_2_low_position_threshold", 0.25))
         boost = int(config.get("dynamic_priority.phase_2_boost", 0))
-        if boost <= 0 or pos_pct <= thr:
-            return int(priority)
-        if action == "sell" and category in ("grid", "take_profit"):
-            return max(1, int(priority) - boost)
+        if boost > 0 and pos_pct < low_thr:
+            if action == "buy":
+                return max(1, int(priority) - boost)
+        if boost > 0 and pos_pct > sell_thr:
+            if action == "sell" and category in ("grid", "take_profit"):
+                return max(1, int(priority) - boost)
         return int(priority)
 
     if phase == 3:

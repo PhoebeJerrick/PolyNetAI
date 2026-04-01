@@ -36,6 +36,13 @@ except ModuleNotFoundError:
     )
 
 
+def resolve_position_value_denominator_from_config(config) -> float:
+    value = float(config.get("position.max_position_value", 85.0))
+    if value <= 1e-12:
+        value = 85.0
+    return value
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="基于 ws_trade_events.ndjson 的准实时 paper trading runner")
     parser.add_argument("--input-dir", default="artifacts/live/record_job;artifacts/live/record_job/More_RawData", help="单一输入根目录（兼容旧参数）")
@@ -400,6 +407,7 @@ def _write_sim_batch_reports(
     *,
     capital_reset_mode: str,
     starting_cash: float,
+    position_value_denominator: float = 1000.0,
 ) -> tuple[Path, Path]:
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -429,6 +437,7 @@ def _write_sim_batch_reports(
         report_name_prefix="simulation",
         capital_reset_mode=capital_reset_mode,
         starting_cash=starting_cash,
+        position_value_denominator=position_value_denominator,
     )
     _cleanup_batch_replay_markdown(out_dir)
     return perf_xlsx, trade_xlsx
@@ -448,6 +457,7 @@ def _export_dashboard_from_streaming(
     snapshot_rows: list[dict[str, object]],
     refresh_seconds: float,
     write_excel: bool,
+    position_value_denominator: float | None,
 ) -> bool:
     """从 streaming_*.csv 与当前 engine 状态重建指标并写 dashboard 产物（cycles.csv 等）。"""
     cycle_csv = output_dir / "streaming_cycle_results.csv"
@@ -480,6 +490,7 @@ def _export_dashboard_from_streaming(
         title="Polynet AI Monitoring Dashboard",
         refresh_seconds=max(1.0, rs),
         write_excel=write_excel,
+        position_value_denominator=position_value_denominator,
     )
     return True
 
@@ -544,6 +555,7 @@ def main_streaming(args: argparse.Namespace | None = None) -> int:
 
     print(f"\n[3/5] 开始逐周期流式处理（共 {len(cycle_dirs)} 个周期）...")
     _cfg = load_strategy_config(args.config)
+    position_value_denominator = resolve_position_value_denominator_from_config(_cfg)
     _pwd = resolve_post_window_start_delay_seconds(
         config=_cfg,
         cli_seconds=args.post_window_start_delay_seconds,
@@ -626,6 +638,7 @@ def main_streaming(args: argparse.Namespace | None = None) -> int:
                     snapshot_rows=accumulated_snapshot_rows,
                     refresh_seconds=args.dashboard_refresh_seconds,
                     write_excel=False,
+                    position_value_denominator=position_value_denominator,
                 )
 
         # 释放内存
@@ -642,6 +655,7 @@ def main_streaming(args: argparse.Namespace | None = None) -> int:
             snapshot_rows=accumulated_snapshot_rows,
             refresh_seconds=args.dashboard_refresh_seconds,
             write_excel=False,
+            position_value_denominator=position_value_denominator,
         )
         if did_export:
             print(f"  ✓ Dashboard 数据已同步至: {output_dir}")
@@ -684,6 +698,7 @@ def main_streaming(args: argparse.Namespace | None = None) -> int:
                 report_name_prefix="simulation_streaming",
                 capital_reset_mode=args.capital_reset_mode,
                 starting_cash=args.starting_cash,
+                position_value_denominator=position_value_denominator,
             )
             _cleanup_batch_replay_markdown(output_dir)
             print(f"  ✓ 总绩效报告 (Excel): {perf_xlsx}")
@@ -764,6 +779,8 @@ def main(args: argparse.Namespace | None = None) -> int:
         print(f"  ✓ 事件限制: 使用前 {len(events)} 条")
 
     print(f"\n[2/5] 初始化回放引擎...")
+    _cfg = load_strategy_config(args.config)
+    position_value_denominator = resolve_position_value_denominator_from_config(_cfg)
     engine = ReplayEngine.from_yaml(
         args.config,
         starting_cash=args.starting_cash,
@@ -791,6 +808,7 @@ def main(args: argparse.Namespace | None = None) -> int:
                 args.output_dir,
                 refresh_seconds=args.dashboard_refresh_seconds,
                 write_excel=False,
+                position_value_denominator=position_value_denominator,
             )
 
         progress_callback = _flush_progress
@@ -811,6 +829,7 @@ def main(args: argparse.Namespace | None = None) -> int:
         result,
         args.output_dir,
         refresh_seconds=max(1.0, args.dashboard_refresh_seconds) if args.dashboard_refresh_seconds > 0 else 1.0,
+        position_value_denominator=position_value_denominator,
     )
     print(f"  ✓ 数据已导出到: {args.output_dir}")
     print(f"\n[5/5] 生成总绩效报告...")
@@ -820,6 +839,7 @@ def main(args: argparse.Namespace | None = None) -> int:
             result,
             capital_reset_mode=args.capital_reset_mode,
             starting_cash=args.starting_cash,
+            position_value_denominator=position_value_denominator,
         )
         print(f"  ✓ 总绩效报告 (Excel): {performance_xlsx}")
         print(f"  ✓ 交易过程 (Excel): {trade_process_xlsx}")

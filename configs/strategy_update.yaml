@@ -18,9 +18,10 @@ dynamic_priority:
   phase_1_position_threshold: 0.65   # 第一阶段仓位 < 此值时提升加仓优先级
   phase_1_boost: 15                  # 优先级提升幅度
   phase_2_position_threshold: 0.50   # 第二阶段仓位 > 此值时提升减仓优先级
+  phase_2_low_position_threshold: 0.25   # 第二阶段仓位 < 此值时提升加仓优先级（与 phase_2_boost 共用幅度）
   phase_2_boost: 15
   phase_3_position_threshold: 0.85   # 第三阶段仓位 < 此值时提升加仓优先级
-  phase_3_trend_boost: 25            # 趋势加仓优先级提升幅度
+  phase_3_trend_boost: 25             # 趋势加仓优先级提升幅度
   phase_3_grid_boost: 15             # 网格加仓优先级提升幅度
 opening_entry:
   enabled: true

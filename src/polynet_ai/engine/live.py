@@ -169,6 +169,7 @@ def export_live_result(
     title: str = "Polynet AI Live Monitoring Dashboard",
     refresh_seconds: float = 1.0,
     write_excel: bool = True,
+    position_value_denominator: float | None = None,
 ) -> Path:
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
@@ -181,6 +182,7 @@ def export_live_result(
         decision_df=result.replay_result.decision_df,
         snapshot_df=result.snapshot_df,
         output_path=directory / f"trade_ledger_{_vtag}.xlsx",
+        position_value_denominator=position_value_denominator,
     )
     if write_excel:
         with pd.ExcelWriter(directory / f"live_report_{_vtag}.xlsx", engine="openpyxl") as writer:

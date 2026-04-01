@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "polynet-ai"
-version = "0.1.35"
+version = "0.1.36"
 description = "Polymarket 5-minute paper trading research framework."
 readme = "docs/strategy_spec.md"
 requires-python = ">=3.11"

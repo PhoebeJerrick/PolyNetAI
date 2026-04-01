@@ -2,7 +2,7 @@
 
 验证 calculate_position_percentage 和 adjust_priority_by_phase：
 - Phase 1: 仓位 < 65% → opening/mean_reversion buy 优先级 -15
-- Phase 2: 仓位 > 50% → grid/take_profit sell 优先级 -15
+- Phase 2: 仓位 < 25% → 所有 buy 优先级 -15；仓位 > 50% → grid/take_profit sell -15
 - Phase 3: 仓位 < 85% → trend buy -25, grid buy -15
 - Phase 4: 不调整
 """
@@ -68,6 +68,7 @@ def _cfg() -> StrategyConfig:
                 "phase_1_position_threshold": 0.65,
                 "phase_1_boost": 15,
                 "phase_2_position_threshold": 0.50,
+                "phase_2_low_position_threshold": 0.25,
                 "phase_2_boost": 15,
                 "phase_3_position_threshold": 0.85,
                 "phase_3_trend_boost": 25,
@@ -189,7 +190,26 @@ class TestPhase1PriorityBoost:
 
 
 class TestPhase2PriorityBoost:
-    """Phase 2: 仓位 > 50% 时，grid/take_profit sell 优先级 -15"""
+    """Phase 2: 仓位 < 25% 时所有 buy -15；仓位 > 50% 时 grid/take_profit sell -15"""
+
+    def test_opening_buy_boosted_when_very_low_position(self):
+        # 仓位 < 25%: 10 * 0.5 / 85 ≈ 5.9%
+        f = _make_features(cycle_elapsed_seconds=100.0, up_held=10.0, up_avg_price=0.50)
+        intent = _make_intent("opening", "buy", 52)
+        adjust_priority_by_phase(intent, f, _cfg())
+        assert intent.priority == 52 - 15
+
+    def test_mean_reversion_buy_boosted_when_very_low_position(self):
+        f = _make_features(cycle_elapsed_seconds=100.0, up_held=10.0, up_avg_price=0.50)
+        intent = _make_intent("mean_reversion", "buy", 70)
+        adjust_priority_by_phase(intent, f, _cfg())
+        assert intent.priority == 70 - 15
+
+    def test_trend_buy_boosted_by_phase2_low_rule(self):
+        f = _make_features(cycle_elapsed_seconds=100.0, up_held=10.0, up_avg_price=0.50)
+        intent = _make_intent("trend", "buy", 80)
+        adjust_priority_by_phase(intent, f, _cfg())
+        assert intent.priority == 80 - 15
 
     def test_grid_sell_boosted_when_high_position(self):
         # 仓位 > 50%: 50 * 0.5 + 50 * 0.5 = 50 / 85 ≈ 58.8%
@@ -218,7 +238,7 @@ class TestPhase2PriorityBoost:
         assert intent.priority == 60  # unchanged
 
     def test_buy_not_boosted_in_phase2(self):
-        """Phase 2 不提升买入规则"""
+        """Phase 2 高仓位下 grid 买单不触发动态规则"""
         f = _make_features(
             cycle_elapsed_seconds=100.0,
             up_held=50.0, up_avg_price=0.50, down_held=50.0, down_avg_price=0.50,
@@ -226,6 +246,13 @@ class TestPhase2PriorityBoost:
         intent = _make_intent("grid", "buy", 60)
         adjust_priority_by_phase(intent, f, _cfg())
         assert intent.priority == 60  # unchanged
+
+    def test_opening_buy_not_boosted_when_position_between_low_and_sell_threshold(self):
+        # 约 35.3%：高于 25% 加仓阈值、低于 50% 减仓阈值 → 第二阶段买卖侧微调均不触发
+        f = _make_features(cycle_elapsed_seconds=100.0, up_held=30.0, up_avg_price=0.50, down_held=30.0, down_avg_price=0.50)
+        intent = _make_intent("opening", "buy", 52)
+        adjust_priority_by_phase(intent, f, _cfg())
+        assert intent.priority == 52
 
 
 # ─── Phase 3 (160-240s): trend/grid buy 优先级提升 ───

@@ -184,6 +184,8 @@ def export_trade_ledger_to_excel(
     decision_df: pd.DataFrame,
     snapshot_df: pd.DataFrame,
     output_path: str | Path,
+    *,
+    position_value_denominator: float | None = None,
 ) -> Path:
     output = Path(output_path)
     columns = [
@@ -202,6 +204,7 @@ def export_trade_ledger_to_excel(
         "Down积累份数",
         "Down加权均价",
         "当前总持仓份数",
+        "持仓价值占比",
         "净持仓份数",
         "净持仓价值",
         "净持仓方向",
@@ -257,6 +260,32 @@ def export_trade_ledger_to_excel(
     )
 
     ts_ledger = "timestamp_decision" if "timestamp_decision" in merged.columns else "timestamp"
+    up_balance = pd.to_numeric(merged.get("up_balance"), errors="coerce").fillna(0.0)
+    down_balance = pd.to_numeric(merged.get("down_balance"), errors="coerce").fillna(0.0)
+    up_avg_price = pd.to_numeric(merged.get("up_avg_price"), errors="coerce").fillna(0.0)
+    down_avg_price = pd.to_numeric(merged.get("down_avg_price"), errors="coerce").fillna(0.0)
+    total_position_cost_value = up_balance * up_avg_price + down_balance * down_avg_price
+
+    if position_value_denominator is not None and float(position_value_denominator) > 1e-12:
+        # 与策略内部仓位占比口径对齐：总持仓成本 / position.max_position_value。
+        cycle_budget = float(position_value_denominator)
+        position_value_ratio = total_position_cost_value / cycle_budget
+    else:
+        # 兼容旧口径：分母按“每周期投注总资金”近似（周期首条 available_cash/account_cash）。
+        cycle_budget_source = pd.to_numeric(
+            merged.get("available_cash", pd.Series(index=merged.index, dtype=float)),
+            errors="coerce",
+        )
+        if cycle_budget_source.isna().all():
+            cycle_budget_source = pd.to_numeric(
+                merged.get("account_cash", pd.Series(index=merged.index, dtype=float)),
+                errors="coerce",
+            )
+        cycle_budget = cycle_budget_source.groupby(merged.get("cycle_id")).transform("first")
+        cycle_budget = pd.to_numeric(cycle_budget, errors="coerce").fillna(100.0)
+        cycle_budget = cycle_budget.where(cycle_budget > 1e-12, 100.0)
+        position_value_ratio = total_position_cost_value / cycle_budget
+
     ledger = pd.DataFrame(
         {
             "下注时间距开盘差(分，秒)": [
@@ -275,14 +304,12 @@ def export_trade_ledger_to_excel(
             ),
             "成交价格": pd.to_numeric(merged.get("fill_price"), errors="coerce").fillna(0.0),
             SAME_OUTCOME_PRICE_MOVE_COL: move_pct,
-            "Up积累份数": pd.to_numeric(merged.get("up_balance"), errors="coerce").fillna(0.0),
-            "Up加权均价": pd.to_numeric(merged.get("up_avg_price"), errors="coerce").fillna(0.0),
-            "Down积累份数": pd.to_numeric(merged.get("down_balance"), errors="coerce").fillna(0.0),
-            "Down加权均价": pd.to_numeric(merged.get("down_avg_price"), errors="coerce").fillna(0.0),
-            "当前总持仓份数": (
-                pd.to_numeric(merged.get("up_balance"), errors="coerce").fillna(0.0)
-                + pd.to_numeric(merged.get("down_balance"), errors="coerce").fillna(0.0)
-            ),
+            "Up积累份数": up_balance,
+            "Up加权均价": up_avg_price,
+            "Down积累份数": down_balance,
+            "Down加权均价": down_avg_price,
+            "当前总持仓份数": (up_balance + down_balance),
+            "持仓价值占比": position_value_ratio,
             "净持仓份数": pd.to_numeric(merged.get("net_position"), errors="coerce").fillna(0.0),
             "净持仓价值": pd.to_numeric(merged.get("net_position_value"), errors="coerce").fillna(0.0),
             "净持仓方向": merged.get("net_direction", pd.Series(dtype=object)).fillna(""),
@@ -295,5 +322,10 @@ def export_trade_ledger_to_excel(
         }
     )
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        ledger.to_excel(writer, sheet_name=_build_sheet_name(merged.get("market_id", [])), index=False)
+        sheet_name = _build_sheet_name(merged.get("market_id", []))
+        ledger.to_excel(writer, sheet_name=sheet_name, index=False)
+        ws = writer.book[sheet_name]
+        ratio_col_idx = ledger.columns.get_loc("持仓价值占比") + 1  # openpyxl is 1-based
+        for row in range(2, ws.max_row + 1):
+            ws.cell(row=row, column=ratio_col_idx).number_format = "0.0%"
     return output
