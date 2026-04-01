@@ -71,11 +71,11 @@ def test_generate_dashboard_bundle_writes_expected_files(tmp_path: Path) -> None
     html_text = artifacts.html_path.read_text(encoding="utf-8")
     assert "Demo Dashboard" in html_text
     assert "dashboard_state.js" in html_text
-    assert "config-file-input" in html_text
+    assert "config-file-select" in html_text
     assert "/api/configs" in html_text
-    assert "cycle（周期）" in html_text
-    assert "capital（资金）" in html_text
-    assert "priorities（优先级）" in html_text
+    assert "cycle / batch_replay（生命周期与回放）" in html_text
+    assert "position / capital / exposure（仓位与敞口）" in html_text
+    assert "priorities（扁平回退，可选）" in html_text
     assert "readConfigFormWithValidation" in html_text
     assert "config-field-error" in html_text
     assert "config-invalid" in html_text

@@ -22,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default="configs/strategy.yaml")
     parser.add_argument("--overrides", default=None, help="可选 JSON 覆盖参数，例如 trial_022 的 overrides.json")
     parser.add_argument("--output", default="artifacts/replays/recorded_event_replay.xlsx")
-    parser.add_argument("--starting-cash", type=float, default=100.0)
+    parser.add_argument("--starting-cash", type=float, default=200.0)
     return parser.parse_args()
 
 

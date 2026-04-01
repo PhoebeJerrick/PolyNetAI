@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--config", default="configs/strategy.yaml", help="baseline YAML")
     p.add_argument("--overrides", required=True, help="trial 的 overrides.json 路径")
     p.add_argument("--trial-label", default="trial_022", help="对比表中第二列名称")
-    p.add_argument("--starting-cash", type=float, default=100.0)
+    p.add_argument("--starting-cash", type=float, default=200.0)
     p.add_argument(
         "--output",
         default=None,

@@ -466,7 +466,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_capture_args(run_full_parser)
     run_full_parser.add_argument("--config", default="configs/strategy.yaml")
     run_full_parser.add_argument("--overrides", default=None)
-    run_full_parser.add_argument("--starting-cash", type=float, default=100.0)
+    run_full_parser.add_argument("--starting-cash", type=float, default=200.0)
     run_full_parser.add_argument("--batch-output-dir", default=None)
     run_full_parser.add_argument("--daemonize", action="store_true", help="将整条流水线放到后台运行")
     run_full_parser.add_argument("--log-file", default=None, help="后台流水线日志文件，默认 <output-dir>/pipeline.log")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from polynet_ai.domain.models import FeatureSnapshot, OrderIntent
+from polynet_ai.strategy.cycle_windows import determine_phase
 from polynet_ai.strategy.spec import StrategyConfig
 from polynet_ai.strategy.price_reference import outcome_reference_price
 
@@ -69,7 +70,8 @@ def build_last_minute_candidate(features: FeatureSnapshot, config: StrategyConfi
     if not features.is_last_minute:
         return []
 
-    priority = int(config.priorities.get("last_minute", 20))
+    phase = determine_phase(features.cycle_elapsed_seconds, config)
+    priority = int(config.priority_for("last_minute", phase))
     infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
     up_ref = outcome_reference_price(features, "up", infer_missing_with_binary_complement=infer_missing)
     down_ref = outcome_reference_price(features, "down", infer_missing_with_binary_complement=infer_missing)

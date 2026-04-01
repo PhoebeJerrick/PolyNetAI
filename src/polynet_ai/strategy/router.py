@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import replace
 from datetime import datetime
 
 from polynet_ai.domain.models import DecisionOutcome, FeatureSnapshot, OrderIntent, Outcome
@@ -20,6 +19,7 @@ from polynet_ai.strategy.exit_rules import (
     take_profit_exits,
 )
 from polynet_ai.strategy.cycle_windows import determine_phase, is_rule_enabled_for_phase
+from polynet_ai.strategy.dynamic_priority import apply_dynamic_priorities_to_candidates
 from polynet_ai.strategy.features import snapshot_with_effective_price, snapshot_with_effective_quotes
 from polynet_ai.strategy.last_minute import build_last_minute_candidate
 from polynet_ai.strategy.spec import StrategyConfig
@@ -147,7 +147,7 @@ class StrategyRouter:
         for candidate in candidates:
             candidate.metadata["strategy_trades"] = strategy_trades
         candidates = [candidate for candidate in candidates if candidate.shares > 0]
-        candidates = self._apply_dynamic_priorities(features, candidates)
+        candidates = apply_dynamic_priorities_to_candidates(candidates, features, self.config)
         candidates.sort(key=lambda item: (item.priority, -item.shares))
         if not candidates:
             return DecisionOutcome(selected=None, candidates=[])
@@ -181,55 +181,3 @@ class StrategyRouter:
             rule=rule,
             phase=phase,
         )
-
-    def _apply_dynamic_priorities(
-        self,
-        features: FeatureSnapshot,
-        candidates: list[OrderIntent],
-    ) -> list[OrderIntent]:
-        phase_1_end = float(self.config.get("cycle.phase_end_seconds_1", 70.0))
-        if not candidates or features.cycle_elapsed_seconds > phase_1_end:
-            return candidates
-
-        max_position_value = float(self.config.get("position.max_position_value", 85.0))
-        phase_1_target_ratio = float(self.config.get("dynamic_priority.phase_1_position_threshold", 0.65))
-        phase_1_boost = int(self.config.get("dynamic_priority.phase_1_boost", 0))
-        if max_position_value <= 0 or phase_1_boost <= 0:
-            return candidates
-
-        current_up_value = max(0.0, float(features.up_held * features.up_avg_price))
-        current_down_value = max(0.0, float(features.down_held * features.down_avg_price))
-        current_total_value = current_up_value + current_down_value
-        phase_1_target_value = max(0.0, max_position_value * max(0.0, phase_1_target_ratio))
-        if current_total_value >= phase_1_target_value:
-            return candidates
-
-        # 第一阶段双边建仓仲裁：
-        # 当存在仓位不平衡时，优先让欠配方向的买单获得更高优先级。
-        # 这里按文档的 30% 差值上限，换算为方向价值占比阈值 35%/65%。
-        up_ratio = current_up_value / current_total_value if current_total_value > 1e-9 else 0.5
-        down_ratio = current_down_value / current_total_value if current_total_value > 1e-9 else 0.5
-        underweight_side: Outcome | None = None
-        if up_ratio < 0.35:
-            underweight_side = "up"
-        elif down_ratio < 0.35:
-            underweight_side = "down"
-
-        boosted: list[OrderIntent] = []
-        for candidate in candidates:
-            new_priority = int(candidate.priority)
-            if candidate.action == "buy" and candidate.category in {
-                "opening",
-                "grid",
-                "mean_reversion",
-                "trend",
-                "hedge",
-            }:
-                new_priority = max(1, new_priority - phase_1_boost)
-                if underweight_side is not None and candidate.outcome == underweight_side:
-                    new_priority = max(1, new_priority - phase_1_boost)
-            if new_priority != candidate.priority:
-                boosted.append(replace(candidate, priority=new_priority))
-            else:
-                boosted.append(candidate)
-        return boosted

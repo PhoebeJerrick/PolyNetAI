@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-cycles", type=int, default=10)
     parser.add_argument("--config", default="configs/strategy.yaml")
     parser.add_argument("--output-dir", default="artifacts/live/record_job/batch_replay_outputs")
-    parser.add_argument("--starting-cash", type=float, default=100.0)
+    parser.add_argument("--starting-cash", type=float, default=200.0)
     parser.add_argument("--per-cycle-cash", type=float, default=None,
                         help="固定模式下每周期实际投注资金；不设置则与 --starting-cash 相同")
     parser.add_argument(

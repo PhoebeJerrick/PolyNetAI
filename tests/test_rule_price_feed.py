@@ -148,7 +148,7 @@ def test_opening_rule_uses_live_quotes_inside_window() -> None:
             "rule_price_feed": {
                 "last_minute": 0.0,
                 "entries": {
-                    "opening": 2.0,
+                    "opening": 0.0,
                     "hedge": 0.0,
                     "grid": 0.0,
                     "mean_reversion": 0.0,

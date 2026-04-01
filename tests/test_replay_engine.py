@@ -38,20 +38,18 @@ def test_replay_engine_runs_end_to_end() -> None:
 
     class StubRouter:
         def route(self, features, strategy_trades):
-            return DecisionOutcome(
-                selected=OrderIntent(
-                    market_id=features.market_id,
-                    cycle_id=features.cycle_id,
-                    outcome="up",
-                    action="buy",
-                    shares=5.0,
-                    reference_price=features.price,
-                    category="grid",
-                    reason="test immediate fill",
-                    priority=10,
-                ),
-                candidates=[],
+            intent = OrderIntent(
+                market_id=features.market_id,
+                cycle_id=features.cycle_id,
+                outcome="up",
+                action="buy",
+                shares=5.0,
+                reference_price=features.price,
+                category="grid",
+                reason="test immediate fill",
+                priority=10,
             )
+            return DecisionOutcome(selected=intent, candidates=[intent])
 
     engine.router = StubRouter()
     result = engine.run(events)
@@ -133,20 +131,18 @@ def test_replay_engine_confirms_submitted_order_without_blocking_loop() -> None:
 
     class StubRouter:
         def route(self, features, strategy_trades):
-            return DecisionOutcome(
-                selected=OrderIntent(
-                    market_id=features.market_id,
-                    cycle_id=features.cycle_id,
-                    outcome="up",
-                    action="buy",
-                    shares=5.0,
-                    reference_price=features.price,
-                    category="grid",
-                    reason="test pending confirm",
-                    priority=10,
-                ),
-                candidates=[],
+            intent = OrderIntent(
+                market_id=features.market_id,
+                cycle_id=features.cycle_id,
+                outcome="up",
+                action="buy",
+                shares=5.0,
+                reference_price=features.price,
+                category="grid",
+                reason="test pending confirm",
+                priority=10,
             )
+            return DecisionOutcome(selected=intent, candidates=[intent])
 
     engine.router = StubRouter()
     t0 = datetime(2026, 3, 20, 12, 0, 0)
@@ -222,20 +218,18 @@ def test_buy_fill_frequency_limit_blocks_same_direction_within_one_second() -> N
 
     class StubRouter:
         def route(self, features, strategy_trades):
-            return DecisionOutcome(
-                selected=OrderIntent(
-                    market_id=features.market_id,
-                    cycle_id=features.cycle_id,
-                    outcome="up",
-                    action="buy",
-                    shares=5.0,
-                    reference_price=features.price,
-                    category="grid",
-                    reason="test buy fill rate limit",
-                    priority=10,
-                ),
-                candidates=[],
+            intent = OrderIntent(
+                market_id=features.market_id,
+                cycle_id=features.cycle_id,
+                outcome="up",
+                action="buy",
+                shares=5.0,
+                reference_price=features.price,
+                category="grid",
+                reason="test buy fill rate limit",
+                priority=10,
             )
+            return DecisionOutcome(selected=intent, candidates=[intent])
 
     engine.router = StubRouter()
     t0 = datetime(2026, 3, 20, 12, 0, 0)

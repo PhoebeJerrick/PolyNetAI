@@ -120,6 +120,7 @@ def opening_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[O
     
     size = _base_size(config, features)
     ref = features.up_last_price if weak == "up" else features.down_last_price
+    phase = determine_phase(features.cycle_elapsed_seconds, config)
     return [
         OrderIntent(
             market_id=features.market_id,
@@ -130,7 +131,7 @@ def opening_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[O
             reference_price=ref,
             category="opening",
             reason=f"开盘试探建仓：买入相对低价（{weak}方），流动性+价格时机确认",
-            priority=int(config.priorities.get("opening", 52)),
+            priority=int(config.priority_for("opening", phase)),
         )
     ]
 
@@ -159,6 +160,7 @@ def trend_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Ord
     size = min(size, max_trend_order_size)
     
     ref = outcome_reference_price(features, features.trend_bias, infer_missing_with_binary_complement=infer_missing)
+    phase = determine_phase(features.cycle_elapsed_seconds, config)
     return [
         OrderIntent(
             market_id=features.market_id,
@@ -169,7 +171,7 @@ def trend_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Ord
             reference_price=ref,
             category="trend",
             reason="趋势确认后顺势加仓",
-            priority=int(config.priorities.get("trend", 80)),
+            priority=int(config.priority_for("trend", phase)),
         )
     ]
 
@@ -187,6 +189,7 @@ def hedge_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Ord
     size = _base_size(config, features) + excess * float(config.get("exposure.hedge_scale", 0.15))
     infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
     ref = outcome_reference_price(features, opposite, infer_missing_with_binary_complement=infer_missing)
+    phase = determine_phase(features.cycle_elapsed_seconds, config)
     return [
         OrderIntent(
             market_id=features.market_id,
@@ -197,7 +200,7 @@ def hedge_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Ord
             reference_price=ref,
             category="hedge",
             reason="净敞口过大，执行反向对冲买入",
-            priority=int(config.priorities.get("hedge", 40)),
+            priority=int(config.priority_for("hedge", phase)),
         )
     ]
 
@@ -220,6 +223,7 @@ def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Orde
     size = _base_size(config, features)
     intents: list[OrderIntent] = []
     infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
+    pri = int(config.priority_for("grid", phase))
     if phase < 4:
         # 阶段1-3：不限制 percentile，双向布仓（震荡区间积累双边敞口）
         for outcome in ("up", "down"):
@@ -235,7 +239,7 @@ def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Orde
                     reference_price=ref,
                     category="grid",
                     reason=f"震荡区间双向建仓（阶段{phase}）买入 {label}",
-                    priority=int(config.priorities.get("grid", 60)),
+                    priority=pri,
                 )
             )
     else:
@@ -254,7 +258,7 @@ def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Orde
                     reference_price=ref,
                     category="grid",
                     reason="震荡区间低位买入 Up（阶段4）",
-                    priority=int(config.priorities.get("grid", 60)),
+                    priority=pri,
                 )
             )
         if features.price_percentile >= high:
@@ -269,7 +273,7 @@ def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Orde
                     reference_price=ref,
                     category="grid",
                     reason="震荡区间高位买入 Down（阶段4）",
-                    priority=int(config.priorities.get("grid", 60)),
+                    priority=pri,
                 )
             )
     return intents
@@ -300,7 +304,9 @@ def mean_reversion_entries(features: FeatureSnapshot, config: StrategyConfig) ->
     
     intents: list[OrderIntent] = []
     infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
-    
+    phase = determine_phase(features.cycle_elapsed_seconds, config)
+    mr_pri = int(config.priority_for("mean_reversion", phase))
+
     # 【改进】优先平衡大额单向持仓逻辑
     # 如果持仓过于倾斜，优先平衡反向
     abs_net = abs(features.net_position)
@@ -326,7 +332,7 @@ def mean_reversion_entries(features: FeatureSnapshot, config: StrategyConfig) ->
                         reference_price=ref,
                         category="mean_reversion",
                         reason=f"优先平衡持仓不均：Up {features.up_held:.1f}占优，买入 Down 平衡",
-                        priority=int(config.priorities.get("mean_reversion", 70)) + 5,  # 优先级更高
+                        priority=mr_pri + 5,
                     )
                 )
                 return intents  # 优先执行平衡，暂不进行其他操作
@@ -349,7 +355,7 @@ def mean_reversion_entries(features: FeatureSnapshot, config: StrategyConfig) ->
                         reference_price=ref,
                         category="mean_reversion",
                         reason=f"优先平衡持仓不均：Down {features.down_held:.1f}占优，买入 Up 平衡",
-                        priority=int(config.priorities.get("mean_reversion", 70)) + 5,  # 优先级更高
+                        priority=mr_pri + 5,
                     )
                 )
                 return intents  # 优先执行平衡，暂不进行其他操作
@@ -368,7 +374,7 @@ def mean_reversion_entries(features: FeatureSnapshot, config: StrategyConfig) ->
                     reference_price=ref,
                     category="mean_reversion",
                     reason="Up 价格显著高于均价，执行均值回归买入",
-                    priority=int(config.priorities.get("mean_reversion", 70)),
+                    priority=mr_pri,
                 )
             )
         if features.down_deviation <= -down_threshold and features.net_position > -max_net_position:
@@ -383,7 +389,7 @@ def mean_reversion_entries(features: FeatureSnapshot, config: StrategyConfig) ->
                     reference_price=ref,
                     category="mean_reversion",
                     reason="Down 价格显著低于均价，执行均值回归买入",
-                    priority=int(config.priorities.get("mean_reversion", 70)),
+                    priority=mr_pri,
                 )
             )
     

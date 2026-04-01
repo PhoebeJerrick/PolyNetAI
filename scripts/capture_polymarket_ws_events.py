@@ -527,7 +527,7 @@ def main() -> int:
             "  python scripts/replay_recorded_trade_events.py "
             f"--input \"{first_cycle_path}\" "
             "--config configs/strategy.yaml "
-            "--starting-cash 100 "
+            "--starting-cash 200 "
             f"--output \"artifacts/replays/{first_cycle}_replay.xlsx\""
         )
     return 0

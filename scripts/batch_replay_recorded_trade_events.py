@@ -88,7 +88,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-dir", required=True, help="抓取目录，例如 artifacts/live/ws_capture_btc_10cycles")
     parser.add_argument("--config", default="configs/strategy.yaml")
     parser.add_argument("--overrides", default=None, help="可选 JSON 覆盖参数，例如 trial_022 的 overrides.json")
-    parser.add_argument("--starting-cash", type=float, default=100.0)
+    parser.add_argument("--starting-cash", type=float, default=200.0)
     parser.add_argument("--per-cycle-cash", type=float, default=None,
                         help="固定模式下每周期实际投注资金；不设置则与 --starting-cash 相同")
     parser.add_argument(
@@ -200,7 +200,7 @@ def run_batch_replay(
     config_path: str | Path = "configs/strategy.yaml",
     overrides_path: str | Path | None = None,
     output_dir: str | Path | None = None,
-    starting_cash: float = 100.0,
+    starting_cash: float = 200.0,
     capital_reset_mode: str = "fixed",
     per_cycle_cash: float | None = None,
     include_trade_process: bool = False,

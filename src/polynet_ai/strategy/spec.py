@@ -5,10 +5,52 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# 与 configs/strategy.yaml 默认行保持一致；仅当配置缺省时使用
+DEFAULT_RULE_PRIORITIES: dict[str, int] = {
+    "risk": 10,
+    "last_minute": 20,
+    "stop_loss": 30,
+    "hedge": 40,
+    "take_profit": 50,
+    "opening": 52,
+    "grid": 60,
+    "mean_reversion": 70,
+    "trend": 80,
+}
+
+
+def normalize_strategy_raw(data: dict[str, Any]) -> dict[str, Any]:
+    """
+    归一化内存中的策略配置：
+    - 若仅有扁平 ``priorities.<rule>`` 数值，则补充 ``priorities.by_phase.phase_{1..4}``（各阶段同值），
+      便于分阶段覆盖优先级且保持与旧文件兼容。
+    """
+    raw = deepcopy(data)
+    pr = raw.get("priorities")
+    if not isinstance(pr, dict):
+        return raw
+    bp = pr.get("by_phase")
+    if isinstance(bp, dict) and bp:
+        return raw
+    flat = {
+        k: int(v)
+        for k, v in pr.items()
+        if k != "by_phase" and isinstance(v, (int, float)) and not isinstance(v, bool)
+    }
+    if not flat:
+        return raw
+    new_pr = dict(pr)
+    new_pr["by_phase"] = {f"phase_{i}": dict(flat) for i in range(1, 5)}
+    raw["priorities"] = new_pr
+    return raw
+
 
 @dataclass(slots=True)
 class StrategyConfig:
     raw: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "raw", normalize_strategy_raw(deepcopy(self.raw)))
 
     def get(self, path: str, default: Any = None) -> Any:
         node: Any = self.raw
@@ -18,9 +60,51 @@ class StrategyConfig:
             node = node[part]
         return node
 
+    def priority_for(self, rule: str, phase: int) -> int:
+        """当前阶段下某规则的基础优先级（数值越小越优先）；再经 router 内 dynamic 调整。"""
+        default = int(DEFAULT_RULE_PRIORITIES.get(rule, 99))
+        pr = self.get("priorities")
+        if not isinstance(pr, dict):
+            return default
+        ph = max(1, min(4, int(phase)))
+        bp = pr.get("by_phase")
+        if isinstance(bp, dict):
+            bucket = bp.get(f"phase_{ph}")
+            if isinstance(bucket, dict) and rule in bucket:
+                try:
+                    return int(bucket[rule])
+                except (TypeError, ValueError):
+                    pass
+        v = pr.get(rule)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                pass
+        return default
+
     @property
     def priorities(self) -> dict[str, int]:
-        return dict(self.get("priorities", {}))
+        """扁平优先级视图：优先返回文件中仍是标量的键；否则取 phase_1 桶。"""
+        pr = self.get("priorities", {})
+        if not isinstance(pr, dict):
+            return {}
+        out: dict[str, int] = {}
+        for k, v in pr.items():
+            if k == "by_phase":
+                continue
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                out[k] = int(v)
+        if out:
+            return out
+        bp = pr.get("by_phase")
+        if isinstance(bp, dict):
+            b1 = bp.get("phase_1")
+            if isinstance(b1, dict):
+                for k, v in b1.items():
+                    if isinstance(v, (int, float)) and not isinstance(v, bool):
+                        out[k] = int(v)
+        return out
 
     def to_dict(self) -> dict[str, Any]:
         return deepcopy(self.raw)

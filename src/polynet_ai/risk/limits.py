@@ -70,7 +70,12 @@ def _cfg_float(config: StrategyConfig, *paths: str, default: float) -> float:
 
 
 def _resolve_market_min_order_size(intent: OrderIntent, config: StrategyConfig) -> float:
-    use_orderbook_min = bool(config.get("execution.market_limits.use_orderbook_min_order_size", True))
+    use_orderbook_min = bool(
+        config.get(
+            "daily_limits.market_limits.use_orderbook_min_order_size",
+            config.get("execution.market_limits.use_orderbook_min_order_size", True),
+        )
+    )
     if not use_orderbook_min:
         return 0.0
     raw_market_min = intent.metadata.get("market_min_order_size")
@@ -79,7 +84,15 @@ def _resolve_market_min_order_size(intent: OrderIntent, config: StrategyConfig) 
             return max(0.0, float(raw_market_min))
         except (TypeError, ValueError):
             pass
-    return max(0.0, float(config.get("execution.market_limits.fallback_min_order_size", 0.0)))
+    return max(
+        0.0,
+        float(
+            config.get(
+                "daily_limits.market_limits.fallback_min_order_size",
+                config.get("execution.market_limits.fallback_min_order_size", 0.0),
+            )
+        ),
+    )
 
 
 def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: StrategyConfig) -> RiskDecision:
@@ -109,7 +122,12 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
         config.get("order_sizing.sell.allow_close_below_min_order_size", True)
     )
     market_min_order = _resolve_market_min_order_size(intent, config)
-    enforce_sell_market_min = bool(config.get("execution.market_limits.enforce_sell_min_order_size", True))
+    enforce_sell_market_min = bool(
+        config.get(
+            "daily_limits.market_limits.enforce_sell_min_order_size",
+            config.get("execution.market_limits.enforce_sell_min_order_size", True),
+        )
+    )
     effective_buy_min_order = max(buy_min_order, market_min_order)
     effective_sell_min_order = max(sell_min_order, market_min_order if enforce_sell_market_min else 0.0)
     max_exposure = float(

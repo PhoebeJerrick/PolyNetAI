@@ -12,7 +12,7 @@ from datetime import datetime
 
 from polynet_ai.domain.models import FeatureSnapshot, OrderIntent
 from polynet_ai.strategy.cycle_windows import calculate_position_percentage
-from polynet_ai.strategy.router import adjust_priority_by_phase
+from polynet_ai.strategy.dynamic_priority import adjust_priority_by_phase
 from polynet_ai.strategy.spec import StrategyConfig
 
 _BASE = dict(

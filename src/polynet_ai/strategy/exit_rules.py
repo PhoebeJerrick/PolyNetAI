@@ -71,6 +71,8 @@ def _stop_loss_action_text(shares: float, held: float) -> str:
 def take_profit_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
     fraction = float(config.get("profit_taking.take_profit_fraction", 0.35))
     intents: list[OrderIntent] = []
+    phase = determine_phase(features.cycle_elapsed_seconds, config)
+    tp_pri = int(config.priority_for("take_profit", phase))
     infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
     up_ref = outcome_reference_price(features, "up", infer_missing_with_binary_complement=infer_missing)
     down_ref = outcome_reference_price(features, "down", infer_missing_with_binary_complement=infer_missing)
@@ -94,7 +96,7 @@ def take_profit_exits(features: FeatureSnapshot, config: StrategyConfig) -> list
                         reference_price=up_ref,
                         category="take_profit",
                         reason="Up 达到止盈区间，分批卖出兑现利润",
-                        priority=int(config.priorities.get("take_profit", 50)),
+                        priority=tp_pri,
                     )
                 )
 
@@ -117,7 +119,7 @@ def take_profit_exits(features: FeatureSnapshot, config: StrategyConfig) -> list
                         reference_price=down_ref,
                         category="take_profit",
                         reason="Down 达到止盈区间，分批卖出兑现利润",
-                        priority=int(config.priorities.get("take_profit", 50)),
+                        priority=tp_pri,
                     )
                 )
 
@@ -147,7 +149,8 @@ def stop_loss_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[O
     infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
     up_ref   = outcome_reference_price(features, "up",   infer_missing_with_binary_complement=infer_missing)
     down_ref = outcome_reference_price(features, "down", infer_missing_with_binary_complement=infer_missing)
-    priority = int(config.priorities.get("stop_loss", 30))
+    phase = determine_phase(features.cycle_elapsed_seconds, config)
+    priority = int(config.priority_for("stop_loss", phase))
 
     intents: list[OrderIntent] = []
 
@@ -155,7 +158,6 @@ def stop_loss_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[O
     cycle_loss_threshold = float(config.get("stop_loss.stop_loss_cycle_loss", 18.0))
     stop_loss_fraction   = float(config.get("stop_loss.stop_loss_fraction", 0.50))
 
-    phase = determine_phase(features.cycle_elapsed_seconds, config)
     if features.cycle_net_profit < -cycle_loss_threshold:
         if features.unrealized_up_pnl < 0 and _held_up(features) > 0:
             shares = _stop_loss_shares(
@@ -309,6 +311,8 @@ def stop_loss_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[O
 def hedge_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
     if features.is_last_minute:
         return []
+    phase = determine_phase(features.cycle_elapsed_seconds, config)
+    hedge_pri = int(config.priority_for("hedge", phase))
     exposure = abs(features.net_position_value)
     trigger = float(config.get("exposure.hedge_trigger_value", 50.0))
     if exposure < trigger or features.cycle_net_profit <= 0:
@@ -336,7 +340,7 @@ def hedge_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[Order
                         reference_price=up_ref,
                         category="hedge",
                         reason="净敞口过大，卖出盈利 Up 仓位对冲",
-                        priority=int(config.priorities.get("hedge", 40)),
+                        priority=hedge_pri,
                     )
                 )
 
@@ -357,7 +361,7 @@ def hedge_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[Order
                         reference_price=down_ref,
                         category="hedge",
                         reason="净敞口过大，卖出盈利 Down 仓位对冲",
-                        priority=int(config.priorities.get("hedge", 41)),
+                        priority=hedge_pri + 1,
                     )
                 )
 
@@ -369,6 +373,8 @@ def grid_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderI
         return []
     if features.market_regime != "range":
         return []
+    phase = determine_phase(features.cycle_elapsed_seconds, config)
+    grid_pri = int(config.priority_for("grid", phase))
     low = float(config.get("grid.grid_low_percentile", 0.25))
     high = float(config.get("grid.grid_high_percentile", 0.75))
     grid_exit_fraction = float(config.get("grid.grid_exit_fraction", 0.25))
@@ -387,7 +393,7 @@ def grid_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderI
                 reference_price=up_ref,
                 category="grid",
                 reason="震荡区间高位卖出 Up，完成网格循环",
-                priority=int(config.priorities.get("grid", 60)),
+                priority=grid_pri,
             )
         )
     if features.price_percentile <= low and _held_down(features) > 0:
@@ -401,7 +407,7 @@ def grid_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderI
                 reference_price=down_ref,
                 category="grid",
                 reason="震荡区间低位卖出 Down，完成网格循环",
-                priority=int(config.priorities.get("grid", 60)),
+                priority=grid_pri,
             )
         )
     return [intent for intent in intents if intent.shares > 0]
@@ -412,6 +418,8 @@ def mean_reversion_exits(features: FeatureSnapshot, config: StrategyConfig) -> l
         return []
     if rule_disabled_in_cycle_tail(features, config, "mean_reversion"):
         return []
+    phase = determine_phase(features.cycle_elapsed_seconds, config)
+    mr_pri = int(config.priority_for("mean_reversion", phase))
     mr_sell_fraction = float(config.get("mean_reversion.mean_reversion_sell_fraction", 0.40))
     intents: list[OrderIntent] = []
     infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
@@ -430,7 +438,7 @@ def mean_reversion_exits(features: FeatureSnapshot, config: StrategyConfig) -> l
                 reference_price=up_ref,
                 category="mean_reversion",
                 reason="Up 显著偏离均价，执行均值回归卖出",
-                priority=int(config.priorities.get("mean_reversion", 70)),
+                priority=mr_pri,
             )
         )
     if _held_down(features) > 0 and features.down_deviation >= float(
@@ -446,7 +454,7 @@ def mean_reversion_exits(features: FeatureSnapshot, config: StrategyConfig) -> l
                 reference_price=down_ref,
                 category="mean_reversion",
                 reason="Down 显著偏离均价，执行均值回归卖出",
-                priority=int(config.priorities.get("mean_reversion", 70)),
+                priority=mr_pri,
             )
         )
     return [intent for intent in intents if intent.shares > 0]

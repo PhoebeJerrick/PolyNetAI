@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default="configs/strategy.yaml")
     parser.add_argument("--sweep", default="configs/sweep.yaml")
     parser.add_argument("--output-dir", default="artifacts/sweeps/sweep_outputs")
-    parser.add_argument("--starting-cash", type=float, default=100.0)
+    parser.add_argument("--starting-cash", type=float, default=200.0)
     parser.add_argument("--limit", type=int, default=None)
     return parser.parse_args()
 

@@ -2,6 +2,6 @@
 
 from .engine.replay import ReplayEngine, ReplayResult
 
-__version__ = "0.1.34"
+__version__ = "0.1.35"
 
 __all__ = ["ReplayEngine", "ReplayResult", "__version__"]

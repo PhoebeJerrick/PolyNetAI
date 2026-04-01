@@ -1,3 +1,6 @@
+# =============================================================================
+# 1) 生命周期与回放 — cycle, batch_replay
+# =============================================================================
 cycle:
   cycle_seconds: 300                      # 周期时间300秒
   last_minute_seconds: 30                 # 尾盘时间30秒
@@ -11,8 +14,14 @@ cycle:
 batch_replay:
   # 处理模式：per-cycle（逐周期独立回放，默认）| merged（合并事件流回放）
   processing_mode: per-cycle                # 逐周期独立回放
+# =============================================================================
+# 2) 仓位与风险上限 — position, capital, exposure, daily_limits
+# =============================================================================
 position:
   max_position_value: 85.0           # 目标总仓位价值（USDT）
+# =============================================================================
+# 3) 规则仲裁 — dynamic_priority（在分阶段优先级上的动态微调）, priorities.by_phase
+# =============================================================================
 dynamic_priority:
   # 阶段性动态优先级调整参数（A+C联合方案 — 方案C）
   phase_1_position_threshold: 0.65   # 第一阶段仓位 < 此值时提升加仓优先级
@@ -22,6 +31,9 @@ dynamic_priority:
   phase_3_position_threshold: 0.85   # 第三阶段仓位 < 此值时提升加仓优先级
   phase_3_trend_boost: 25            # 趋势加仓优先级提升幅度
   phase_3_grid_boost: 15             # 网格加仓优先级提升幅度
+# =============================================================================
+# 4) 规则使能与参数 — rule_enablement, 各策略块, execution, rule_price_feed
+# =============================================================================
 rule_enablement:
   entries:
     opening:
@@ -259,13 +271,46 @@ rule_price_feed:
     take_profit: 2                          # 退出take_profit规则价格缓存间隔2秒
     grid: 2                                 # 退出grid规则价格缓存间隔2秒
     mean_reversion: 2                       # 退出mean_reversion规则价格缓存间隔2秒
-priorities:                                 # 规则优先级
-  risk: 10                                  # 风险规则优先级10
-  last_minute: 20                           # 尾盘规则优先级20  
-  stop_loss: 30                             # 止损stop_loss规则优先级30
-  hedge: 40                                 # 对冲hedge规则优先级40
-  take_profit: 50                           # 止盈take_profit规则优先级50
-  opening: 52                               # 开盘opening规则优先级52
-  grid: 60                                  # 网格grid规则优先级60
-  mean_reversion: 70                         # 均值回归mean_reversion规则优先级70
-  trend: 80                                 # 趋势trend规则优先级80
+priorities:
+  # 各周期阶段独立基础优先级（数值越小越优先）。可按阶段改写；未单独列出的规则可后续在对应 phase_N 下补键。
+  by_phase:
+    phase_1:
+      risk: 10
+      last_minute: 20
+      stop_loss: 30
+      hedge: 40
+      take_profit: 50
+      opening: 52
+      grid: 60
+      mean_reversion: 70
+      trend: 80
+    phase_2:
+      risk: 10
+      last_minute: 20
+      stop_loss: 30
+      hedge: 40
+      take_profit: 50
+      opening: 52
+      grid: 60
+      mean_reversion: 70
+      trend: 80
+    phase_3:
+      risk: 10
+      last_minute: 20
+      stop_loss: 30
+      hedge: 40
+      take_profit: 50
+      opening: 52
+      grid: 60
+      mean_reversion: 70
+      trend: 80
+    phase_4:
+      risk: 10
+      last_minute: 20
+      stop_loss: 30
+      hedge: 40
+      take_profit: 50
+      opening: 52
+      grid: 60
+      mean_reversion: 70
+      trend: 80

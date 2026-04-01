@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overrides", default=str(DEFAULT_OVERRIDES))
     parser.add_argument("--output-dir", default="artifacts/live/polymarket_cycle_review")
     parser.add_argument("--slug-prefix", default="btc-updown-5m-")
-    parser.add_argument("--starting-cash", type=float, default=100.0)
+    parser.add_argument("--starting-cash", type=float, default=200.0)
     parser.add_argument("--real-trading", action="store_true", help="启用真实下单；否则仅做 paper。")
     parser.add_argument("--signature-type", type=int, default=2, help="Polymarket signature type，默认 2（Gnosis Safe / proxy wallet）。")
     parser.add_argument("--status-every", type=int, default=25)

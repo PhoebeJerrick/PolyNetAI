@@ -73,7 +73,7 @@ class ReplayEngine:
     def __init__(
         self,
         config: StrategyConfig,
-        starting_cash: float = 1000.0,
+        starting_cash: float = 200.0,
         capital_reset_mode: str = "cumulative",
         per_cycle_cash: float | None = None,
         broker: object | None = None,
@@ -120,7 +120,7 @@ class ReplayEngine:
     def from_yaml(
         cls,
         path: str | Path,
-        starting_cash: float = 1000.0,
+        starting_cash: float = 200.0,
         capital_reset_mode: str = "cumulative",
         per_cycle_cash: float | None = None,
     ) -> "ReplayEngine":
@@ -172,6 +172,9 @@ class ReplayEngine:
             phase_3_end_seconds=float(self.config.get("cycle.phase_end_seconds_3", 240.0)),
         )
         decision = self.router.route(features, strategy_trades=self.state_engine.state.strategy_trades)
+        candidates_for_exec = list(decision.candidates)
+        if decision.selected is not None and not candidates_for_exec:
+            candidates_for_exec = [decision.selected]
         # region agent log
         if (
             features.cycle_elapsed_seconds <= 70.0
@@ -217,7 +220,7 @@ class ReplayEngine:
             "account_cash": self.account.cash,
             "available_cash": self.account.available_cash,
         }
-        if decision.candidates:
+        if candidates_for_exec:
             # region agent log
             if features.cycle_elapsed_seconds <= 70.0:
                 _debug_log(
@@ -232,14 +235,14 @@ class ReplayEngine:
                         "outcome": decision.selected.outcome if decision.selected is not None else "",
                         "shares": float(decision.selected.shares) if decision.selected is not None else 0.0,
                         "strategy_trades": int(features.strategy_trades),
-                        "candidate_count": len(decision.candidates),
+                        "candidate_count": len(candidates_for_exec),
                     },
                 )
             # endregion
             pending_context = self._pending_context()
             self._prune_recent_buy_fill_times(event.timestamp)
             blocked_reasons: list[str] = []
-            selected_for_risk = decision.candidates[0]
+            selected_for_risk = candidates_for_exec[0]
             selected_for_risk.metadata["account_cash"] = self.account.cash
             selected_for_risk.metadata["account_available_cash"] = self.account.available_cash
             selected_for_risk.metadata["market_price"] = event.price
@@ -253,11 +256,11 @@ class ReplayEngine:
             selected_for_risk.metadata["recent_buy_fill_count_1s_up"] = len(self._recent_buy_fill_times_up)
             selected_for_risk.metadata["recent_buy_fill_count_1s_down"] = len(self._recent_buy_fill_times_down)
             risk_decision = apply_risk_limits(features, selected_for_risk, self.config)
-            if not risk_decision.accepted and len(decision.candidates) > 1:
+            if not risk_decision.accepted and len(candidates_for_exec) > 1:
                 blocked_reasons.append(
                     f"{selected_for_risk.category}:{selected_for_risk.action}:{selected_for_risk.outcome}:{risk_decision.reason}"
                 )
-                for fallback in decision.candidates[1:]:
+                for fallback in candidates_for_exec[1:]:
                     fallback.metadata["account_cash"] = self.account.cash
                     fallback.metadata["account_available_cash"] = self.account.available_cash
                     fallback.metadata["market_price"] = event.price

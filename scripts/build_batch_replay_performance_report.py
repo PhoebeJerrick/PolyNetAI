@@ -66,7 +66,11 @@ def _cycle_starts_from_full_decision_frame(full: pd.DataFrame) -> pd.DataFrame:
     )
     key_open = key_open.merge(starts_min, on=["market_id", "_pid"], how="left")
     # 优先使用更早的时间戳，避免 slug 解析结果偏晚时把有效成交排除在周期窗口外。
-    key_open["_cycle_start"] = key_open[["_from_slug", "_cycle_start_fallback"]].min(axis=1)
+    # pandas 2/3：两列 min(axis=1) 可能混用 tz-aware / NaT，与 decision 时间戳相减前统一为 UTC。
+    key_open["_cycle_start"] = pd.to_datetime(
+        key_open[["_from_slug", "_cycle_start_fallback"]].min(axis=1),
+        utc=True,
+    )
     return key_open[["market_id", "_pid", "_cycle_start"]]
 
 
@@ -267,7 +271,9 @@ def _build_cycle_price_frame(
     if dec.empty:
         return pd.DataFrame(columns=columns)
 
-    dec["timestamp"] = pd.to_datetime(dec.get("timestamp"), errors="coerce", utc=True)
+    if "timestamp" not in dec.columns:
+        dec["timestamp"] = pd.NaT
+    dec["timestamp"] = pd.to_datetime(dec["timestamp"], errors="coerce", utc=True)
 
     if "market_id" not in dec.columns or dec["market_id"].isna().all():
         if not cycle_df.empty and "cycle_slug" in cycle_df.columns and "market_id" in cycle_df.columns:
@@ -284,6 +290,7 @@ def _build_cycle_price_frame(
 
     starts = _cycle_starts_from_full_decision_frame(dec)
     dec = dec.merge(starts, on=["market_id", "_pid"], how="left")
+    dec["_cycle_start"] = pd.to_datetime(dec["_cycle_start"], errors="coerce", utc=True)
 
     dec["周期内秒数"] = (dec["timestamp"] - dec["_cycle_start"]).dt.total_seconds()
     dec["周期内秒数"] = pd.to_numeric(dec["周期内秒数"], errors="coerce")
