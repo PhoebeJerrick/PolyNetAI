@@ -102,6 +102,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="处理模式：per-cycle=逐周期独立回放（默认，亦可由 strategy.yaml 的 batch_replay.processing_mode 控制）；merged=合并事件流回放。",
     )
+    parser.add_argument(
+        "--progress-file",
+        default="",
+        help="可选：每完成一个周期写入一次轻量进度文件（用于 record.sh ms 快速读取进度）。",
+    )
     return parser.parse_args()
 
 
@@ -353,6 +358,11 @@ def write_cycle_results_incremental(
     #         snapshot_df.to_csv(snapshot_csv, mode='w', header=True, index=False)
 
 
+def write_progress_file(progress_file: Path, *, completed: int, total: int) -> None:
+    progress_file.parent.mkdir(parents=True, exist_ok=True)
+    progress_file.write_text(f"{int(completed)},{int(total)}\n", encoding="utf-8")
+
+
 def _build_summary_df(cycle_df: pd.DataFrame, decision_df: pd.DataFrame) -> pd.DataFrame:
     if cycle_df.empty:
         return pd.DataFrame(columns=["cycle_slug", "executed_trades", "accepted_signals", "blocked_signals", "total_net_profit", "total_fees", "winner", "account_cash"])
@@ -571,10 +581,17 @@ def main_streaming(args: argparse.Namespace | None = None) -> int:
     aggregator = StreamingAggregator()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    progress_file: Path | None = None
+    if str(args.progress_file).strip():
+        progress_file = Path(args.progress_file)
+        if not progress_file.is_absolute():
+            progress_file = (ROOT / progress_file).resolve()
 
     _rm_stream = clear_streaming_csv_cache(output_dir)
     if _rm_stream:
         print(f"  ✓ 已清理流式缓存: {_rm_stream} 个 streaming_*.csv")
+    if progress_file is not None:
+        write_progress_file(progress_file, completed=0, total=len(cycle_dirs))
 
     print(f"\n[3/5] 开始逐周期流式处理（共 {len(cycle_dirs)} 个周期）...")
     _cfg = load_strategy_config(args.config)
@@ -652,6 +669,8 @@ def main_streaming(args: argparse.Namespace | None = None) -> int:
             profit = cycle_row.get('cycle_net_profit', 0.0)
             print(f"  ✓ 周期 {cycle_idx}/{len(cycle_dirs)} ({cycle_dir.name}): "
                   f"{len(sorted_events)}/{len(cycle_events)} 事件, 盈亏 {profit:.2f}, 耗时 {cycle_elapsed:.1f}s")
+            if progress_file is not None:
+                write_progress_file(progress_file, completed=cycle_idx, total=len(cycle_dirs))
 
             accumulated_snapshot_rows.extend(result.snapshot_df.to_dict(orient="records"))
             should_refresh_dashboard = False
@@ -674,6 +693,8 @@ def main_streaming(args: argparse.Namespace | None = None) -> int:
         del cycle_events, sorted_events, result
 
     run_elapsed = (datetime.now() - run_start_time).total_seconds()
+    if progress_file is not None:
+        write_progress_file(progress_file, completed=aggregator.total_cycles, total=len(cycle_dirs))
     print(f"  ✓ 流式处理完成 (总耗时 {run_elapsed:.1f}s)")
 
     cycle_csv = output_dir / "streaming_cycle_results.csv"

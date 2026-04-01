@@ -246,36 +246,14 @@ class ReplayEngine:
             self._prune_recent_buy_fill_times(event.timestamp)
             blocked_reasons: list[str] = []
             selected_for_risk = candidates_for_exec[0]
-            selected_for_risk.metadata["account_cash"] = self.account.cash
-            selected_for_risk.metadata["account_available_cash"] = self.account.available_cash
-            selected_for_risk.metadata["market_price"] = event.price
-            selected_for_risk.metadata.update(event.metadata)
-            selected_for_risk.metadata.update(pending_context)
-            selected_for_risk.metadata["last_strategy_fill_at"] = self._last_strategy_fill_at
-            selected_for_risk.metadata["last_strategy_fill_at_up"] = self._last_strategy_fill_at_up
-            selected_for_risk.metadata["last_strategy_fill_at_down"] = self._last_strategy_fill_at_down
-            selected_for_risk.metadata["last_strategy_fill_price_up"] = self._last_strategy_fill_price_up
-            selected_for_risk.metadata["last_strategy_fill_price_down"] = self._last_strategy_fill_price_down
-            selected_for_risk.metadata["recent_buy_fill_count_1s_up"] = len(self._recent_buy_fill_times_up)
-            selected_for_risk.metadata["recent_buy_fill_count_1s_down"] = len(self._recent_buy_fill_times_down)
+            self._populate_intent_metadata(intent=selected_for_risk, event=event, pending_context=pending_context)
             risk_decision = apply_risk_limits(features, selected_for_risk, self.config)
             if not risk_decision.accepted and len(candidates_for_exec) > 1:
                 blocked_reasons.append(
                     f"{selected_for_risk.category}:{selected_for_risk.action}:{selected_for_risk.outcome}:{risk_decision.reason}"
                 )
                 for fallback in candidates_for_exec[1:]:
-                    fallback.metadata["account_cash"] = self.account.cash
-                    fallback.metadata["account_available_cash"] = self.account.available_cash
-                    fallback.metadata["market_price"] = event.price
-                    fallback.metadata.update(event.metadata)
-                    fallback.metadata.update(pending_context)
-                    fallback.metadata["last_strategy_fill_at"] = self._last_strategy_fill_at
-                    fallback.metadata["last_strategy_fill_at_up"] = self._last_strategy_fill_at_up
-                    fallback.metadata["last_strategy_fill_at_down"] = self._last_strategy_fill_at_down
-                    fallback.metadata["last_strategy_fill_price_up"] = self._last_strategy_fill_price_up
-                    fallback.metadata["last_strategy_fill_price_down"] = self._last_strategy_fill_price_down
-                    fallback.metadata["recent_buy_fill_count_1s_up"] = len(self._recent_buy_fill_times_up)
-                    fallback.metadata["recent_buy_fill_count_1s_down"] = len(self._recent_buy_fill_times_down)
+                    self._populate_intent_metadata(intent=fallback, event=event, pending_context=pending_context)
                     fallback_risk = apply_risk_limits(features, fallback, self.config)
                     if fallback_risk.accepted:
                         selected_for_risk = fallback
@@ -284,20 +262,6 @@ class ReplayEngine:
                     blocked_reasons.append(
                         f"{fallback.category}:{fallback.action}:{fallback.outcome}:{fallback_risk.reason}"
                     )
-
-            if "account_cash" not in selected_for_risk.metadata:
-                selected_for_risk.metadata["account_cash"] = self.account.cash
-                selected_for_risk.metadata["account_available_cash"] = self.account.available_cash
-                selected_for_risk.metadata["market_price"] = event.price
-                selected_for_risk.metadata.update(event.metadata)
-                selected_for_risk.metadata.update(pending_context)
-                selected_for_risk.metadata["last_strategy_fill_at"] = self._last_strategy_fill_at
-                selected_for_risk.metadata["last_strategy_fill_at_up"] = self._last_strategy_fill_at_up
-                selected_for_risk.metadata["last_strategy_fill_at_down"] = self._last_strategy_fill_at_down
-                selected_for_risk.metadata["last_strategy_fill_price_up"] = self._last_strategy_fill_price_up
-                selected_for_risk.metadata["last_strategy_fill_price_down"] = self._last_strategy_fill_price_down
-                selected_for_risk.metadata["recent_buy_fill_count_1s_up"] = len(self._recent_buy_fill_times_up)
-                selected_for_risk.metadata["recent_buy_fill_count_1s_down"] = len(self._recent_buy_fill_times_down)
 
             row["selected_rule"] = selected_for_risk.category
             row["selected_action"] = selected_for_risk.action
@@ -443,6 +407,21 @@ class ReplayEngine:
         context["pending_up_sell_shares"] = float(context.get("pending_up_sell_shares", 0.0))
         context["pending_down_sell_shares"] = float(context.get("pending_down_sell_shares", 0.0))
         return context
+
+    def _populate_intent_metadata(self, *, intent, event: TradeEvent, pending_context: dict[str, object]) -> None:
+        metadata = intent.metadata
+        metadata["account_cash"] = self.account.cash
+        metadata["account_available_cash"] = self.account.available_cash
+        metadata["market_price"] = event.price
+        metadata.update(event.metadata)
+        metadata.update(pending_context)
+        metadata["last_strategy_fill_at"] = self._last_strategy_fill_at
+        metadata["last_strategy_fill_at_up"] = self._last_strategy_fill_at_up
+        metadata["last_strategy_fill_at_down"] = self._last_strategy_fill_at_down
+        metadata["last_strategy_fill_price_up"] = self._last_strategy_fill_price_up
+        metadata["last_strategy_fill_price_down"] = self._last_strategy_fill_price_down
+        metadata["recent_buy_fill_count_1s_up"] = len(self._recent_buy_fill_times_up)
+        metadata["recent_buy_fill_count_1s_down"] = len(self._recent_buy_fill_times_down)
 
     def _sync_account_reservations(self) -> None:
         pending_context = self._pending_context()

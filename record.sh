@@ -40,6 +40,7 @@ BATCH_REGISTRY="${RECORD_BATCH_REGISTRY:-artifacts/live/.batch_registry}"
 BATCH_BASE_DIR="${RECORD_BATCH_BASE_DIR:-artifacts/live/batch_jobs}"
 DEFAULT_INCLUDE_PERFORMANCE_REPORT="${RECORD_INCLUDE_PERFORMANCE_REPORT:-1}"
 DEFAULT_INCLUDE_TRADE_PROCESS="${RECORD_INCLUDE_TRADE_PROCESS:-0}"
+DEFAULT_DASHBOARD_REFRESH_EVERY_CYCLES="${RECORD_DASHBOARD_REFRESH_EVERY_CYCLES:-6}"
 
 print_help() {
   printf "%s\n" \
@@ -79,6 +80,7 @@ print_help() {
     "  RECORD_OUTPUT_DIR=...          批量任务默认数据流根目录（会拼接 /record_job_market）" \
     "  RECORD_INCLUDE_PERFORMANCE_REPORT=0  mstart replay 是否生成绩效 Excel（sim_batch_replay_performance_report）" \
     "  RECORD_INCLUDE_TRADE_PROCESS=0       mstart replay 是否生成交易过程 Excel（batch_replay_trade_process_zh）" \
+    "  RECORD_DASHBOARD_REFRESH_EVERY_CYCLES=6  mstart replay 每 N 个周期刷新一次中途 dashboard（默认 6）" \
     "" \
     "Linux 云服务器推荐：" \
     "  RECORD_DASHBOARD_HOST=0.0.0.0 ./record.sh dmb10" \
@@ -213,6 +215,24 @@ trim_trailing_cr() {
   local s="$1"
   # 兼容 Windows CRLF 配置/注册表文件，移除整行中的 \r，避免污染路径参数。
   printf '%s' "${s//$'\r'/}"
+}
+
+read_progress_from_file() {
+  local progress_file="$1"
+  if [[ ! -f "$progress_file" ]]; then
+    return 1
+  fi
+  local progress_raw
+  progress_raw="$(tr -d '\r' < "$progress_file" 2>/dev/null | tr -d '\n')"
+  if [[ ! "$progress_raw" =~ ^[[:space:]]*[0-9]+[[:space:]]*,[[:space:]]*[0-9]+[[:space:]]*$ ]]; then
+    return 1
+  fi
+  local completed="${progress_raw%%,*}"
+  local total="${progress_raw##*,}"
+  completed="$(printf '%s' "$completed" | tr -d '[:space:]')"
+  total="$(printf '%s' "$total" | tr -d '[:space:]')"
+  printf '%s,%s\n' "$completed" "$total"
+  return 0
 }
 
 normalize_path_separators() {
@@ -640,6 +660,7 @@ except Exception:
     BATCH_STARTED_COUNT=0
     BATCH_INCLUDE_PERFORMANCE_REPORT="$DEFAULT_INCLUDE_PERFORMANCE_REPORT"
     BATCH_INCLUDE_TRADE_PROCESS="$DEFAULT_INCLUDE_TRADE_PROCESS"
+    BATCH_DASHBOARD_REFRESH_EVERY_CYCLES="$DEFAULT_DASHBOARD_REFRESH_EVERY_CYCLES"
     # 清理注册表中已结束的旧条目
     if [[ -f "$BATCH_REGISTRY" ]]; then
       LIVE_ENTRIES=""
@@ -669,6 +690,10 @@ except Exception:
       fi
       if [[ "$line" =~ ^[[:space:]]*RECORD_INCLUDE_TRADE_PROCESS[[:space:]]*=[[:space:]]*([01])[[:space:]]*$ ]]; then
         BATCH_INCLUDE_TRADE_PROCESS="${BASH_REMATCH[1]}"
+        continue
+      fi
+      if [[ "$line" =~ ^[[:space:]]*RECORD_DASHBOARD_REFRESH_EVERY_CYCLES[[:space:]]*=[[:space:]]*([0-9]+)[[:space:]]*$ ]]; then
+        BATCH_DASHBOARD_REFRESH_EVERY_CYCLES="${BASH_REMATCH[1]}"
         continue
       fi
       read -ra fields <<< "$line"
@@ -713,6 +738,7 @@ except Exception:
       JOB_DASHBOARD_DIR="$job_output_dir/$JOB_OUT_SUBDIR"
       JOB_PID_FILE="$job_output_dir/market_paper.pid"
       JOB_LOG="$JOB_DASHBOARD_DIR/market_paper.log"
+      JOB_PROGRESS_FILE="$JOB_DASHBOARD_DIR/streaming_progress.txt"
       mkdir -p "$JOB_DASHBOARD_DIR"
       if [[ "$job_type" == "live" ]]; then
         mkdir -p "$job_data_stream_dir"
@@ -753,7 +779,7 @@ except Exception:
           > "$JOB_LOG" 2>&1 &
       else
         # 模拟下单测试：run_recorded_live_paper.py
-        nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_recorded_live_paper.py --input-dir "$2" --cycle-glob "$3" --max-cycles "$4" --config "$5" --output-dir "$6" --pace-factor 1000000 --status-every 100 --dashboard-refresh-seconds 1 --starting-cash "$7"); if [[ -n "${8}" ]]; then cmd+=(--per-cycle-cash "${8}"); fi; if [[ "${9}" == "1" ]]; then cmd+=(--include-performance-report); fi; if [[ "${10}" == "1" ]]; then cmd+=(--include-trade-process); fi; exec "${cmd[@]}"' \
+        nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_recorded_live_paper.py --input-dir "$2" --cycle-glob "$3" --max-cycles "$4" --config "$5" --output-dir "$6" --pace-factor 1000000 --status-every 100 --dashboard-refresh-seconds 1 --dashboard-refresh-every-cycles "$7" --starting-cash "$8" --progress-file "$9"); if [[ -n "${10}" ]]; then cmd+=(--per-cycle-cash "${10}"); fi; if [[ "${11}" == "1" ]]; then cmd+=(--include-performance-report); fi; if [[ "${12}" == "1" ]]; then cmd+=(--include-trade-process); fi; exec "${cmd[@]}"' \
           "$JOB_PID_FILE" \
           "$PYTHON_BIN" \
           "$job_data_stream_dir" \
@@ -761,7 +787,9 @@ except Exception:
           "$job_cycles" \
           "$job_config" \
           "$JOB_DASHBOARD_DIR" \
+          "$BATCH_DASHBOARD_REFRESH_EVERY_CYCLES" \
           "$job_cash" \
+          "$JOB_PROGRESS_FILE" \
           "$job_per_cycle" \
           "$BATCH_INCLUDE_PERFORMANCE_REPORT" \
           "$BATCH_INCLUDE_TRADE_PROCESS" \
@@ -814,14 +842,24 @@ except Exception:
       reg_progress_completed="0"
       reg_progress_total="${reg_cycles:-0}"
       reg_progress_dir="$(dirname "$reg_log")"
-      reg_cycles_csv="$reg_progress_dir/cycles.csv"
-      # 流式模式写入 streaming_cycle_results.csv 而非 cycles.csv
-      if [[ ! -f "$reg_cycles_csv" ]]; then
-        reg_cycles_csv="$reg_progress_dir/streaming_cycle_results.csv"
-      fi
-      if [[ -f "$reg_cycles_csv" ]]; then
-        reg_progress_completed="$(tail -n +2 "$reg_cycles_csv" 2>/dev/null | sed '/^[[:space:]]*$/d' | wc -l | tr -d '[:space:]')"
-        [[ -z "$reg_progress_completed" ]] && reg_progress_completed="0"
+      reg_progress_file="$reg_progress_dir/streaming_progress.txt"
+      reg_progress_raw="$(read_progress_from_file "$reg_progress_file" || true)"
+      if [[ -n "$reg_progress_raw" ]]; then
+        reg_progress_completed="${reg_progress_raw%%,*}"
+        reg_progress_total_from_file="${reg_progress_raw##*,}"
+        if [[ "$reg_progress_total_from_file" =~ ^[0-9]+$ ]] && [[ "$reg_progress_total_from_file" -gt 0 ]]; then
+          reg_progress_total="$reg_progress_total_from_file"
+        fi
+      else
+        reg_cycles_csv="$reg_progress_dir/cycles.csv"
+        # 流式模式写入 streaming_cycle_results.csv 而非 cycles.csv
+        if [[ ! -f "$reg_cycles_csv" ]]; then
+          reg_cycles_csv="$reg_progress_dir/streaming_cycle_results.csv"
+        fi
+        if [[ -f "$reg_cycles_csv" ]]; then
+          reg_progress_completed="$(tail -n +2 "$reg_cycles_csv" 2>/dev/null | sed '/^[[:space:]]*$/d' | wc -l | tr -d '[:space:]')"
+          [[ -z "$reg_progress_completed" ]] && reg_progress_completed="0"
+        fi
       fi
       TOTAL=$((TOTAL + 1))
       if is_batch_job_process_alive "$reg_pid" "$reg_job_type"; then
