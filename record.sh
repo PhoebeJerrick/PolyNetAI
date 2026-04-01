@@ -38,7 +38,7 @@ OPEN_EDGE_ON_DASHBOARD="${RECORD_OPEN_DASHBOARD_EDGE:-1}"
 DEFAULT_BATCH_FILE="${RECORD_BATCH_FILE:-configs/batch.conf}"
 BATCH_REGISTRY="${RECORD_BATCH_REGISTRY:-artifacts/live/.batch_registry}"
 BATCH_BASE_DIR="${RECORD_BATCH_BASE_DIR:-artifacts/live/batch_jobs}"
-DEFAULT_INCLUDE_PERFORMANCE_REPORT="${RECORD_INCLUDE_PERFORMANCE_REPORT:-0}"
+DEFAULT_INCLUDE_PERFORMANCE_REPORT="${RECORD_INCLUDE_PERFORMANCE_REPORT:-1}"
 DEFAULT_INCLUDE_TRADE_PROCESS="${RECORD_INCLUDE_TRADE_PROCESS:-0}"
 
 print_help() {
@@ -77,6 +77,8 @@ print_help() {
     "  RECORD_DASHBOARD_PORT=8765     dashboard 监听端口" \
     "  RECORD_PER_CYCLE_CASH=100      dm/dmb 默认每周期固定投注资金" \
     "  RECORD_OUTPUT_DIR=...          批量任务默认数据流根目录（会拼接 /record_job_market）" \
+    "  RECORD_INCLUDE_PERFORMANCE_REPORT=0  mstart replay 是否生成绩效 Excel（sim_batch_replay_performance_report）" \
+    "  RECORD_INCLUDE_TRADE_PROCESS=0       mstart replay 是否生成交易过程 Excel（batch_replay_trade_process_zh）" \
     "" \
     "Linux 云服务器推荐：" \
     "  RECORD_DASHBOARD_HOST=0.0.0.0 ./record.sh dmb10" \
@@ -636,6 +638,8 @@ except Exception:
     BATCH_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
     BATCH_JOB_INDEX=0
     BATCH_STARTED_COUNT=0
+    BATCH_INCLUDE_PERFORMANCE_REPORT="$DEFAULT_INCLUDE_PERFORMANCE_REPORT"
+    BATCH_INCLUDE_TRADE_PROCESS="$DEFAULT_INCLUDE_TRADE_PROCESS"
     # 清理注册表中已结束的旧条目
     if [[ -f "$BATCH_REGISTRY" ]]; then
       LIVE_ENTRIES=""
@@ -658,6 +662,15 @@ except Exception:
       line="$(trim_trailing_cr "$line")"
       [[ "$line" =~ ^[[:space:]]*# ]] && continue
       [[ -z "${line// }" ]] && continue
+      # 支持在 batch.conf 顶部或任意位置通过 key=value 覆盖批量回放 Excel 开关。
+      if [[ "$line" =~ ^[[:space:]]*RECORD_INCLUDE_PERFORMANCE_REPORT[[:space:]]*=[[:space:]]*([01])[[:space:]]*$ ]]; then
+        BATCH_INCLUDE_PERFORMANCE_REPORT="${BASH_REMATCH[1]}"
+        continue
+      fi
+      if [[ "$line" =~ ^[[:space:]]*RECORD_INCLUDE_TRADE_PROCESS[[:space:]]*=[[:space:]]*([01])[[:space:]]*$ ]]; then
+        BATCH_INCLUDE_TRADE_PROCESS="${BASH_REMATCH[1]}"
+        continue
+      fi
       read -ra fields <<< "$line"
       # 第一列是 replay/live 时为新格式，否则为旧格式（第一列是数字，默认 replay）
       if [[ "${fields[0]}" =~ ^[0-9]+$ ]]; then
@@ -750,8 +763,8 @@ except Exception:
           "$JOB_DASHBOARD_DIR" \
           "$job_cash" \
           "$job_per_cycle" \
-          "$DEFAULT_INCLUDE_PERFORMANCE_REPORT" \
-          "$DEFAULT_INCLUDE_TRADE_PROCESS" \
+          "$BATCH_INCLUDE_PERFORMANCE_REPORT" \
+          "$BATCH_INCLUDE_TRADE_PROCESS" \
           > "$JOB_LOG" 2>&1 &
       fi
       disown 2>/dev/null || true
