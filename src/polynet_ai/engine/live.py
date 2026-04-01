@@ -178,12 +178,14 @@ def export_live_result(
     result.replay_result.metrics_df.to_csv(directory / "metrics.csv", index=False, encoding="utf-8-sig")
     result.snapshot_df.to_csv(directory / "snapshots.csv", index=False, encoding="utf-8-sig")
     _vtag = get_version_tag()
-    export_trade_ledger_to_excel(
-        decision_df=result.replay_result.decision_df,
-        snapshot_df=result.snapshot_df,
-        output_path=directory / f"trade_ledger_{_vtag}.xlsx",
-        position_value_denominator=position_value_denominator,
-    )
+    # Heavy xlsx exports are optional in streaming progress flushes.
+    if write_excel:
+        export_trade_ledger_to_excel(
+            decision_df=result.replay_result.decision_df,
+            snapshot_df=result.snapshot_df,
+            output_path=directory / f"trade_ledger_{_vtag}.xlsx",
+            position_value_denominator=position_value_denominator,
+        )
     if write_excel:
         with pd.ExcelWriter(directory / f"live_report_{_vtag}.xlsx", engine="openpyxl") as writer:
             result.replay_result.cycle_df.to_excel(writer, sheet_name="cycles", index=False)

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
+import os
 
 from polynet_ai.domain.models import FeatureSnapshot, OrderIntent
 from polynet_ai.strategy.cycle_windows import determine_phase
@@ -18,6 +19,8 @@ def _debug_log(
     data: dict[str, object],
     run_id: str = "pre-fix",
 ) -> None:
+    if os.getenv("POLYNET_DEBUG_LOG", "0") != "1":
+        return
     payload = {
         "sessionId": "4c25d8",
         "runId": run_id,

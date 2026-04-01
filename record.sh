@@ -38,6 +38,8 @@ OPEN_EDGE_ON_DASHBOARD="${RECORD_OPEN_DASHBOARD_EDGE:-1}"
 DEFAULT_BATCH_FILE="${RECORD_BATCH_FILE:-configs/batch.conf}"
 BATCH_REGISTRY="${RECORD_BATCH_REGISTRY:-artifacts/live/.batch_registry}"
 BATCH_BASE_DIR="${RECORD_BATCH_BASE_DIR:-artifacts/live/batch_jobs}"
+DEFAULT_INCLUDE_PERFORMANCE_REPORT="${RECORD_INCLUDE_PERFORMANCE_REPORT:-0}"
+DEFAULT_INCLUDE_TRADE_PROCESS="${RECORD_INCLUDE_TRADE_PROCESS:-0}"
 
 print_help() {
   printf "%s\n" \
@@ -738,7 +740,7 @@ except Exception:
           > "$JOB_LOG" 2>&1 &
       else
         # 模拟下单测试：run_recorded_live_paper.py
-        nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_recorded_live_paper.py --input-dir "$2" --cycle-glob "$3" --max-cycles "$4" --config "$5" --output-dir "$6" --pace-factor 1000000 --status-every 100 --dashboard-refresh-seconds 1 --starting-cash "$7" --include-trade-process); if [[ -n "${8}" ]]; then cmd+=(--per-cycle-cash "${8}"); fi; exec "${cmd[@]}"' \
+        nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_recorded_live_paper.py --input-dir "$2" --cycle-glob "$3" --max-cycles "$4" --config "$5" --output-dir "$6" --pace-factor 1000000 --status-every 100 --dashboard-refresh-seconds 1 --starting-cash "$7"); if [[ -n "${8}" ]]; then cmd+=(--per-cycle-cash "${8}"); fi; if [[ "${9}" == "1" ]]; then cmd+=(--include-performance-report); fi; if [[ "${10}" == "1" ]]; then cmd+=(--include-trade-process); fi; exec "${cmd[@]}"' \
           "$JOB_PID_FILE" \
           "$PYTHON_BIN" \
           "$job_data_stream_dir" \
@@ -748,6 +750,8 @@ except Exception:
           "$JOB_DASHBOARD_DIR" \
           "$job_cash" \
           "$job_per_cycle" \
+          "$DEFAULT_INCLUDE_PERFORMANCE_REPORT" \
+          "$DEFAULT_INCLUDE_TRADE_PROCESS" \
           > "$JOB_LOG" 2>&1 &
       fi
       disown 2>/dev/null || true

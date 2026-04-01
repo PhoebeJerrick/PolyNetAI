@@ -71,7 +71,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--status-every", type=int, default=100)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--dashboard-refresh-seconds", type=float, default=1.0)
-    parser.add_argument("--include-trade-process", action="store_true", default=False, help="是否生成交易过程详细 Excel")
+    parser.add_argument(
+        "--dashboard-refresh-every-cycles",
+        type=int,
+        default=5,
+        help="per-cycle 模式下每处理多少个周期才同步一次 dashboard；<=0 表示仅在结束时同步。",
+    )
+    parser.add_argument(
+        "--include-performance-report",
+        action="store_true",
+        default=False,
+        help="是否生成绩效汇总 Excel（sim_batch_replay_performance_report_*.xlsx）。",
+    )
+    parser.add_argument(
+        "--include-trade-process",
+        action="store_true",
+        default=False,
+        help="是否生成交易过程详细 Excel（batch_replay_trade_process_zh_*.xlsx）；依赖 --include-performance-report。",
+    )
     parser.add_argument(
         "--post-window-start-delay-seconds",
         type=float,
@@ -408,7 +425,9 @@ def _write_sim_batch_reports(
     capital_reset_mode: str,
     starting_cash: float,
     position_value_denominator: float = 1000.0,
-) -> tuple[Path, Path]:
+    include_performance_report: bool = True,
+    include_trade_process: bool = True,
+) -> tuple[Path | None, Path | None]:
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -420,26 +439,30 @@ def _write_sim_batch_reports(
         decision_df["cycle_slug"] = decision_df["cycle_id"].astype(str)
 
     summary_df = _build_summary_df(cycle_df, decision_df)
-    trade_xlsx = write_batch_trade_process_zh(
-        input_dir=out_dir,
-        cycle_df=cycle_df,
-        decision_df=decision_df,
-        output_path=out_dir,
-    )
-    perf_xlsx = build_performance_report_zh(
-        resolved_batch_dir=out_dir,
-        summary_df=summary_df,
-        cycle_df=cycle_df,
-        decision_df=decision_df,
-        output_path=out_dir,
-        display_batch_dir=out_dir,
-        report_source="模拟下单测试",
-        report_name_prefix="simulation",
-        capital_reset_mode=capital_reset_mode,
-        starting_cash=starting_cash,
-        position_value_denominator=position_value_denominator,
-    )
-    _cleanup_batch_replay_markdown(out_dir)
+    perf_xlsx: Path | None = None
+    trade_xlsx: Path | None = None
+    if include_trade_process:
+        trade_xlsx = write_batch_trade_process_zh(
+            input_dir=out_dir,
+            cycle_df=cycle_df,
+            decision_df=decision_df,
+            output_path=out_dir,
+        )
+    if include_performance_report:
+        perf_xlsx = build_performance_report_zh(
+            resolved_batch_dir=out_dir,
+            summary_df=summary_df,
+            cycle_df=cycle_df,
+            decision_df=decision_df,
+            output_path=out_dir,
+            display_batch_dir=out_dir,
+            report_source="模拟下单测试",
+            report_name_prefix="simulation",
+            capital_reset_mode=capital_reset_mode,
+            starting_cash=starting_cash,
+            position_value_denominator=position_value_denominator,
+        )
+        _cleanup_batch_replay_markdown(out_dir)
     return perf_xlsx, trade_xlsx
 
 
@@ -631,7 +654,13 @@ def main_streaming(args: argparse.Namespace | None = None) -> int:
                   f"{len(sorted_events)}/{len(cycle_events)} 事件, 盈亏 {profit:.2f}, 耗时 {cycle_elapsed:.1f}s")
 
             accumulated_snapshot_rows.extend(result.snapshot_df.to_dict(orient="records"))
+            should_refresh_dashboard = False
             if args.dashboard_refresh_seconds > 0:
+                if args.dashboard_refresh_every_cycles <= 0:
+                    should_refresh_dashboard = False
+                else:
+                    should_refresh_dashboard = (cycle_idx % args.dashboard_refresh_every_cycles == 0)
+            if should_refresh_dashboard:
                 _export_dashboard_from_streaming(
                     engine=engine,
                     output_dir=output_dir,
@@ -660,6 +689,10 @@ def main_streaming(args: argparse.Namespace | None = None) -> int:
         if did_export:
             print(f"  ✓ Dashboard 数据已同步至: {output_dir}")
 
+    include_trade_process = bool(args.include_trade_process)
+    include_performance_report = bool(args.include_performance_report or include_trade_process)
+    if include_trade_process and not args.include_performance_report:
+        print("  ℹ 已自动启用绩效报告：--include-trade-process 依赖 --include-performance-report")
     print(f"\n[4/5] 从流式输出生成最终报告...")
     # 读取流式输出文件
     decision_csv = output_dir / "streaming_decision_results.csv"
@@ -680,13 +713,15 @@ def main_streaming(args: argparse.Namespace | None = None) -> int:
         summary_df = _build_summary_df(cycle_df, decision_df)
 
         # 生成报告
-        if args.include_trade_process:
+        if include_trade_process:
             trade_xlsx = write_batch_trade_process_zh(
                 input_dir=output_dir,
                 cycle_df=cycle_df,
                 decision_df=decision_df,
                 output_path=output_dir,
             )
+            print(f"  ✓ 交易过程 (Excel): {trade_xlsx}")
+        if include_performance_report:
             perf_xlsx = build_performance_report_zh(
                 resolved_batch_dir=output_dir,
                 summary_df=summary_df,
@@ -702,8 +737,7 @@ def main_streaming(args: argparse.Namespace | None = None) -> int:
             )
             _cleanup_batch_replay_markdown(output_dir)
             print(f"  ✓ 总绩效报告 (Excel): {perf_xlsx}")
-            print(f"  ✓ 交易过程 (Excel): {trade_xlsx}")
-        else:
+        if not include_trade_process and not include_performance_report:
             print(f"  ✓ 流式输出文件已生成在: {output_dir}")
 
     print(f"\n[5/5] 性能统计...")
@@ -832,17 +866,25 @@ def main(args: argparse.Namespace | None = None) -> int:
         position_value_denominator=position_value_denominator,
     )
     print(f"  ✓ 数据已导出到: {args.output_dir}")
+    include_trade_process = bool(args.include_trade_process)
+    include_performance_report = bool(args.include_performance_report or include_trade_process)
+    if include_trade_process and not args.include_performance_report:
+        print("  ℹ 已自动启用绩效报告：--include-trade-process 依赖 --include-performance-report")
     print(f"\n[5/5] 生成总绩效报告...")
-    if args.include_trade_process:
+    if include_trade_process or include_performance_report:
         performance_xlsx, trade_process_xlsx = _write_sim_batch_reports(
             args.output_dir,
             result,
             capital_reset_mode=args.capital_reset_mode,
             starting_cash=args.starting_cash,
             position_value_denominator=position_value_denominator,
+            include_performance_report=include_performance_report,
+            include_trade_process=include_trade_process,
         )
-        print(f"  ✓ 总绩效报告 (Excel): {performance_xlsx}")
-        print(f"  ✓ 交易过程 (Excel): {trade_process_xlsx}")
+        if performance_xlsx is not None:
+            print(f"  ✓ 总绩效报告 (Excel): {performance_xlsx}")
+        if trade_process_xlsx is not None:
+            print(f"  ✓ 交易过程 (Excel): {trade_process_xlsx}")
     else:
         print(f"  ✓ 报告文件已生成在: {args.output_dir}")
     
