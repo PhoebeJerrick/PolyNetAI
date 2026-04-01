@@ -38,7 +38,7 @@ rule_enablement:
       phase_4: true
     grid:
       enabled: true
-      phase_1: true
+      phase_1: false
       phase_2: true
       phase_3: true
       phase_4: true
