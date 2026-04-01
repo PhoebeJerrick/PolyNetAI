@@ -110,9 +110,9 @@ class StateEngine:
                 self._clear_reentry_anchor(state, "down")
         elif fill.action == "sell":
             if fill.outcome == "up" and prev_up_held > 1e-10 and state.up_position.held <= 1e-10:
-                self._arm_reentry_anchors(state, fill.timestamp)
+                self._arm_reentry_anchor(state, "up", fill.timestamp)
             elif fill.outcome == "down" and prev_down_held > 1e-10 and state.down_position.held <= 1e-10:
-                self._arm_reentry_anchors(state, fill.timestamp)
+                self._arm_reentry_anchor(state, "down", fill.timestamp)
         state.strategy_trades += 1
         state.last_event_timestamp = fill.timestamp
         self.strategy_fills.append(fill)
@@ -267,14 +267,16 @@ class StateEngine:
         state.down_reentry_armed_at = None
 
     @staticmethod
-    def _arm_reentry_anchors(state: CycleState, timestamp: datetime) -> None:
+    def _arm_reentry_anchor(state: CycleState, outcome: Outcome, timestamp: datetime) -> None:
         up_price = float(state.up_last_price or 0.0)
         down_price = float(state.down_last_price or 0.0)
         if up_price <= 1e-10 and down_price > 1e-10:
             up_price = _clamp_binary_price(1.0 - down_price)
         if down_price <= 1e-10 and up_price > 1e-10:
             down_price = _clamp_binary_price(1.0 - up_price)
-        state.reentry_anchor_up_price = up_price
+        if outcome == "up":
+            state.reentry_anchor_up_price = up_price
+            state.up_reentry_armed_at = timestamp
+            return
         state.reentry_anchor_down_price = down_price
-        state.up_reentry_armed_at = timestamp
         state.down_reentry_armed_at = timestamp
