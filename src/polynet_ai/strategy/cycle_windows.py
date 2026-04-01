@@ -80,6 +80,26 @@ def determine_phase(cycle_elapsed_seconds: float, config: StrategyConfig) -> int
     return 4
 
 
+def phase_elapsed_seconds(cycle_elapsed_seconds: float, config: StrategyConfig) -> float:
+    """
+    当前阶段内已过秒数：``cycle_elapsed_seconds - phase_start``，与 ``determine_phase`` 边界一致。
+
+    - 阶段1：起点 0
+    - 阶段2：起点 ``phase_end_seconds_1``
+    - 阶段3：起点 ``phase_end_seconds_2``
+    - 阶段4：起点 ``phase_end_seconds_3``
+    """
+    e1, e2, e3 = phase_end_seconds_from_config(config)
+    t = max(0.0, float(cycle_elapsed_seconds))
+    if t <= e1:
+        return t
+    if t <= e2:
+        return t - e1
+    if t <= e3:
+        return t - e2
+    return t - e3
+
+
 def is_rule_enabled_for_phase(
     config: StrategyConfig,
     *,

@@ -244,7 +244,15 @@ def build_strategy_dashboard_sections() -> list[dict[str, Any]]:
                 for item in (
                     _field(f"stop_loss.phase_{n}_near_zero_price", f"阶段{n} 近零价阈值", "触发2 条件A。", ui="range", min=0.01, max=0.5, step=0.01, risk="high"),
                     _field(f"stop_loss.phase_{n}_stop_loss_pct", f"阶段{n} 浮亏%阈值", "", ui="range", min=0.01, max=0.5, step=0.01, risk="high"),
-                    _field(f"stop_loss.phase_{n}_min_hold_seconds", f"阶段{n} 最短持仓秒数", "", min=0, max=300, step=1, risk="medium"),
+                    _field(
+                        f"stop_loss.phase_{n}_min_hold_seconds",
+                        f"阶段{n} 条件B 本阶段最短秒数",
+                        "进入该阶段后起算，与周期总时长无关。",
+                        min=0,
+                        max=300,
+                        step=1,
+                        risk="medium",
+                    ),
                     _field(f"stop_loss.phase_{n}_stop_loss_action_fraction", f"阶段{n} 止损动作比例", "", ui="range", min=0.05, max=1.0, step=0.05, risk="high"),
                     _field(f"stop_loss.phase_{n}_high_vol_trigger_ratio", f"阶段{n} 高波动 ratio 阈值", "", ui="range", min=0.5, max=5.0, step=0.1, risk="medium"),
                     _field(f"stop_loss.phase_{n}_high_vol_price_threshold", f"阶段{n} 高波动价格阈值", "", ui="range", min=0.01, max=0.5, step=0.01, risk="medium"),

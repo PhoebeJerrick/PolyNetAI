@@ -174,30 +174,30 @@ stop_loss:
 
   # ── 触发2：单仓止损（按周期阶段独立配置，双条件） ────────────────────────────
   # 条件A：当前价格 ≤ near_zero_price → 立即全平（无时间门槛）
-  # 条件B：浮亏% ≥ stop_loss_pct AND 周期已过时间 ≥ min_hold_seconds → 全平
+  # 条件B：浮亏% ≥ stop_loss_pct AND 本阶段内已过秒数 ≥ min_hold_seconds → 全平（本阶段 = 周期已过 − 当前阶段起点）
 
   # 阶段1（0–70s）：建仓阶段，容忍最大波动，但要防近零价死亡
   phase_1_near_zero_price: 0.06               # 条件A 绝对价格阈值
   phase_1_stop_loss_pct: 0.15                 # 条件B 浮亏%阈值（15%）
-  phase_1_min_hold_seconds: 60                # 条件B 时间门槛（秒）；第一阶段以建仓为主，延后至 phase1 结束后再触发
+  phase_1_min_hold_seconds: 60                # 条件B：进入阶段1 后至少经过秒数（阶段1 起点=周期起点）
   phase_1_stop_loss_action_fraction: 0.50     # phase 1 只部分止损，避免过早出清
 
   # 阶段2（70–160s）：减仓阶段，提升保护力度
   phase_2_near_zero_price: 0.06
   phase_2_stop_loss_pct: 0.12                 # 条件B 浮亏%阈值（12%）
-  phase_2_min_hold_seconds: 40                # 需要持仓更久才触发条件B
+  phase_2_min_hold_seconds: 0                # 条件B：进入阶段2 后至少经过秒数（跨过 phase_end_seconds_1 起算）
   phase_2_stop_loss_action_fraction: 0.65     # phase 2 部分止损
 
   # 阶段3（160–240s）：顺势加仓，保持一定容忍度
   phase_3_near_zero_price: 0.06               # 条件A 绝对价格阈值
   phase_3_stop_loss_pct: 0.12                 # 条件B 浮亏%阈值（12%）
-  phase_3_min_hold_seconds: 45                # 条件B 时间门槛（秒），防入场噪声误触
+  phase_3_min_hold_seconds: 40                # 条件B：进入阶段3 后至少经过秒数
   phase_3_stop_loss_action_fraction: 0.80     # phase 3 部分止损
 
   # 阶段4（240–290s）：临近结束，更激进止损
   phase_4_near_zero_price: 0.08               # 条件A 提高阈值（允许更早识别失败方向）
   phase_4_stop_loss_pct: 0.08                 # 条件B 浮亏%阈值（8%，更激进）
-  phase_4_min_hold_seconds: 20                # 持仓门槛最短
+  phase_4_min_hold_seconds: 0                # 条件B：进入阶段4 后至少经过秒数
   phase_4_stop_loss_action_fraction: 1.0      # phase 4 全平
 
   # ── 触发3：高波动绝对价格止损（按周期阶段独立配置） ─────────────────────────

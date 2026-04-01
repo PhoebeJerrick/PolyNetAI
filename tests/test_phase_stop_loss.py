@@ -6,7 +6,8 @@
 
 机制2 — 单仓止损（双条件，按阶段独立配置）：
   条件A：last_price ≤ near_zero_price → 立即全平（无时间限制）
-  条件B：浮亏% ≥ stop_loss_pct AND elapsed ≥ min_hold_seconds → 全平
+  条件B：浮亏% ≥ stop_loss_pct AND phase_elapsed ≥ min_hold_seconds → 全平
+       （phase_elapsed = 周期已过时间 − 当前阶段起点）
 
 机制3 — 高波动绝对价格止损（按阶段独立配置）：
   vol_ratio > high_vol_trigger_ratio AND last_price ≤ high_vol_price_threshold
@@ -291,7 +292,7 @@ class TestTrigger2ConditionA:
 
 
 class TestTrigger2ConditionB:
-    """条件B：浮亏% ≥ stop_loss_pct AND elapsed ≥ min_hold_seconds"""
+    """条件B：浮亏% ≥ stop_loss_pct AND phase_elapsed ≥ min_hold_seconds"""
 
     # ── 阶段1（min_hold=20s，sl_pct=15%）──────────────────────────────────
 
@@ -325,25 +326,15 @@ class TestTrigger2ConditionB:
 
     # ── 阶段2（min_hold=40s，sl_pct=12%）──────────────────────────────────
 
-    def test_phase2_no_trigger_when_elapsed_below_min_hold(self):
-        """阶段2：elapsed=35s < min_hold=40s，亏损 20% 不触发"""
-        f = _f(35.0, up_last_price=0.40, cycle_elapsed_seconds=100.0)
-        # elapsed=35 < 40，但 determine_phase 用 cycle_elapsed_seconds=100 → phase 2
-        # 实际 _f 已设置 cycle_elapsed_seconds
-        result = stop_loss_exits(
-            FeatureSnapshot(**{**_BASE, "cycle_elapsed_seconds": 100.0,
-                               "up_avg_price": 0.50, "up_last_price": 0.40}),
-            _cfg()
-        )
-        # elapsed=100 >= min_hold=40，亏20%>12% → 会触发（elapsed 与 elapsed 是同一个）
-        # 注意：这里 elapsed 指的是 features.cycle_elapsed_seconds，不是我们传入的参数
-        # 需要重新设计：让 elapsed < 40
-        pass  # 由下方独立测试覆盖
+    def test_phase2_no_trigger_when_phase_elapsed_below_min_hold(self):
+        """阶段2：本阶段仅过 30s < min_hold=40s，大亏也不触发条件 B"""
+        f = FeatureSnapshot(**{**_BASE, "cycle_elapsed_seconds": 100.0,
+                               "up_avg_price": 0.50, "up_last_price": 0.40})
+        assert stop_loss_exits(f, _cfg()) == []
 
     def test_phase2_elapsed_meets_min_hold_triggers(self):
-        """阶段2：elapsed=45s ≥ min_hold=40s，亏损 15% > 12% 触发"""
-        # 使用 cycle_elapsed_seconds=85（阶段2范围70-160s），elapsed=85≥40
-        f = FeatureSnapshot(**{**_BASE, "cycle_elapsed_seconds": 85.0,
+        """阶段2：本阶段已过 40s（周期 110s），亏损 12% 触发"""
+        f = FeatureSnapshot(**{**_BASE, "cycle_elapsed_seconds": 110.0,
                                "up_avg_price": 0.50, "up_last_price": 0.44})  # 12% 亏损
         result = stop_loss_exits(f, _cfg())
         assert len(result) == 1
@@ -351,7 +342,7 @@ class TestTrigger2ConditionB:
     # ── 阶段4（min_hold=20s，sl_pct=8%，最激进） ───────────────────────────
 
     def test_phase4_triggers_with_8pct_loss(self):
-        """阶段4：elapsed=260s ≥ min_hold=20s，亏损 10% > 8% 触发"""
+        """阶段4：本阶段已过 20s（周期 260s），亏损 10% > 8% 触发"""
         f = _f(260.0, up_last_price=0.45)   # 0.45/0.50-1 = -10% > -8%
         result = stop_loss_exits(f, _cfg())
         assert len(result) == 1
@@ -526,7 +517,8 @@ class TestFallbackBehavior:
 
 
 def test_phase3_condition_b_keeps_residual_position() -> None:
-    f = _f(200.0, up_last_price=0.40, up_held=10.0)
+    # 阶段3 需本阶段≥45s → 周期至少 160+45=205
+    f = _f(205.0, up_last_price=0.40, up_held=10.0)
     result = stop_loss_exits(f, _cfg())
     assert len(result) == 1
     assert result[0].shares == pytest.approx(8.0)
@@ -538,9 +530,10 @@ def test_phase4_condition_b_can_still_sell_entire_position() -> None:
     assert len(result) == 1
     assert result[0].shares == pytest.approx(10.0)
 
-    def test_condition_b_no_trigger_when_elapsed_below_default_min_hold(self):
-        """无阶段配置：elapsed=30s < 默认 min_hold=45s，止损不触发"""
-        f = _f(30.0, up_last_price=0.40)     # -20%（超过fallback 12%），但时间不足
-        result = stop_loss_exits(f, _cfg_no_phase())
-        assert len(result) == 0
+
+def test_condition_b_no_trigger_when_elapsed_below_default_min_hold() -> None:
+    """无阶段配置：阶段1 内仅 30s < 默认 min_hold=45s，止损不触发"""
+    f = _f(30.0, up_last_price=0.40)  # -20%（超过 fallback 12%），但本阶段时间不足
+    result = stop_loss_exits(f, _cfg_no_phase())
+    assert len(result) == 0
 

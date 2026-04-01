@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from polynet_ai.domain.models import FeatureSnapshot, OrderIntent
-from polynet_ai.strategy.cycle_windows import determine_phase, rule_disabled_in_cycle_tail
+from polynet_ai.strategy.cycle_windows import (
+    determine_phase,
+    phase_elapsed_seconds,
+    rule_disabled_in_cycle_tail,
+)
 from polynet_ai.strategy.spec import StrategyConfig
 from polynet_ai.strategy.price_reference import outcome_reference_price
 
@@ -138,8 +142,8 @@ def stop_loss_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[O
       条件A：当前价格 ≤ phase_N_near_zero_price
              → 立即全平，无时间门槛（价格接近0表示方向已判定失败）
       条件B：浮亏% ≥ phase_N_stop_loss_pct
-             AND cycle_elapsed_seconds ≥ phase_N_min_hold_seconds
-             → 全平（时间门槛防止入场瞬间噪声误触，30s内≥2%逆向概率82%）
+             AND phase_elapsed_seconds ≥ phase_N_min_hold_seconds
+             → 全平（phase_elapsed = 本周期已过时间 − 当前阶段起点；防阶段初噪声误触）
 
     机制3 — 高波动绝对价格止损（按周期阶段独立配置）：
       volatility_ratio > phase_N_high_vol_trigger_ratio
@@ -205,6 +209,7 @@ def stop_loss_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[O
 
     # ── 读取当前阶段参数 ──────────────────────────────────────────────────────
     elapsed = features.cycle_elapsed_seconds
+    phase_elapsed = phase_elapsed_seconds(elapsed, config)
     sl_pct_fallback = float(config.get("stop_loss.stop_loss_pct", 0.12))
 
     # 触发2 参数
@@ -258,8 +263,8 @@ def stop_loss_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[O
             ))
             triggered = True
 
-        elif pnl_pct < 0 and abs(pnl_pct) >= stop_loss_pct and elapsed >= min_hold_secs:
-            # 条件B：浮亏% ≥ 阈值 AND 已过 ≥ min_hold_seconds
+        elif pnl_pct < 0 and abs(pnl_pct) >= stop_loss_pct and phase_elapsed >= min_hold_secs:
+            # 条件B：浮亏% ≥ 阈值 AND 本阶段内已过 ≥ min_hold_seconds
             shares = _stop_loss_shares(
                 held=held,
                 requested_fraction=sl_action_frac,
@@ -276,7 +281,7 @@ def stop_loss_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[O
                 category="stop_loss",
                 reason=(
                     f"{outcome.upper()} 浮亏{abs(pnl_pct)*100:.1f}%≥{stop_loss_pct*100:.1f}%"
-                    f"，已过{elapsed:.0f}s≥{min_hold_secs:.0f}s（阶段{phase}），条件B{_stop_loss_action_text(shares, held)}"
+                    f"，本阶段已过{phase_elapsed:.0f}s≥{min_hold_secs:.0f}s（阶段{phase}），条件B{_stop_loss_action_text(shares, held)}"
                 ),
                 priority=priority,
             ))
