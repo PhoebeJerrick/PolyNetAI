@@ -61,7 +61,7 @@ def _cfg() -> StrategyConfig:
         raw={
             "cycle": {"cycle_seconds": 300},
             "order_sizing": {"base_order_size": 5.0, "volatility_order_scale": 0.0},
-            "exposure": {"max_grid_net_position": 20.0},
+            "exposure": {},
             "opening_entry": {"infer_missing_with_binary_complement": True},
             "grid": {
                 "grid_low_percentile": 0.25,

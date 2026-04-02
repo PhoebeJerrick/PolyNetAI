@@ -13,6 +13,9 @@ from scripts.build_batch_replay_performance_report import (
 )
 
 
+EXPECTED_POSITION_VALUE_DENOMINATOR = 85.0
+
+
 def test_compute_max_drawdown_from_cycle_profit_series() -> None:
     profits = [3.0, -5.0, 2.0, -1.0]
 
@@ -97,7 +100,8 @@ def test_build_report_writes_xlsx_and_trade_process(tmp_path) -> None:
         ]
     ).to_csv(cycle_dir / "metrics.csv", index=False, encoding="utf-8-sig")
 
-    report_path = build_report(batch_dir)
+    # 固定持仓价值占比分母，确保测试始终按 85.0 口径断言。
+    report_path = build_report(batch_dir, position_value_denominator=EXPECTED_POSITION_VALUE_DENOMINATOR)
 
     assert report_path.suffix == ".xlsx"
     assert report_path.exists()
@@ -130,7 +134,7 @@ def test_build_report_writes_xlsx_and_trade_process(tmp_path) -> None:
     ratio_series = pd.to_numeric(tracker["持仓价值占比"], errors="coerce").dropna()
     assert not ratio_series.empty
     # 导出链路会在写回前统一 round(3)，断言按三位小数口径比较。
-    expected_ratio = round((10.0 * 0.55) / 85.0, 3)
+    expected_ratio = round((10.0 * 0.55) / EXPECTED_POSITION_VALUE_DENOMINATOR, 3)
     assert abs(float(ratio_series.iloc[0]) - expected_ratio) < 1e-9
     marker_col = "下注时间距开盘差(分，秒)"
     assert marker_col in tracker.columns

@@ -290,6 +290,37 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
         if affordable_shares < clipped.shares:
             clipped = replace(clipped, shares=affordable_shares)
             clipped.metadata["cash_limited"] = True
+
+        # ── 最大仓位红线：无论阶段/优先级倾向，buy 都不能把
+        #    up_value + down_value 推过 position.max_position_value。
+        #    这样允许适当超过 phase_2/phase_3_position_threshold，
+        #    但保证不会超过 max_position_value（“红线”）。 ────────────────
+        max_position_value = float(config.get("position.max_position_value", 85.0))
+        if max_position_value > 1e-12:
+            current_up_value = float(features.up_held * features.up_avg_price)
+            current_down_value = float(features.down_held * features.down_avg_price)
+            current_total_value = max(0.0, current_up_value + current_down_value)
+
+            remaining_value = max(0.0, max_position_value - current_total_value)
+            ref_px = float(clipped.reference_price)
+            # 对齐 PaperBroker 的滑点/成交成本：fill.price 往往会偏离 reference_price，
+            # 若不对齐，可能造成“计算上未超红线，但实际 cost 略超”的小幅越界。
+            # 这里用与 affordable_shares 相同口径的 slippage 调整来裁剪 shares。
+            slip_px = ref_px * (1.0 + slippage_bps / 10_000.0) if ref_px > 1e-12 else ref_px
+
+            # reference_price 过小会造成除零或不合理裁剪，直接让它通过后续的最小下单逻辑处理。
+            if remaining_value <= 1e-12:
+                return RiskDecision(False, None, "超过最大仓位红线(position.max_position_value)")
+            if ref_px > 1e-12:
+                add_value = slip_px * float(clipped.shares)
+                if add_value > remaining_value + 1e-12:
+                    max_add_shares = remaining_value / slip_px if slip_px > 1e-12 else 0.0
+                    if max_add_shares <= 1e-12:
+                        return RiskDecision(False, None, "超过最大仓位红线(position.max_position_value)")
+                    clipped = replace(clipped, shares=max(0.0, max_add_shares))
+                    clipped.metadata["max_position_value_limited"] = True
+                    if clipped.shares <= 1e-12:
+                        return RiskDecision(False, None, "超过最大仓位红线(position.max_position_value)")
     else:
         held_shares = features.up_held if clipped.outcome == "up" else features.down_held
         pending_sell_shares = float(

@@ -117,7 +117,6 @@ def build_strategy_dashboard_sections() -> list[dict[str, Any]]:
                 _field("exposure.phase_4_max_abs_exposure_value", "阶段4 最大绝对敞口", "尾盘方向明确时放宽上限。", ui="range", min=5, max=2000, step=5, risk="high"),
                 _field("exposure.hedge_trigger_value", "对冲触发阈值", "", ui="range", min=1, max=500, step=1, risk="medium"),
                 _field("exposure.hedge_scale", "对冲强度系数", "", ui="range", min=0.01, max=1.0, step=0.01, risk="medium"),
-                _field("exposure.max_grid_net_position", "网格最大净仓位", "", ui="range", min=1, max=200, step=1, risk="high"),
                 _field("exposure.max_strategy_trades_per_cycle", "每周期最大策略成交次数", "", ui="range", min=1, max=200, step=1, risk="medium"),
             ],
         },

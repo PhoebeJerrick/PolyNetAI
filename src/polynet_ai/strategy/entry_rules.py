@@ -214,8 +214,6 @@ def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Orde
         return []
     if phase != 1 and features.market_regime != "range":
         return []
-    if abs(features.net_position) > float(config.get("exposure.max_grid_net_position", 20.0)):
-        return []
     # 首单由 opening_entries 负责；grid 仅在已有至少一笔策略成交后介入
     if features.strategy_trades == 0:
         return []

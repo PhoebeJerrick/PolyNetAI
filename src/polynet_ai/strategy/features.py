@@ -270,13 +270,19 @@ def build_feature_snapshot(
     _cutoff = timestamp - timedelta(seconds=_trend_window_secs)
     _recent_tape = [t for t in _tape_all if t.timestamp >= _cutoff]
     if len(_recent_tape) >= 3:
+        # 趋势强度：以“同向成交的失衡程度”度量，取值范围应在 [0, 1]。
+        # 旧实现使用了 dominant_count/total，导致 trend_strength 永远 >= 0.5，
+        # 从而几乎总将市场误判为 trend，禁用依赖 range 的网格进出逻辑。
         _up_count = sum(1 for t in _recent_tape if t.outcome == "up")
         _total = len(_recent_tape)
-        _dominant_count = max(_up_count, _total - _up_count)
-        trend_strength = _dominant_count / _total
-        _up_dominant = _up_count > (_total - _up_count)
-        _down_dominant = (_total - _up_count) > _up_count
-        trend_bias: Outcome | None = "up" if _up_dominant else ("down" if _down_dominant else None)
+        _down_count = _total - _up_count
+        if _up_count == _down_count:
+            trend_strength = 0.0
+            trend_bias = None
+        else:
+            trend_bias = "up" if _up_count > _down_count else "down"
+            # imbalance = (dominant - minor)/total, where dominant+minor=total
+            trend_strength = abs(_up_count - _down_count) / _total
     else:
         trend_strength = 0.0
         trend_bias = None

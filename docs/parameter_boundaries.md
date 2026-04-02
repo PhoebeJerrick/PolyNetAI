@@ -30,9 +30,6 @@
   - `exposure.max_abs_exposure_value`
   - `exposure.phase_4_max_abs_exposure_value`
   - 作用：限制下单后绝对净敞口。
-- 网格净仓份数约束
-  - `exposure.max_grid_net_position`
-  - 作用：限制净仓份数，而非价值。
 - 单笔成交量约束
   - `order_sizing.buy.max_order_size`
   - `order_sizing.sell.max_order_size`

@@ -13,6 +13,9 @@ from polynet_ai.reporting.strategy_console_schema import collect_strategy_schema
 from polynet_ai.strategy.spec import StrategyConfig, normalize_strategy_raw
 
 
+EXPECTED_STOP_LOSS_PRIORITY_PHASE_4 = 30
+
+
 def _flatten_leaf_paths(obj: object, prefix: str = "") -> set[str]:
     paths: set[str] = set()
     if isinstance(obj, dict):
@@ -62,7 +65,7 @@ def test_priority_for_uses_by_phase_from_file() -> None:
         data = yaml.safe_load(fh)
     cfg = StrategyConfig(raw=data)
     assert cfg.priority_for("opening", 1) == 52
-    assert cfg.priority_for("stop_loss", 4) == 30
+    assert cfg.priority_for("stop_loss", 4) == EXPECTED_STOP_LOSS_PRIORITY_PHASE_4
 
 
 def test_strategy_yaml_leaves_in_dashboard_schema() -> None:

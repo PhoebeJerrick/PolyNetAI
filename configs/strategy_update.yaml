@@ -53,7 +53,6 @@ exposure:
   phase_4_max_abs_exposure_value: 60.0
   hedge_trigger_value: 12.0
   hedge_scale: 0.05
-  max_grid_net_position: 10
   max_strategy_trades_per_cycle: 80
 trend:
   min_trend_strength: 0.5

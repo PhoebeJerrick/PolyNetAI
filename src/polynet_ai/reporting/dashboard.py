@@ -479,10 +479,6 @@ def _build_dashboard_config_param_meta() -> dict[str, dict[str, str]]:
             "example": "0.5 表示超额敞口的一半换算为对冲目标量（示意，以代码为准）",
             "detail": "调大对冲更猛，调小更温和；需与 hedge_trigger 一起看。",
         },
-        "exposure.max_grid_net_position": {
-            "example": "15 — 网格策略净仓绝对值不超过 15",
-            "detail": "防止网格在单边趋势中滚成过大净赌方向。",
-        },
         "exposure.max_strategy_trades_per_cycle": {
             "example": "12 — 单个 5 分钟周期内策略成交不超过 12 次",
             "detail": "抑制过度交易与费用；实盘延迟高时可适当降低。",

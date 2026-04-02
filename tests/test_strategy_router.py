@@ -40,7 +40,7 @@ def build_config() -> StrategyConfig:
             },
             "order_sizing": {"base_order_size": 8.0, "min_order_size": 2.0, "max_order_size": 60.0, "volatility_order_scale": 20.0},
             "trend": {"min_trend_strength": 0.35, "trend_price_edge": 0.03, "trend_scale": 0.15},
-            "exposure": {"hedge_trigger_value": 50.0, "max_grid_net_position": 20.0},
+            "exposure": {"hedge_trigger_value": 50.0},
             "grid": {"grid_low_percentile": 0.25, "grid_high_percentile": 0.75},
             "mean_reversion": {"up_buy_deviation": 0.10, "down_buy_deviation": 0.10, "mean_reversion_sell_up_deviation": 0.20, "mean_reversion_sell_down_deviation": 0.20, "deviation_scale": 45.0},
             "profit_taking": {"take_profit_up_deviation": 0.20, "take_profit_down_deviation": 0.20, "take_profit_fraction": 0.35},

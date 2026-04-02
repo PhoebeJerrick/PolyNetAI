@@ -18,7 +18,7 @@ batch_replay:
 # 2) 仓位与风险上限 — position, capital, exposure, daily_limits
 # =============================================================================
 position:
-  max_position_value: 90.0           # 目标总仓位价值（USDT）
+  max_position_value: 85.0           # 目标总仓位价值（USDT）
 # =============================================================================
 # 3) 规则仲裁 — dynamic_priority（在分阶段优先级上的动态微调）, priorities.by_phase
 # =============================================================================
@@ -135,10 +135,9 @@ exposure:
   phase_4_max_abs_exposure_value: 60.0          # Phase 4（尾盘最后阶段）专用净敞口上限——方向明确时放宽加仓空间
   hedge_trigger_value: 12.0                     # 净敞口超过12.0时开始考虑对冲单
   hedge_scale: 0.05                             # 超额敞口的一半换算为对冲目标量
-  max_grid_net_position: 10                     # 网格策略净仓绝对值不超过10
   max_strategy_trades_per_cycle: 80             # 单个5分钟周期内策略成交不超过80次
 trend:
-  min_trend_strength: 0.5                       # 趋势强度0.5 用于确认方向  
+  min_trend_strength: 0.5                       # 趋势强度0.5 用于确认方向 ，其中一边（up 或 down）至少占最近(trend_window)成交的 75%.
   trend_price_edge: 0.03                        # 趋势价格边缘0.03 用于确认趋势
   trend_scale: 0.1                              # 趋势规模0.1 用于调整下单量
   max_trend_order_size: 80.0                    # 最大趋势下单量80.0
@@ -303,7 +302,7 @@ priorities:
     phase_4:
       risk: 10
       last_minute: 20
-      stop_loss: 40
+      stop_loss: 30
       opening: 52
       trend: 50
       take_profit: 55
