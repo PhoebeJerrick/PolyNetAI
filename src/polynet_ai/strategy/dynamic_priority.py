@@ -45,15 +45,33 @@ def compute_dynamic_priority(
         return int(priority)
 
     if phase == 3:
-        thr = float(config.get("dynamic_priority.phase_3_position_threshold", 0.85))
+        thr = float(config.get("dynamic_priority.phase_3_position_threshold", 0.75))
         trend_b = int(config.get("dynamic_priority.phase_3_trend_boost", 0))
         grid_b = int(config.get("dynamic_priority.phase_3_grid_boost", 0))
+        hedge_b = int(config.get("dynamic_priority.phase_3_hedge_boost", 0))
+        tp_sell_deboost = int(config.get("dynamic_priority.phase_3_take_profit_sell_deboost", 0))
+        grid_sell_deboost = int(config.get("dynamic_priority.phase_3_grid_sell_deboost", 0))
+        buy_deboost_when_full = int(config.get("dynamic_priority.phase_3_buy_deboost_when_full", 0))
+        tp_sell_boost_when_full = int(config.get("dynamic_priority.phase_3_take_profit_sell_boost_when_full", 0))
+        grid_sell_boost_when_full = int(config.get("dynamic_priority.phase_3_grid_sell_boost_when_full", 0))
         if pos_pct >= thr:
+            if action == "buy" and category in {"trend", "hedge", "grid", "mean_reversion", "opening"}:
+                return int(priority) + max(0, buy_deboost_when_full)
+            if action == "sell" and category == "take_profit":
+                return max(1, int(priority) - max(0, tp_sell_boost_when_full))
+            if action == "sell" and category == "grid":
+                return max(1, int(priority) - max(0, grid_sell_boost_when_full))
             return int(priority)
         if action == "buy" and category == "trend" and trend_b > 0:
             return max(1, int(priority) - trend_b)
+        if action == "buy" and category == "hedge" and hedge_b > 0:
+            return max(1, int(priority) - hedge_b)
         if action == "buy" and category == "grid" and grid_b > 0:
             return max(1, int(priority) - grid_b)
+        if action == "sell" and category == "take_profit" and tp_sell_deboost > 0:
+            return int(priority) + tp_sell_deboost
+        if action == "sell" and category == "grid" and grid_sell_deboost > 0:
+            return int(priority) + grid_sell_deboost
         return int(priority)
 
     return int(priority)

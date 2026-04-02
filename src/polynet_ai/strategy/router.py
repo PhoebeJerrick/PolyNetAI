@@ -18,7 +18,11 @@ from polynet_ai.strategy.exit_rules import (
     stop_loss_exits,
     take_profit_exits,
 )
-from polynet_ai.strategy.cycle_windows import determine_phase, is_rule_enabled_for_phase
+from polynet_ai.strategy.cycle_windows import (
+    calculate_position_percentage,
+    determine_phase,
+    is_rule_enabled_for_phase,
+)
 from polynet_ai.strategy.dynamic_priority import apply_dynamic_priorities_to_candidates
 from polynet_ai.strategy.features import snapshot_with_effective_price, snapshot_with_effective_quotes
 from polynet_ai.strategy.last_minute import build_last_minute_candidate
@@ -152,6 +156,19 @@ class StrategyRouter:
         if not candidates:
             return DecisionOutcome(selected=None, candidates=[])
 
+        phase3_preferred_buy = self._phase3_prefer_buy_candidate(candidates, features, phase)
+        if phase3_preferred_buy is not None:
+            preferred_candidates = [
+                item
+                for item in candidates
+                if item.action == "buy" and item.category in {"trend", "hedge"}
+            ]
+            preferred_candidates.sort(key=lambda item: (item.priority, -item.shares))
+            return DecisionOutcome(
+                selected=phase3_preferred_buy,
+                candidates=preferred_candidates,
+            )
+
         guard_fallback = self._fallback_buy_for_low_balance(candidates, features, phase)
         if guard_fallback is not None:
             fallback_scope = str(guard_fallback.metadata.get("_rule_scope", ""))
@@ -179,6 +196,35 @@ class StrategyRouter:
             selected=scoped_candidates[0] if scoped_candidates else None,
             candidates=scoped_candidates,
         )
+
+    def _phase3_prefer_buy_candidate(
+        self,
+        candidates: list[OrderIntent],
+        features: FeatureSnapshot,
+        phase: int,
+    ) -> OrderIntent | None:
+        """Phase3 在未达目标仓位时，卖出候选可让位给 trend/hedge 买入。"""
+        if phase != 3 or not candidates:
+            return None
+        top = candidates[0]
+        if top.action != "sell":
+            return None
+        # 仅在网格减仓占顶时允许“买入优先”回退，避免压制止盈/止损类风险动作。
+        if top.category != "grid":
+            return None
+        target_thr = float(self.config.get("dynamic_priority.phase_3_position_threshold", 0.75))
+        pos_pct = calculate_position_percentage(features, self.config)
+        if pos_pct >= target_thr:
+            return None
+        preferred_buys = [
+            item
+            for item in candidates
+            if item.action == "buy" and item.category in {"trend", "hedge"}
+        ]
+        if not preferred_buys:
+            return None
+        preferred_buys.sort(key=lambda item: (item.priority, -item.shares))
+        return preferred_buys[0]
 
     def _fallback_buy_for_low_balance(
         self,
