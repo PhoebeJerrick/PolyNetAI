@@ -21,49 +21,33 @@ def _favored_outcome_by_unrealized(features: FeatureSnapshot) -> str:
 
 def determine_winning_direction(
     features: FeatureSnapshot, config: StrategyConfig
-) -> tuple[str | None, float]:
+) -> tuple[str, float]:
     """
-    使用更严格的条件确认获胜方向（A+C联合方案 — 第四阶段改进）
+    第四阶段 / 文档第六节 Last Minute：优势侧（满足其一即可）
 
-    三个条件必须同时满足：
-    1. 优势侧仓位价值 ≥ 另一侧 × ratio_threshold
-    2. 优势侧浮盈 > 劣势侧浮盈 × pnl_ratio_threshold
-    3. 趋势强度 ≥ min_trend_strength 且趋势方向与优势侧一致
+    - 该侧份额 ≥ 另一侧 × preferred_leg_min_ratio
+    - 否则：UP/DOWN 市价较高者为优势侧（双侧无仓或接近平衡时亦用市价决胜，便于尾部建仓）
 
     Returns:
-        (direction, confidence) — direction 为 "up"/"down"/None, confidence 为 0.0~0.9
+        (direction, confidence) — direction 为 "up" / "down"
     """
-    ratio_threshold = float(config.get("last_minute.direction_ratio_threshold", 1.5))
-    pnl_ratio_threshold = float(config.get("last_minute.pnl_ratio_threshold", 2.0))
-    min_trend_strength = float(config.get("last_minute.min_trend_strength_for_direction", 0.6))
+    ratio = max(1.0, float(config.get("last_minute.preferred_leg_min_ratio", 1.2)))
+    up_h = float(features.up_held)
+    down_h = float(features.down_held)
+    up_p = float(features.up_last_price)
+    down_p = float(features.down_last_price)
 
-    up_value = features.up_held * features.up_avg_price
-    down_value = features.down_held * features.down_avg_price
-    up_pnl = features.unrealized_up_pnl
-    down_pnl = features.unrealized_down_pnl
-
-    def _check(fav_val: float, oth_val: float, fav_pnl: float, oth_pnl: float, bias: str) -> bool:
-        if oth_val > 1e-12 and fav_val < oth_val * ratio_threshold:
-            return False
-        if oth_val <= 1e-12 and fav_val <= 1e-12:
-            return False
-        # 浮盈条件：劣势侧浮盈 <= 0 时只要优势侧浮盈 > 0 即满足
-        if oth_pnl > 1e-12:
-            if fav_pnl <= oth_pnl * pnl_ratio_threshold:
-                return False
-        elif fav_pnl <= 1e-12:
-            return False
-        if features.trend_strength < min_trend_strength:
-            return False
-        if features.trend_bias != bias:
-            return False
-        return True
-
-    if _check(up_value, down_value, up_pnl, down_pnl, "up"):
-        return ("up", 0.9)
-    if _check(down_value, up_value, down_pnl, up_pnl, "down"):
-        return ("down", 0.9)
-    return (None, 0.0)
+    if down_h > 1e-12 and up_h >= ratio * down_h:
+        return ("up", 0.85)
+    if up_h > 1e-12 and down_h >= ratio * up_h:
+        return ("down", 0.85)
+    if up_h <= 1e-12 and down_h <= 1e-12:
+        return ("up", 0.7) if up_p >= down_p else ("down", 0.7)
+    if down_h <= 1e-12:
+        return ("up", 0.8)
+    if up_h <= 1e-12:
+        return ("down", 0.8)
+    return ("up", 0.75) if up_p >= down_p else ("down", 0.75)
 
 
 def build_last_minute_candidate(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
@@ -107,11 +91,7 @@ def build_last_minute_candidate(features: FeatureSnapshot, config: StrategyConfi
     if intents:
         return intents
 
-    # A+C联合方案：使用严格的方向确认逻辑
     winning_dir, _confidence = determine_winning_direction(features, config)
-    if winning_dir is None:
-        # 无法确认获胜方向 → 保守策略：不加仓
-        return []
 
     min_conf = float(config.get("last_minute.last_minute_min_confidence", 0.85))
     if features.confidence_proxy < min_conf:
@@ -120,7 +100,6 @@ def build_last_minute_candidate(features: FeatureSnapshot, config: StrategyConfi
     # 使用确认的获胜方向（替代原有的方向选择逻辑）
     target_outcome = winning_dir
 
-    conservative_exp = float(config.get("last_minute.conservative_max_exposure", 10.0))
     max_exp = float(config.get("last_minute.max_tail_exposure", 40.0))
     tail_formula = min(
         max_exp,

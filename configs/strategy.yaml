@@ -195,7 +195,7 @@ stop_loss:
   phase_3_stop_loss_action_fraction: 0.80     # phase 3 部分止损
 
   # 阶段4（240–290s）：临近结束，更激进止损
-  phase_4_near_zero_price: 0.08               # 条件A 提高阈值（允许更早识别失败方向）
+  phase_4_near_zero_price: 0.1               # 条件A 提高阈值（允许更早识别失败方向）
   phase_4_stop_loss_pct: 0.08                 # 条件B 浮亏%阈值（8%，更激进）
   phase_4_min_hold_seconds: 0                # 条件B：进入阶段4 后至少经过秒数
   phase_4_stop_loss_action_fraction: 1.0      # phase 4 全平
@@ -228,17 +228,12 @@ stop_loss:
   stop_loss_pct: 0.12              # 全局止损%兜底（替代旧值 0.02）
   high_vol_stop_loss_pct: 0.01    # 旧版高波动%阈值（保留供其他引用处使用）
 last_minute:
-  last_minute_min_confidence: 0.9            # 尾盘最小置信度0.9
+  # 与文档第四阶段/第六节一致：方向 = 份额≥另一侧×ratio，否则用市价较高侧；与 tail 目标仓位的浮盈比例调整配合
+  last_minute_min_confidence: 0.85           # 略低于 0.9 可减少误拒；仍高于一般入场
   tail_profit_scale: 0.35                    # 尾盘利润比例0.35
   tail_volatility_scale: 14                  # 尾盘波动率比例14
   max_tail_exposure: 25.0                    # 尾盘最大敞口25.0
-  # 浮盈较多一侧份额需 >= 另一侧 * ratio；1.0 表示不启用。平局时按 up/down 市价较高者为「优势侧」。
-  preferred_leg_min_ratio: 1.2                # 优势侧份额至少为另一侧的1.2倍才满足「偏一边」
-  # A+C联合方案：第四阶段方向确认参数
-  direction_ratio_threshold: 1.5         # 优势侧仓位价值 ≥ 另一侧 × 此值
-  pnl_ratio_threshold: 2.0               # 优势侧浮盈 > 劣势侧浮盈 × 此值
-  min_trend_strength_for_direction: 0.6  # 趋势强度 ≥ 此值才确认方向
-  conservative_max_exposure: 10.0        # 无法确认方向时的保守最大敞口
+  preferred_leg_min_ratio: 1.2                # 优势侧份额 ≥ 另一侧×此值即定方向；否则按市价决胜
 execution:
   fee_rate: 0.002                               # 手续费率，默认0.2%
   slippage_bps: 5                               # 滑点bps，默认5bps

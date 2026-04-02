@@ -146,17 +146,11 @@ stop_loss:
   stop_loss_pct: 0.12              # 全局止损%兜底（替代旧值 0.02）
   high_vol_stop_loss_pct: 0.01    # 旧版高波动%阈值（保留供其他引用处使用）
 last_minute:
-  last_minute_min_confidence: 0.9
+  last_minute_min_confidence: 0.85
   tail_profit_scale: 0.35
   tail_volatility_scale: 14
   max_tail_exposure: 25.0
-  # 浮盈较多一侧份额需 >= 另一侧 * ratio；1.0 表示不启用。平局时按 up/down 市价较高者为「优势侧」。
   preferred_leg_min_ratio: 1.2
-  # A+C联合方案：第四阶段方向确认参数
-  direction_ratio_threshold: 1.5         # 优势侧仓位价值 ≥ 另一侧 × 此值
-  pnl_ratio_threshold: 2.0               # 优势侧浮盈 > 劣势侧浮盈 × 此值
-  min_trend_strength_for_direction: 0.6  # 趋势强度 ≥ 此值才确认方向
-  conservative_max_exposure: 10.0        # 无法确认方向时的保守最大敞口
 execution:
   fee_rate: 0.002
   slippage_bps: 5                        

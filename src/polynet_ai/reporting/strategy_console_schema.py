@@ -272,11 +272,7 @@ def build_strategy_dashboard_sections() -> list[dict[str, Any]]:
                 _field("last_minute.tail_profit_scale", "盈利放大系数", "", ui="range", min=0.0, max=1.0, step=0.01, risk="medium"),
                 _field("last_minute.tail_volatility_scale", "波动放大系数", "", min=0, max=100, step=1, risk="medium"),
                 _field("last_minute.max_tail_exposure", "尾盘最大敞口", "", ui="range", min=0, max=500, step=1, risk="high"),
-                _field("last_minute.preferred_leg_min_ratio", "优势侧最小份额倍率", "", ui="range", min=1.0, max=3.0, step=0.05, risk="high"),
-                _field("last_minute.direction_ratio_threshold", "方向确认·仓位倍率", "", ui="range", min=1.0, max=5.0, step=0.1, risk="high"),
-                _field("last_minute.pnl_ratio_threshold", "方向确认·浮盈倍率", "", ui="range", min=1.0, max=5.0, step=0.1, risk="high"),
-                _field("last_minute.min_trend_strength_for_direction", "方向确认·最小趋势强度", "", ui="range", min=0.0, max=1.0, step=0.01, risk="high"),
-                _field("last_minute.conservative_max_exposure", "无法确认方向时最大敞口", "", ui="range", min=0, max=200, step=1, risk="high"),
+                _field("last_minute.preferred_leg_min_ratio", "优势侧最小份额倍率", "≥另一侧×此值定方向，否则按市价较高侧。", ui="range", min=1.0, max=3.0, step=0.05, risk="high"),
             ],
         },
         {
