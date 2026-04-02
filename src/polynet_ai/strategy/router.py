@@ -152,6 +152,20 @@ class StrategyRouter:
         if not candidates:
             return DecisionOutcome(selected=None, candidates=[])
 
+        guard_fallback = self._fallback_buy_for_low_balance(candidates, features, phase)
+        if guard_fallback is not None:
+            fallback_scope = str(guard_fallback.metadata.get("_rule_scope", ""))
+            fallback_scoped_candidates = [
+                item
+                for item in candidates
+                if str(item.metadata.get("_rule_scope", "")) == fallback_scope
+            ]
+            fallback_scoped_candidates.sort(key=lambda item: (item.priority, -item.shares))
+            return DecisionOutcome(
+                selected=guard_fallback,
+                candidates=fallback_scoped_candidates,
+            )
+
         # 仅允许“规则内候选”：锁定最优先候选所属规则作用域，
         # 回退仅在该规则作用域内进行，不跨规则尝试。
         top_scope = str(candidates[0].metadata.get("_rule_scope", ""))
@@ -165,6 +179,28 @@ class StrategyRouter:
             selected=scoped_candidates[0] if scoped_candidates else None,
             candidates=scoped_candidates,
         )
+
+    def _fallback_buy_for_low_balance(
+        self,
+        candidates: list[OrderIntent],
+        features: FeatureSnapshot,
+        phase: int,
+    ) -> OrderIntent | None:
+        # 阶段1~3防止方向持仓被卖到 0：低仓位时若首选为卖出，回退到同方向买入规则。
+        if phase < 1 or phase > 3 or not candidates:
+            return None
+        top = candidates[0]
+        if top.action != "sell":
+            return None
+
+        held = features.up_held if top.outcome == "up" else features.down_held
+        if held > 5.0:
+            return None
+
+        for item in candidates[1:]:
+            if item.action == "buy" and item.outcome == top.outcome:
+                return item
+        return None
 
     def _rule_spec_enabled(self, path: tuple[str, ...], phase: int) -> bool:
         if path == ("last_minute",):

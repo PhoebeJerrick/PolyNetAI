@@ -63,6 +63,15 @@ trend:
 grid:
   grid_low_percentile: 0.25
   grid_high_percentile: 0.75
+  # 分阶段阈值（未配置时自动回退到全局 grid_low/high_percentile）
+  phase_1_low_percentile: 0.25
+  phase_1_high_percentile: 0.75
+  phase_2_low_percentile: 0.25
+  phase_2_high_percentile: 0.75
+  phase_3_low_percentile: 0.25
+  phase_3_high_percentile: 0.75
+  phase_4_low_percentile: 0.25
+  phase_4_high_percentile: 0.75
   grid_exit_fraction: 0.25
   # 周期剩余时间（秒）<= 该值时禁用网格买卖；不配置则仅受 is_last_minute 等对入场的限制
   disable_within_seconds_before_end: 50

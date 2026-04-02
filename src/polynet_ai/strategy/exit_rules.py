@@ -29,6 +29,22 @@ def _sell_min_order(config: StrategyConfig) -> float:
     return max(0.0, float(raw))
 
 
+def _grid_phase_percentiles(config: StrategyConfig, phase: int) -> tuple[float, float]:
+    low = float(
+        config.get(
+            f"grid.phase_{phase}_low_percentile",
+            config.get("grid.grid_low_percentile", 0.25),
+        )
+    )
+    high = float(
+        config.get(
+            f"grid.phase_{phase}_high_percentile",
+            config.get("grid.grid_high_percentile", 0.75),
+        )
+    )
+    return low, high
+
+
 def _stop_loss_shares(
     *,
     held: float,
@@ -380,15 +396,13 @@ def grid_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderI
         return []
     phase = determine_phase(features.cycle_elapsed_seconds, config)
     grid_pri = int(config.priority_for("grid", phase))
-    low = float(config.get("grid.grid_low_percentile", 0.25))
-    high = float(config.get("grid.grid_high_percentile", 0.75))
+    low, high = _grid_phase_percentiles(config, phase)
     grid_exit_fraction = float(config.get("grid.grid_exit_fraction", 0.25))
-    intents: list[OrderIntent] = []
     infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
     up_ref = outcome_reference_price(features, "up", infer_missing_with_binary_complement=infer_missing)
     down_ref = outcome_reference_price(features, "down", infer_missing_with_binary_complement=infer_missing)
     if features.price_percentile >= high and _held_up(features) > 0:
-        intents.append(
+        return [
             OrderIntent(
                 market_id=features.market_id,
                 cycle_id=features.cycle_id,
@@ -397,12 +411,12 @@ def grid_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderI
                 shares=max(0.0, _held_up(features) * grid_exit_fraction),
                 reference_price=up_ref,
                 category="grid",
-                reason="震荡区间高位卖出 Up，完成网格循环",
+                reason=f"震荡区间高位卖出 Up，完成网格循环（阶段{phase}）",
                 priority=grid_pri,
             )
-        )
+        ]
     if features.price_percentile <= low and _held_down(features) > 0:
-        intents.append(
+        return [
             OrderIntent(
                 market_id=features.market_id,
                 cycle_id=features.cycle_id,
@@ -411,11 +425,11 @@ def grid_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderI
                 shares=max(0.0, _held_down(features) * grid_exit_fraction),
                 reference_price=down_ref,
                 category="grid",
-                reason="震荡区间低位卖出 Down，完成网格循环",
+                reason=f"震荡区间低位卖出 Down，完成网格循环（阶段{phase}）",
                 priority=grid_pri,
             )
-        )
-    return [intent for intent in intents if intent.shares > 0]
+        ]
+    return []
 
 
 def mean_reversion_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:

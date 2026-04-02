@@ -26,6 +26,7 @@ from polynet_ai.strategy.spec import (  # noqa: E402
 from scripts.build_batch_replay_performance_report import (  # noqa: E402
     _cleanup_batch_replay_markdown,
     build_performance_report_zh,
+    resolve_phase_end_seconds,
     write_batch_trade_process_zh,
 )
 from scripts.run_recorded_live_paper import (  # noqa: E402
@@ -456,6 +457,7 @@ def run_batch_replay(
         report_name_prefix=report_name_prefix,
         capital_reset_mode=capital_reset_mode,
         starting_cash=starting_cash,
+        phase_end_seconds=resolve_phase_end_seconds(config_path=config_path),
     )
     _cleanup_batch_replay_markdown(output_resolved)
 

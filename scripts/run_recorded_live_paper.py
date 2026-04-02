@@ -25,6 +25,7 @@ try:
     from scripts.build_batch_replay_performance_report import (
         _cleanup_batch_replay_markdown,
         build_performance_report_zh,
+        DEFAULT_PHASE_END_SECONDS,
         write_batch_trade_process_zh,
     )
 except ModuleNotFoundError:
@@ -32,6 +33,7 @@ except ModuleNotFoundError:
     from build_batch_replay_performance_report import (
         _cleanup_batch_replay_markdown,
         build_performance_report_zh,
+        DEFAULT_PHASE_END_SECONDS,
         write_batch_trade_process_zh,
     )
 
@@ -41,6 +43,18 @@ def resolve_position_value_denominator_from_config(config) -> float:
     if value <= 1e-12:
         value = 85.0
     return value
+
+
+def resolve_phase_end_seconds_from_config(config) -> tuple[float, float, float]:
+    try:
+        e1 = float(config.get("cycle.phase_end_seconds_1", DEFAULT_PHASE_END_SECONDS[0]))
+        e2 = float(config.get("cycle.phase_end_seconds_2", DEFAULT_PHASE_END_SECONDS[1]))
+        e3 = float(config.get("cycle.phase_end_seconds_3", DEFAULT_PHASE_END_SECONDS[2]))
+    except (TypeError, ValueError):
+        return DEFAULT_PHASE_END_SECONDS
+    if not (0.0 < e1 < e2 < e3):
+        return DEFAULT_PHASE_END_SECONDS
+    return (e1, e2, e3)
 
 
 def parse_args() -> argparse.Namespace:
@@ -435,6 +449,7 @@ def _write_sim_batch_reports(
     capital_reset_mode: str,
     starting_cash: float,
     position_value_denominator: float = 1000.0,
+    phase_end_seconds: tuple[float, float, float] = DEFAULT_PHASE_END_SECONDS,
     include_performance_report: bool = True,
     include_trade_process: bool = True,
 ) -> tuple[Path | None, Path | None]:
@@ -471,6 +486,7 @@ def _write_sim_batch_reports(
             capital_reset_mode=capital_reset_mode,
             starting_cash=starting_cash,
             position_value_denominator=position_value_denominator,
+            phase_end_seconds=phase_end_seconds,
         )
         _cleanup_batch_replay_markdown(out_dir)
     return perf_xlsx, trade_xlsx
@@ -596,6 +612,7 @@ def main_streaming(args: argparse.Namespace | None = None) -> int:
     print(f"\n[3/5] 开始逐周期流式处理（共 {len(cycle_dirs)} 个周期）...")
     _cfg = load_strategy_config(args.config)
     position_value_denominator = resolve_position_value_denominator_from_config(_cfg)
+    phase_end_seconds = resolve_phase_end_seconds_from_config(_cfg)
     _pwd = resolve_post_window_start_delay_seconds(
         config=_cfg,
         cli_seconds=args.post_window_start_delay_seconds,
@@ -755,6 +772,7 @@ def main_streaming(args: argparse.Namespace | None = None) -> int:
                 capital_reset_mode=args.capital_reset_mode,
                 starting_cash=args.starting_cash,
                 position_value_denominator=position_value_denominator,
+                phase_end_seconds=phase_end_seconds,
             )
             _cleanup_batch_replay_markdown(output_dir)
             print(f"  ✓ 总绩效报告 (Excel): {perf_xlsx}")
@@ -836,6 +854,7 @@ def main(args: argparse.Namespace | None = None) -> int:
     print(f"\n[2/5] 初始化回放引擎...")
     _cfg = load_strategy_config(args.config)
     position_value_denominator = resolve_position_value_denominator_from_config(_cfg)
+    phase_end_seconds = resolve_phase_end_seconds_from_config(_cfg)
     engine = ReplayEngine.from_yaml(
         args.config,
         starting_cash=args.starting_cash,
@@ -899,6 +918,7 @@ def main(args: argparse.Namespace | None = None) -> int:
             capital_reset_mode=args.capital_reset_mode,
             starting_cash=args.starting_cash,
             position_value_denominator=position_value_denominator,
+            phase_end_seconds=phase_end_seconds,
             include_performance_report=include_performance_report,
             include_trade_process=include_trade_process,
         )

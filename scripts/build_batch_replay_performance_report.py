@@ -50,6 +50,7 @@ from polynet_ai.reporting.excel_export import (
 
 _TRADE_PROCESS_ELAPSED_COL = "下注时间距开盘差(分,秒)"
 DEFAULT_POSITION_VALUE_DENOMINATOR = 85.0
+DEFAULT_PHASE_END_SECONDS: tuple[float, float, float] = (70.0, 160.0, 240.0)
 
 
 def _cycle_starts_from_full_decision_frame(full: pd.DataFrame) -> pd.DataFrame:
@@ -150,6 +151,34 @@ def resolve_position_value_denominator(
     return DEFAULT_POSITION_VALUE_DENOMINATOR
 
 
+def resolve_phase_end_seconds(
+    *,
+    config_path: str | Path = "configs/strategy.yaml",
+) -> tuple[float, float, float]:
+    """从配置读取阶段边界（严格递增），失败时回退默认值。"""
+    cfg_path = Path(config_path)
+    if not cfg_path.exists():
+        return DEFAULT_PHASE_END_SECONDS
+    try:
+        data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return DEFAULT_PHASE_END_SECONDS
+    if not isinstance(data, dict):
+        return DEFAULT_PHASE_END_SECONDS
+    cycle = data.get("cycle", {})
+    if not isinstance(cycle, dict):
+        return DEFAULT_PHASE_END_SECONDS
+    try:
+        e1 = float(cycle.get("phase_end_seconds_1", DEFAULT_PHASE_END_SECONDS[0]))
+        e2 = float(cycle.get("phase_end_seconds_2", DEFAULT_PHASE_END_SECONDS[1]))
+        e3 = float(cycle.get("phase_end_seconds_3", DEFAULT_PHASE_END_SECONDS[2]))
+    except (TypeError, ValueError):
+        return DEFAULT_PHASE_END_SECONDS
+    if not (0.0 < e1 < e2 < e3):
+        return DEFAULT_PHASE_END_SECONDS
+    return (e1, e2, e3)
+
+
 def _compute_max_drawdown(profits: list[float]) -> float:
     if not profits:
         return 0.0
@@ -247,6 +276,28 @@ def _infer_cycle_length_seconds(cycle_slug: object) -> int:
     if m:
         return int(m.group(1)) * 60
     return 300
+
+
+def _phase_label_for_elapsed_seconds(
+    elapsed_seconds: float,
+    cycle_length_seconds: int,
+    *,
+    phase_end_seconds: tuple[float, float, float] = DEFAULT_PHASE_END_SECONDS,
+) -> str:
+    """按周期进度切分四段，生成轻量阶段标签（P1~P4，便于大数据筛选）。"""
+    if cycle_length_seconds <= 0:
+        cycle_length_seconds = 300
+    if pd.isna(elapsed_seconds):
+        return ""
+    sec = max(0.0, min(float(elapsed_seconds), float(cycle_length_seconds)))
+    e1, e2, e3 = phase_end_seconds
+    if sec <= e1:
+        return "P1"
+    if sec <= e2:
+        return "P2"
+    if sec <= e3:
+        return "P3"
+    return "P4"
 
 
 def _is_up_outcome(value: object) -> bool:
@@ -595,6 +646,8 @@ def _tracker_compute_args(
 def _batch_replay_decisions_to_tracker_input(
     cycle_df: pd.DataFrame,
     decision_df: pd.DataFrame,
+    *,
+    phase_end_seconds: tuple[float, float, float] = DEFAULT_PHASE_END_SECONDS,
 ) -> pd.DataFrame:
     """
     将批量回放的 cycle / decision 合并为 analyze_polymarket_tracker.compute 所需的宽表。
@@ -658,6 +711,17 @@ def _batch_replay_decisions_to_tracker_input(
     )
     decision_reason = infer_decision_reason(dec)
 
+    elapsed_seconds = (dec["timestamp"] - dec["_cycle_start"]).dt.total_seconds()
+    cycle_len = dec["_pid"].map(_infer_cycle_length_seconds).astype(float)
+    phase_col = [
+        _phase_label_for_elapsed_seconds(
+            el,
+            int(cl) if pd.notna(cl) else 300,
+            phase_end_seconds=phase_end_seconds,
+        )
+        for el, cl in zip(elapsed_seconds, cycle_len)
+    ]
+
     raw = pd.DataFrame(
         {
             "下注时间距开盘差(分，秒)": [
@@ -665,6 +729,7 @@ def _batch_replay_decisions_to_tracker_input(
             ],
             "市场标题": dec["market_id"],
             "时间周期": period,
+            "阶段": phase_col,
             "结果代币类型": dec.get("selected_outcome", pd.Series(dtype=object)).fillna("").astype(str),
             "操作方向": dec.get("selected_action", pd.Series(dtype=object)).fillna("").astype(str),
             "决策原因": decision_reason,
@@ -769,6 +834,8 @@ def _append_tracker_style_sheet(
         _tracker_compute_args(position_value_denominator=position_value_denominator),
     )
     proc = _align_tracker_subtotals_with_cycle_snapshot(proc, cycle_df)
+    if "市场标题" in proc.columns:
+        proc = proc.drop(columns=["市场标题"])
     proc.to_excel(writer, sheet_name=name, index=False)
     apt.format_ws(writer.sheets[name], meta.get("marker_col"))
 
@@ -814,6 +881,7 @@ def _write_performance_report_xlsx(
     tail_overview_rows: list[tuple[str, object]] | None = None,
     report_source: str = "",
     position_value_denominator: float = DEFAULT_POSITION_VALUE_DENOMINATOR,
+    phase_end_seconds: tuple[float, float, float] = DEFAULT_PHASE_END_SECONDS,
 ) -> None:
     overview_rows: list[tuple[str, object]] = []
     if report_source:
@@ -875,7 +943,11 @@ def _write_performance_report_xlsx(
         )
 
     xlsx_path.parent.mkdir(parents=True, exist_ok=True)
-    tracker_raw = _batch_replay_decisions_to_tracker_input(cycle_df, decision_df)
+    tracker_raw = _batch_replay_decisions_to_tracker_input(
+        cycle_df,
+        decision_df,
+        phase_end_seconds=phase_end_seconds,
+    )
     with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
         overview_df.to_excel(writer, sheet_name="概览", index=False)
         enriched_summary.to_excel(writer, sheet_name="分周期累计盈亏", index=False)
@@ -932,6 +1004,7 @@ def build_performance_report_zh(
     capital_reset_mode: str = "cumulative",
     starting_cash: float | None = None,
     position_value_denominator: float = DEFAULT_POSITION_VALUE_DENOMINATOR,
+    phase_end_seconds: tuple[float, float, float] = DEFAULT_PHASE_END_SECONDS,
 ) -> Path:
     direction_df = _summarize_direction_distribution(decision_df)
     winner_df = _value_counts_frame(cycle_df.get("winner", pd.Series(dtype=object)), "winner")
@@ -1001,6 +1074,7 @@ def build_performance_report_zh(
         tail_overview_rows=tail_overview,
         report_source=report_source,
         position_value_denominator=position_value_denominator,
+        phase_end_seconds=phase_end_seconds,
     )
 
     return report_xlsx
@@ -1228,6 +1302,7 @@ def build_report(
             config_path=config_path,
             explicit=position_value_denominator,
         ),
+        phase_end_seconds=resolve_phase_end_seconds(config_path=config_path),
     )
     _cleanup_batch_replay_markdown(output_path)
     return report_path
