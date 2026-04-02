@@ -413,6 +413,20 @@ def _build_cycle_price_frame(
     return result[columns]
 
 
+def _short_cycle_label_for_chart(cycle_slug: object) -> str:
+    """图表标题用短名：路径取最后一段；若该段以 ``-`` 分隔且末段为纯数字（如开盘 epoch）则只保留该数字。"""
+    s = str(cycle_slug or "").strip()
+    if not s:
+        return ""
+    base = s.replace("\\", "/").rstrip("/").split("/")[-1]
+    if not base:
+        return s
+    tail = base.split("-")[-1]
+    if tail.isdigit():
+        return tail
+    return base
+
+
 def _append_cycle_price_charts(
     ws,
     cycle_price_df: pd.DataFrame,
@@ -442,7 +456,7 @@ def _append_cycle_price_charts(
             row_end += 1
 
         chart = LineChart()
-        chart.title = f"{title_prefix} - {cycle_value}"
+        chart.title = f"{title_prefix}-{_short_cycle_label_for_chart(cycle_value)}"
         chart.y_axis.title = "价格"
         chart.x_axis.title = "周期内秒数"
         chart.height = 6.5
