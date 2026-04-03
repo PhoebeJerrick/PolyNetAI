@@ -392,9 +392,50 @@ def hedge_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[Order
 def grid_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
     if rule_disabled_in_cycle_tail(features, config, "grid"):
         return []
-    if features.market_regime != "range":
-        return []
     phase = determine_phase(features.cycle_elapsed_seconds, config)
+    if features.market_regime != "range":
+        # V5 语义：在“潜在优势侧”阶段允许用 grid 做价差/做 T。
+        # 仅在配置声明的阶段启用（默认仍严格 range）。
+        allow_raw = config.get("grid.allow_in_trend_phases", None)
+        allow_set: set[int] = set()
+        if isinstance(allow_raw, list):
+            for x in allow_raw:
+                try:
+                    allow_set.add(int(x))
+                except (TypeError, ValueError):
+                    continue
+        elif isinstance(allow_raw, str):
+            for part in allow_raw.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    allow_set.add(int(part))
+                except ValueError:
+                    continue
+        if phase not in allow_set:
+            return []
+
+    # Hotfix: 只允许网格在“优势腿”（当前 net_direction 对应的 outcome）上做卖出T。
+    align_raw = config.get("grid.enforce_net_direction_alignment_in_phases", None)
+    align_set: set[int] = set()
+    if isinstance(align_raw, list):
+        for x in align_raw:
+            try:
+                align_set.add(int(x))
+            except (TypeError, ValueError):
+                continue
+    elif isinstance(align_raw, str):
+        for part in align_raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                align_set.add(int(part))
+            except ValueError:
+                continue
+    if phase in align_set and features.net_direction not in {"Up", "Down"}:
+        return []
     grid_pri = int(config.priority_for("grid", phase))
     low, high = _grid_phase_percentiles(config, phase)
     grid_exit_fraction = float(config.get("grid.grid_exit_fraction", 0.25))
@@ -402,6 +443,8 @@ def grid_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderI
     up_ref = outcome_reference_price(features, "up", infer_missing_with_binary_complement=infer_missing)
     down_ref = outcome_reference_price(features, "down", infer_missing_with_binary_complement=infer_missing)
     if features.price_percentile >= high and _held_up(features) > 0:
+        if phase in align_set and features.net_direction != "Up":
+            return []
         return [
             OrderIntent(
                 market_id=features.market_id,
@@ -416,6 +459,8 @@ def grid_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderI
             )
         ]
     if features.price_percentile <= low and _held_down(features) > 0:
+        if phase in align_set and features.net_direction != "Down":
+            return []
         return [
             OrderIntent(
                 market_id=features.market_id,

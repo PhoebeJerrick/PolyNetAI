@@ -206,6 +206,26 @@ def hedge_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Ord
     infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
     ref = outcome_reference_price(features, opposite, infer_missing_with_binary_complement=infer_missing)
     phase = determine_phase(features.cycle_elapsed_seconds, config)
+    # Hotfix: 避免在亏损周期里继续对冲“亏损腿”，导致在 P3/P4 出现反复做T式回补。
+    disable_raw = config.get("exposure.hedge_disable_when_cycle_net_profit_negative_in_phases", None)
+    disable_set: set[int] = set()
+    if isinstance(disable_raw, list):
+        for x in disable_raw:
+            try:
+                disable_set.add(int(x))
+            except (TypeError, ValueError):
+                continue
+    elif isinstance(disable_raw, str):
+        for part in disable_raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                disable_set.add(int(part))
+            except ValueError:
+                continue
+    if phase in disable_set and features.cycle_net_profit < 0:
+        return []
     return [
         OrderIntent(
             market_id=features.market_id,
@@ -228,6 +248,47 @@ def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Orde
     if features.is_last_minute:
         return []
     if features.market_regime != "range":
+        # V5 语义：在“潜在优势侧”阶段允许用 grid 做价差/做 T。
+        # 仅在配置声明的阶段启用（默认仍严格 range）。
+        allow_raw = config.get("grid.allow_in_trend_phases", None)
+        allow_set: set[int] = set()
+        if isinstance(allow_raw, list):
+            for x in allow_raw:
+                try:
+                    allow_set.add(int(x))
+                except (TypeError, ValueError):
+                    continue
+        elif isinstance(allow_raw, str):
+            for part in allow_raw.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    allow_set.add(int(part))
+                except ValueError:
+                    continue
+        if phase not in allow_set:
+            return []
+
+    # Hotfix: 只允许网格在“优势腿”（当前 net_direction 对应的 outcome）上做T。
+    align_raw = config.get("grid.enforce_net_direction_alignment_in_phases", None)
+    align_set: set[int] = set()
+    if isinstance(align_raw, list):
+        for x in align_raw:
+            try:
+                align_set.add(int(x))
+            except (TypeError, ValueError):
+                continue
+    elif isinstance(align_raw, str):
+        for part in align_raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                align_set.add(int(part))
+            except ValueError:
+                continue
+    if phase in align_set and features.net_direction not in {"Up", "Down"}:
         return []
     # 首单由 opening_entries 负责；grid 仅在已有至少一笔策略成交后介入
     if features.strategy_trades == 0:
@@ -238,6 +299,8 @@ def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Orde
     pri = int(config.priority_for("grid", phase))
     low, high = _grid_phase_percentiles(config, phase)
     if features.price_percentile <= low:
+        if phase in align_set and features.net_direction != "Up":
+            return []
         ref = outcome_reference_price(features, "up", infer_missing_with_binary_complement=infer_missing)
         return [
             OrderIntent(
@@ -253,6 +316,8 @@ def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Orde
             )
         ]
     if features.price_percentile >= high:
+        if phase in align_set and features.net_direction != "Down":
+            return []
         ref = outcome_reference_price(features, "down", infer_missing_with_binary_complement=infer_missing)
         return [
             OrderIntent(
