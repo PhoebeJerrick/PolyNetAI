@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from polynet_ai.domain.models import FeatureSnapshot, OrderIntent, Outcome
-from polynet_ai.strategy.cycle_windows import determine_phase, rule_disabled_in_cycle_tail
+from polynet_ai.strategy.cycle_windows import (
+    determine_phase,
+    grid_align_net_direction_for_phase,
+    rule_disabled_in_cycle_tail,
+)
 from polynet_ai.strategy.spec import StrategyConfig
 from polynet_ai.strategy.price_reference import outcome_reference_price
 
@@ -193,6 +197,7 @@ def trend_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Ord
 
 
 def hedge_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
+    """净敞口过大时买入**对冲方向**（``opposite``）：与**非对冲方向**（``net_direction`` 偏多侧）相反的一腿。"""
     if features.is_last_minute:
         return []
     trigger = float(config.get("exposure.hedge_trigger_value", 50.0))
@@ -200,13 +205,14 @@ def hedge_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Ord
     if exposure < trigger or features.net_direction in {"空仓", "平衡"}:
         return []
 
+    # net_direction → 非对冲方向；opposite → 对冲方向（买入）
     opposite = "down" if features.net_direction == "Up" else "up"
     excess = max(0.0, exposure - trigger)
     size = _base_size(config, features) + excess * float(config.get("exposure.hedge_scale", 0.15))
     infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
     ref = outcome_reference_price(features, opposite, infer_missing_with_binary_complement=infer_missing)
     phase = determine_phase(features.cycle_elapsed_seconds, config)
-    # Hotfix: 避免在亏损周期里继续对冲“亏损腿”，导致在 P3/P4 出现反复做T式回补。
+    # Hotfix: 亏损周期在指定阶段不再买入对冲方向，避免在非对冲方向已亏时反复回补对冲腿、形成逆 T。
     disable_raw = config.get("exposure.hedge_disable_when_cycle_net_profit_negative_in_phases", None)
     disable_set: set[int] = set()
     if isinstance(disable_raw, list):
@@ -270,7 +276,7 @@ def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Orde
         if phase not in allow_set:
             return []
 
-    # Hotfix: 只允许网格在“优势腿”（当前 net_direction 对应的 outcome）上做T。
+    # P3/P4：网格 T 需与市价判定的「优势侧」对齐（见 grid_align_net_direction_for_phase）。
     align_raw = config.get("grid.enforce_net_direction_alignment_in_phases", None)
     align_set: set[int] = set()
     if isinstance(align_raw, list):
@@ -288,7 +294,8 @@ def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Orde
                 align_set.add(int(part))
             except ValueError:
                 continue
-    if phase in align_set and features.net_direction not in {"Up", "Down"}:
+    grid_align_dir = grid_align_net_direction_for_phase(features, config, phase)
+    if phase in align_set and grid_align_dir not in {"Up", "Down"}:
         return []
     # 首单由 opening_entries 负责；grid 仅在已有至少一笔策略成交后介入
     if features.strategy_trades == 0:
@@ -299,7 +306,7 @@ def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Orde
     pri = int(config.priority_for("grid", phase))
     low, high = _grid_phase_percentiles(config, phase)
     if features.price_percentile <= low:
-        if phase in align_set and features.net_direction != "Up":
+        if phase in align_set and grid_align_dir != "Up":
             return []
         ref = outcome_reference_price(features, "up", infer_missing_with_binary_complement=infer_missing)
         return [
@@ -316,7 +323,7 @@ def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Orde
             )
         ]
     if features.price_percentile >= high:
-        if phase in align_set and features.net_direction != "Down":
+        if phase in align_set and grid_align_dir != "Down":
             return []
         ref = outcome_reference_price(features, "down", infer_missing_with_binary_complement=infer_missing)
         return [

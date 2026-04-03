@@ -10,7 +10,7 @@ cycle:
   phase_end_seconds_3: 240                 # 第三阶段结束时间240秒
   # 每个时间桶（如 btc-updown-5m-<unix>）绝对开始后，推迟多少秒再把成交流喂给策略/规则。
   # 模拟下单、实盘验证、批量回放、单周期复盘均读取此项；命令行传参可覆盖。
-  post_window_start_delay_seconds: 1.0    # 后窗口开始延迟10秒
+  post_window_start_delay_seconds: 10.0    # 后窗口开始延迟10秒
 batch_replay:
   # 处理模式：per-cycle（逐周期独立回放，默认）| merged（合并事件流回放）
   processing_mode: per-cycle                # 逐周期独立回放
@@ -29,7 +29,7 @@ dynamic_priority:
   phase_2_position_threshold: 0.40   # 第二阶段仓位 > 此值时提升减仓优先级
   phase_2_low_position_threshold: 0.25   # 第二阶段仓位 < 此值时提升加仓优先级（与 phase_2_boost 共用幅度）
   phase_2_boost: 15 
-  phase_3_position_threshold: 0.55   # 第三阶段仓位 < 此值时提升加仓优先级（热修：放宽网格卖让位抑制）
+  phase_3_position_threshold: 0.80   # 第三阶段仓位 < 此值时提升加仓优先级（热修：放宽网格卖让位抑制）
   phase_3_trend_boost: 25            # 趋势加仓优先级提升幅度
   phase_3_grid_boost: 15             # 网格加仓优先级提升幅度
   phase_3_hedge_boost: 18            # 对冲加仓优先级提升幅度
@@ -169,8 +169,10 @@ grid:
   # V5 语义：在优势方向/潜在获胜阶段（不局限 range），允许 grid 做价差/做 T。
   # 仅在配置的阶段启用（默认仍严格 range）。
   allow_in_trend_phases: [3, 4]
-  # Hotfix: 只允许 grid 在当前优势腿（由 net_direction 给出）上做T
+  # P3/P4：网格仅在与「优势侧」对齐的腿上做 T；优势侧由两侧市价与该阶段阈值比较判定（见 phase_*_advantage_price_threshold）。
   enforce_net_direction_alignment_in_phases: [3, 4]
+  phase_3_advantage_price_threshold: 0.55   # 该侧市价 > 此值视为更有潜力获胜（P3）
+  phase_4_advantage_price_threshold: 0.65   # P4 阈值（通常高于 P3，方向要求更明确）
 mean_reversion:
   enabled: true                                # 均值回归启用
   up_buy_deviation: 0.1                         # 上买偏离0.1 用于确认均值回归
@@ -214,7 +216,7 @@ stop_loss:
   phase_3_near_zero_price: 0.06               # 条件A 绝对价格阈值
   phase_3_stop_loss_pct: 0.12                 # 条件B 浮亏%阈值（12%）
   phase_3_min_hold_seconds: 40                # 条件B：进入阶段3 后至少经过秒数
-  phase_3_stop_loss_action_fraction: 0.80     # phase 3 部分止损
+  phase_3_stop_loss_action_fraction: 0.30     # phase 3 部分止损
 
   # 阶段4（240–290s）：临近结束，更激进止损
   phase_4_near_zero_price: 0.1               # 条件A 提高阈值（允许更早识别失败方向）

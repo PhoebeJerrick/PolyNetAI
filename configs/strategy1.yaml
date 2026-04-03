@@ -10,7 +10,7 @@ cycle:
   phase_end_seconds_3: 240                 # 第三阶段结束时间240秒
   # 每个时间桶（如 btc-updown-5m-<unix>）绝对开始后，推迟多少秒再把成交流喂给策略/规则。
   # 模拟下单、实盘验证、批量回放、单周期复盘均读取此项；命令行传参可覆盖。
-  post_window_start_delay_seconds: 1.0    # 后窗口开始延迟10秒
+  post_window_start_delay_seconds: 10.0    # 后窗口开始延迟10秒
 batch_replay:
   # 处理模式：per-cycle（逐周期独立回放，默认）| merged（合并事件流回放）
   processing_mode: per-cycle                # 逐周期独立回放
@@ -169,8 +169,10 @@ grid:
   # V5 语义：在优势方向/潜在获胜阶段（不局限 range），允许 grid 做价差/做 T。
   # 仅在配置的阶段启用（默认仍严格 range）。
   allow_in_trend_phases: [3, 4]
-  # Hotfix: 只允许 grid 在当前优势腿（由 net_direction 给出）上做T
+  # P3/P4：网格仅在与「优势侧」对齐的腿上做 T；优势侧由两侧市价与该阶段阈值比较判定（见 phase_*_advantage_price_threshold）。
   enforce_net_direction_alignment_in_phases: [3, 4]
+  phase_3_advantage_price_threshold: 0.55
+  phase_4_advantage_price_threshold: 0.65
 mean_reversion:
   enabled: true                                # 均值回归启用
   up_buy_deviation: 0.1                         # 上买偏离0.1 用于确认均值回归

@@ -100,6 +100,41 @@ def phase_elapsed_seconds(cycle_elapsed_seconds: float, config: StrategyConfig) 
     return t - e3
 
 
+def grid_align_net_direction_for_phase(
+    features: FeatureSnapshot,
+    config: StrategyConfig,
+    phase: int,
+) -> str:
+    """
+    网格「优势侧」对齐用的方向（与 net_direction 同形："Up"/"Down"/"平衡"/"空仓"）。
+
+    - 阶段 3、4：哪一侧市价 > 该阶段配置的 ``grid.phase_{3,4}_advantage_price_threshold``
+      则视为更有潜力获胜的一侧；若两侧均未过阈值（或异常下双侧均过），则回退为市价更高的一侧。
+    - 其他阶段：沿用 ``features.net_direction``（净持仓方向）。
+    """
+    if phase not in (3, 4):
+        return features.net_direction
+    default_thr = 0.55 if phase == 3 else 0.65
+    key = (
+        "grid.phase_3_advantage_price_threshold"
+        if phase == 3
+        else "grid.phase_4_advantage_price_threshold"
+    )
+    try:
+        thr = float(config.get(key, default_thr))
+    except (TypeError, ValueError):
+        thr = default_thr
+    up_p = float(features.up_last_price)
+    down_p = float(features.down_last_price)
+    up_over = up_p > thr + 1e-12
+    down_over = down_p > thr + 1e-12
+    if up_over and not down_over:
+        return "Up"
+    if down_over and not up_over:
+        return "Down"
+    return "Up" if up_p >= down_p else "Down"
+
+
 def is_rule_enabled_for_phase(
     config: StrategyConfig,
     *,

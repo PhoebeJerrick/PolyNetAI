@@ -3,6 +3,7 @@ from __future__ import annotations
 from polynet_ai.domain.models import FeatureSnapshot, OrderIntent
 from polynet_ai.strategy.cycle_windows import (
     determine_phase,
+    grid_align_net_direction_for_phase,
     phase_elapsed_seconds,
     rule_disabled_in_cycle_tail,
 )
@@ -330,6 +331,7 @@ def stop_loss_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[O
 
 
 def hedge_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
+    """净敞口过大且周期盈利为正时，可卖出**当前浮盈**的 Up 或 Down 仓位以收缩敞口（与「获胜价侧」无关）。"""
     if features.is_last_minute:
         return []
     phase = determine_phase(features.cycle_elapsed_seconds, config)
@@ -344,7 +346,7 @@ def hedge_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[Order
     up_ref = outcome_reference_price(features, "up", infer_missing_with_binary_complement=infer_missing)
     down_ref = outcome_reference_price(features, "down", infer_missing_with_binary_complement=infer_missing)
 
-    # 检查 UP 持仓的对冲 - 使用当前市场价格计算实际盈亏
+    # Up 腿：若相对均价浮盈则卖出一部分，降低净敞口（与 hedge_entries 的「买对冲方向」互补）
     if _held_up(features) > 0 and features.up_avg_price > 0:
         current_price = features.up_last_price
         if current_price > 0:
@@ -365,7 +367,7 @@ def hedge_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[Order
                     )
                 )
 
-    # 检查 DOWN 持仓的对冲 - 使用当前市场价格计算实际盈亏
+    # Down 腿：同上
     if _held_down(features) > 0 and features.down_avg_price > 0:
         current_price = features.down_last_price
         if current_price > 0:
@@ -416,7 +418,7 @@ def grid_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderI
         if phase not in allow_set:
             return []
 
-    # Hotfix: 只允许网格在“优势腿”（当前 net_direction 对应的 outcome）上做卖出T。
+    # P3/P4：网格卖出 T 需与市价判定的「优势侧」对齐（见 grid_align_net_direction_for_phase）。
     align_raw = config.get("grid.enforce_net_direction_alignment_in_phases", None)
     align_set: set[int] = set()
     if isinstance(align_raw, list):
@@ -434,7 +436,8 @@ def grid_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderI
                 align_set.add(int(part))
             except ValueError:
                 continue
-    if phase in align_set and features.net_direction not in {"Up", "Down"}:
+    grid_align_dir = grid_align_net_direction_for_phase(features, config, phase)
+    if phase in align_set and grid_align_dir not in {"Up", "Down"}:
         return []
     grid_pri = int(config.priority_for("grid", phase))
     low, high = _grid_phase_percentiles(config, phase)
@@ -443,7 +446,7 @@ def grid_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderI
     up_ref = outcome_reference_price(features, "up", infer_missing_with_binary_complement=infer_missing)
     down_ref = outcome_reference_price(features, "down", infer_missing_with_binary_complement=infer_missing)
     if features.price_percentile >= high and _held_up(features) > 0:
-        if phase in align_set and features.net_direction != "Up":
+        if phase in align_set and grid_align_dir != "Up":
             return []
         return [
             OrderIntent(
@@ -459,7 +462,7 @@ def grid_exits(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderI
             )
         ]
     if features.price_percentile <= low and _held_down(features) > 0:
-        if phase in align_set and features.net_direction != "Down":
+        if phase in align_set and grid_align_dir != "Down":
             return []
         return [
             OrderIntent(
