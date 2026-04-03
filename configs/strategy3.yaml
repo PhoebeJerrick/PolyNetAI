@@ -29,12 +29,12 @@ dynamic_priority:
   phase_2_position_threshold: 0.40   # 第二阶段仓位 > 此值时提升减仓优先级
   phase_2_low_position_threshold: 0.25   # 第二阶段仓位 < 此值时提升加仓优先级（与 phase_2_boost 共用幅度）
   phase_2_boost: 15 
-  phase_3_position_threshold: 0.75   # 第三阶段仓位 < 此值时提升加仓优先级
+  phase_3_position_threshold: 0.55   # 第三阶段仓位 < 此值时提升加仓优先级（热修：放宽网格卖让位抑制）
   phase_3_trend_boost: 25            # 趋势加仓优先级提升幅度
   phase_3_grid_boost: 15             # 网格加仓优先级提升幅度
   phase_3_hedge_boost: 18            # 对冲加仓优先级提升幅度
-  phase_3_take_profit_sell_deboost: 2   # 第三阶段仓位未达阈值时，止盈卖出轻度降权
-  phase_3_grid_sell_deboost: 1          # 第三阶段仓位未达阈值时，网格卖出轻度降权
+  phase_3_take_profit_sell_deboost: 4   # 第三阶段仓位未达阈值时，止盈卖出更明显降权（热修：给 grid/做 T 腾出优先级）
+  phase_3_grid_sell_deboost: 0          # 第三阶段仓位未达阈值时，网格卖出不额外降权（热修：允许更多优势侧做 T）
   phase_3_buy_deboost_when_full: 16     # 第三阶段仓位达到阈值后，买入规则降权幅度
   phase_3_take_profit_sell_boost_when_full: 10  # 第三阶段仓位达到阈值后，止盈卖出提权
   phase_3_grid_sell_boost_when_full: 7          # 第三阶段仓位达到阈值后，网格卖出提权
@@ -142,6 +142,8 @@ exposure:
   hedge_trigger_value: 12.0                     # 净敞口超过12.0时开始考虑对冲单
   hedge_scale: 0.05                             # 超额敞口的一半换算为对冲目标量
   max_strategy_trades_per_cycle: 80             # 单个5分钟周期内策略成交不超过80次
+  # Hotfix: 在亏损周期里禁止 hedge_entries 继续买入对冲腿，避免“卖出亏损腿后又把它补回来”形成逆向做T。
+  hedge_disable_when_cycle_net_profit_negative_in_phases: [3, 4]
 trend:
   min_trend_strength: 0.5                       # 趋势强度0.5 用于确认方向 ，其中一边（up 或 down）至少占最近(trend_window)成交的 75%.
   trend_price_edge: 0.03                        # 趋势价格边缘0.03 用于确认趋势
@@ -158,11 +160,17 @@ grid:
   phase_2_high_percentile: 0.75
   phase_3_low_percentile: 0.25
   phase_3_high_percentile: 0.75
-  phase_4_low_percentile: 0.01
+  # 热修：P4 放宽“低位买入”条件，增加做 T 的回补机会（对齐 75.85 / 60% / 回撤 30.22 轮次）
+  phase_4_low_percentile: 0.15
   phase_4_high_percentile: 0.75
-  grid_exit_fraction: 0.20                      # 网格退出比例0.25 用于确认网格退出
+  grid_exit_fraction: 0.25                      # 热修：恢复卖出强度（上一轮最佳：利润更高、回撤更低）
   # 周期剩余时间（秒）<= 该值时禁用网格买卖；不配置则仅受 is_last_minute 等对入场的限制
-  disable_within_seconds_before_end: 50          # 周期剩余时间（秒）<= 该值时禁用网格买卖；不配置则仅受 is_last_minute 等对入场的限制
+  disable_within_seconds_before_end: 30          # 热修：P4 给 grid 留出更多执行时间（从 10s 扩到 ~30s）
+  # V5 语义：在优势方向/潜在获胜阶段（不局限 range），允许 grid 做价差/做 T。
+  # 仅在配置的阶段启用（默认仍严格 range）。
+  allow_in_trend_phases: [3, 4]
+  # Hotfix: 只允许 grid 在当前优势腿（由 net_direction 给出）上做T
+  enforce_net_direction_alignment_in_phases: [3, 4]
 mean_reversion:
   enabled: true                                # 均值回归启用
   up_buy_deviation: 0.1                         # 上买偏离0.1 用于确认均值回归
@@ -307,11 +315,11 @@ priorities:
     phase_3:
       risk: 10
       last_minute: 20
-      grid: 38
-      hedge: 48
-      take_profit: 40
-      stop_loss: 44
+      stop_loss: 40
+      hedge: 38
+      take_profit: 44
       opening: 52
+      grid: 58
       mean_reversion: 70
       trend: 42
     phase_4:
