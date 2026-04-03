@@ -251,9 +251,9 @@ last_minute:
 execution:
   fee_rate: 0.002                               # 手续费率，默认0.2%
   slippage_bps: 5                               # 滑点bps，默认5bps
-  min_seconds_between_orders: 2.0               # 两次下单至少间隔2秒（按UP/DOWN方向独立计时）
+  min_seconds_between_orders: 2.5               # 两次下单至少间隔2秒（按UP/DOWN方向独立计时）
   max_same_direction_buy_fills_per_second: 0    # 同1秒内同方向买入成交次数上限（UP/DOWN分别统计），为0，不限制
-  min_same_outcome_price_move_ratio: 0.007      # 同一方向连续下单的价格必须移动至少0.5%，避免超频下单
+  min_same_outcome_price_move_ratio: 0.006      # 同一方向连续下单的价格必须移动至少0.5%，避免超频下单
 
 # 【新增】每日风险管理参数
 daily_limits:
@@ -268,19 +268,19 @@ daily_limits:
     enforce_sell_min_order_size: true      # 卖单也按市场最小下单量约束，默认true
 # 各买入/卖出规则单独喂价：间隔内沿用上次刷新时的「最近价」；0 表示每 tick 用最新价（与旧行为一致）
 rule_price_feed:
-  last_minute:  2                           # 尾盘规则喂价间隔2秒
+  last_minute:  2.5                           # 尾盘规则喂价间隔2秒
   entries:
-    opening: 2                              # 入场opening规则价格缓存间隔2秒
-    hedge: 2                                # 入场hedge规则价格缓存间隔2秒
-    grid: 2                                # 入场grid规则价格缓存间隔2秒
-    mean_reversion: 2                       # 入场mean_reversion规则价格缓存间隔2秒
-    trend: 2                                # 入场trend规则价格缓存间隔2秒
+    opening: 2.5                              # 入场opening规则价格缓存间隔2秒
+    hedge: 2.5                                # 入场hedge规则价格缓存间隔2秒
+    grid: 2.5                                # 入场grid规则价格缓存间隔2秒
+    mean_reversion: 2.5                       # 入场mean_reversion规则价格缓存间隔2秒
+    trend: 2.5                                # 入场trend规则价格缓存间隔2秒
   exits:
-    stop_loss: 2                            # 退出stop_loss规则价格缓存间隔2秒
-    hedge: 2                                # 退出hedge规则价格缓存间隔2秒
-    take_profit: 2                          # 退出take_profit规则价格缓存间隔2秒
-    grid: 2                                 # 退出grid规则价格缓存间隔2秒
-    mean_reversion: 2                       # 退出mean_reversion规则价格缓存间隔2秒
+    stop_loss: 2.5                            # 退出stop_loss规则价格缓存间隔2秒
+    hedge: 2.5                                # 退出hedge规则价格缓存间隔2秒
+    take_profit: 2.5                          # 退出take_profit规则价格缓存间隔2秒
+    grid: 2.5                                 # 退出grid规则价格缓存间隔2秒
+    mean_reversion: 2.5                       # 退出mean_reversion规则价格缓存间隔2秒
 priorities:
   # 各周期阶段独立基础优先级（数值越小越优先）。可按阶段改写；未单独列出的规则可后续在对应 phase_N 下补键。
   by_phase:

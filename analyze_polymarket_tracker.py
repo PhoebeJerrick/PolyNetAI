@@ -2,6 +2,9 @@
 """
 Polymarket 交易明细 Excel 持仓分析 + 盈亏汇总。
 
+在「时间周期」后增加「阶段」列（P1~P4）：由「下注时间距开盘差」解析的已过秒数，按 configs/strategy.yaml
+  中 cycle.phase_end_seconds_* 与周期 slug（如 -5m-）长度切分，口径与 mstart 批量回放绩效表一致。
+
 插入到"成交价格"后的列（若输入中存在）：
   同向成交价波动幅度(%) — 相对本周期内上一次同结果代币成交价的涨跌幅百分比，首笔为空；
   其后为 Up积累份数 / Up的加权均价 / Down积累份数 / Down加权均价 /
@@ -27,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import re
 import sys
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -86,6 +90,9 @@ SETTLEMENT_COLUMNS = ("未平仓UP盈亏", "未平仓Down盈亏", "周期净利�
 SETTLEMENT_META_COLUMNS = ("最终Winner方向",)
 ALL_PNL_COLUMNS = ("Up已成交差价盈亏", "Down已成交差价盈亏", "浮动盈亏") + SETTLEMENT_COLUMNS
 DEFAULT_POSITION_VALUE_DENOMINATOR = 85.0
+# 与 scripts/build_batch_replay_performance_report 中绩效表「阶段」列口径一致
+DEFAULT_PHASE_END_SECONDS: tuple[float, float, float] = (70.0, 160.0, 240.0)
+PHASE_COLUMN = "阶段"
 
 # ── styles ───────────────────────────────────────────────────────────
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="1F4E78")
@@ -137,6 +144,82 @@ COL_FILLS = {
     "Down已成交差价盈亏": DN_PNL_FILL,
     "浮动盈亏": PatternFill(fill_type="solid", fgColor="E7E9FF"),
 }
+
+
+def resolve_phase_end_seconds(*, config_path: str | Path = "configs/strategy.yaml") -> tuple[float, float, float]:
+    """从策略配置 cycle 读取阶段边界；无效时回退默认值（与批量回放绩效表一致）。"""
+    cfg_path = Path(config_path)
+    if not cfg_path.exists():
+        return DEFAULT_PHASE_END_SECONDS
+    try:
+        data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return DEFAULT_PHASE_END_SECONDS
+    if not isinstance(data, dict):
+        return DEFAULT_PHASE_END_SECONDS
+    cycle = data.get("cycle", {})
+    if not isinstance(cycle, dict):
+        return DEFAULT_PHASE_END_SECONDS
+    try:
+        e1 = float(cycle.get("phase_end_seconds_1", DEFAULT_PHASE_END_SECONDS[0]))
+        e2 = float(cycle.get("phase_end_seconds_2", DEFAULT_PHASE_END_SECONDS[1]))
+        e3 = float(cycle.get("phase_end_seconds_3", DEFAULT_PHASE_END_SECONDS[2]))
+    except (TypeError, ValueError):
+        return DEFAULT_PHASE_END_SECONDS
+    if not (0.0 < e1 < e2 < e3):
+        return DEFAULT_PHASE_END_SECONDS
+    return (e1, e2, e3)
+
+
+def infer_cycle_length_seconds(cycle_slug: object) -> int:
+    text = str(cycle_slug or "").lower()
+    m = re.search(r"-(\d+)m-", text)
+    if m:
+        return int(m.group(1)) * 60
+    return 300
+
+
+def phase_label_for_elapsed_seconds(
+    elapsed_seconds: float | None,
+    cycle_length_seconds: int,
+    *,
+    phase_end_seconds: tuple[float, float, float] = DEFAULT_PHASE_END_SECONDS,
+) -> str:
+    if elapsed_seconds is None or (isinstance(elapsed_seconds, float) and math.isnan(elapsed_seconds)):
+        return ""
+    try:
+        if pd.isna(elapsed_seconds):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if cycle_length_seconds <= 0:
+        cycle_length_seconds = 300
+    sec = max(0.0, min(float(elapsed_seconds), float(cycle_length_seconds)))
+    e1, e2, e3 = phase_end_seconds
+    if sec <= e1:
+        return "P1"
+    if sec <= e2:
+        return "P2"
+    if sec <= e3:
+        return "P3"
+    return "P4"
+
+
+def parse_bet_marker_elapsed_seconds(val: object) -> float | None:
+    """从「XmYY秒」类标记解析已过秒数；小计行/空/不可解析返回 None。"""
+    if val is None:
+        return None
+    if isinstance(val, float) and math.isnan(val):
+        return None
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return float(val)
+    s = str(val).strip()
+    if not s or s == "【周期小计】":
+        return None
+    m = re.search(r"(\d+)\s*分\s*(\d{1,2})\s*秒", s)
+    if m:
+        return int(m.group(1)) * 60 + int(m.group(2))
+    return None
 
 
 # ═══════════════════════ Utility helpers ═════════════════════════════
@@ -423,6 +506,20 @@ def compute(df: pd.DataFrame, args: argparse.Namespace) -> tuple[pd.DataFrame, d
         groups[-1],
     )
 
+    phase_ends = resolve_phase_end_seconds(config_path=getattr(args, "config", "configs/strategy.yaml"))
+    if PHASE_COLUMN in df.columns:
+        df = df.drop(columns=[PHASE_COLUMN])
+    elapsed_per_row = df[marker_col].map(parse_bet_marker_elapsed_seconds)
+    phase_values = [
+        phase_label_for_elapsed_seconds(
+            el,
+            infer_cycle_length_seconds(cycle_val),
+            phase_end_seconds=phase_ends,
+        )
+        for el, cycle_val in zip(elapsed_per_row, df[cyc_c])
+    ]
+    df.insert(int(df.columns.get_loc(cyc_c)) + 1, PHASE_COLUMN, phase_values)
+
     bals: dict[tuple, dict[str, float]] = {}
     pnl_s: dict[tuple, dict[str, float]] = {}
 
@@ -564,7 +661,10 @@ def format_ws(ws, marker_col: str | None = None) -> None:
 
     for cell in ws[1]:
         v = cell.value
-        if v in INSERTED_COLUMNS and v not in ALL_PNL_COLUMNS:
+        if v == PHASE_COLUMN:
+            cell.fill = HEADER_FILL
+            cell.font = HEADER_FONT
+        elif v in INSERTED_COLUMNS and v not in ALL_PNL_COLUMNS:
             cell.fill = HEADER_FILL
             cell.font = HEADER_FONT
         elif v in ALL_PNL_COLUMNS:
