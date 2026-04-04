@@ -50,6 +50,10 @@ class FillEvent:
     slippage: float = 0.0
     reason: str = ""
     reserved_cash: float = 0.0
+    # 实盘对账：exchange_get_order / data_api_trades / timeout_estimate 等
+    fill_source: str = ""
+    fill_note: str = ""
+    broker_order_id: str = ""
 
     @property
     def signed_shares(self) -> float:
@@ -141,6 +145,8 @@ class CycleState:
     market_id: str
     cycle_id: str
     cycle_start: datetime | None = None
+    # Gamma conditionId（0x…），来自 WS 成交 metadata；用于结算后 redeem。
+    condition_id: str | None = None
     cycle_end: datetime | None = None
     up_balance: float = 0.0
     down_balance: float = 0.0

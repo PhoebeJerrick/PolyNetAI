@@ -219,6 +219,8 @@ class ReplayEngine:
             "broker_order_id": "",
             "fill_price": 0.0,
             "fill_fee": 0.0,
+            "fill_source": "",
+            "fill_note": "",
             "cycle_net_profit": features.cycle_net_profit,
             "account_cash": self.account.cash,
             "available_cash": self.account.available_cash,
@@ -328,6 +330,10 @@ class ReplayEngine:
                         row["confirmed"] = True
                         row["fill_price"] = execution.fill.price
                         row["fill_fee"] = execution.fill.fee
+                        row["fill_source"] = execution.fill.fill_source or ""
+                        row["fill_note"] = execution.fill.fill_note or ""
+                        if execution.fill.broker_order_id:
+                            row["broker_order_id"] = execution.fill.broker_order_id
                         row["account_cash"] = self.account.cash
                         row["available_cash"] = self.account.available_cash
                     elif execution.status != "filled":
@@ -466,7 +472,8 @@ class ReplayEngine:
             account_cash_display = float(self._equity_curve_cash)
             next_cycle_cash = self.per_cycle_cash if self.per_cycle_cash is not None else self.account.starting_cash
             self.account.cash = float(next_cycle_cash)
-            self.account.reserved_cash = 0.0
+            pending_ctx = self._pending_context()
+            self.account.reserved_cash = float(pending_ctx.get("pending_buy_reserved_cash", 0.0))
         else:
             account_cash_display = float(self.account.cash)
             self._equity_curve_cash = account_cash_display
@@ -474,6 +481,7 @@ class ReplayEngine:
         row = {
             "market_id": state.market_id,
             "cycle_id": state.cycle_id,
+            "condition_id": state.condition_id or "",
             "opening_price": state.opening_price,
             "last_price": state.last_price,
             "high_price": state.high_price,

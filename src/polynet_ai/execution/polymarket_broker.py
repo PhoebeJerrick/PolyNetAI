@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import requests
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import (
     ApiCreds,
@@ -20,6 +21,8 @@ from py_clob_client.clob_types import (
 
 from polynet_ai.adapters.polymarket_live import get_account_env_value
 from polynet_ai.domain.models import ExecutionResult, FillEvent, OrderIntent
+
+DATA_API_BASE = "https://data-api.polymarket.com"
 
 
 @dataclass(slots=True)
@@ -43,6 +46,7 @@ class PendingOrder:
     response: dict[str, Any]
     execution_plan: ExecutionPlan
     record_index: int
+    condition_id: str = ""
     poll_attempts: int = 0
     last_polled_at: datetime | None = None
 
@@ -139,6 +143,7 @@ class PolymarketBroker:
     fee_rate: float = 0.002
     signature_type: int = 2
     account_index: int = 2
+    purse_address: str = ""
     price_buffer_ticks: int = 1
     confirmation_poll_interval_seconds: float = 0.5
     confirmation_timeout_seconds: float = 8.0
@@ -196,6 +201,7 @@ class PolymarketBroker:
             fee_rate=fee_rate,
             signature_type=signature_type,
             account_index=account_index,
+            purse_address=str(funder or "").strip(),
         )
 
     def get_collateral_balance_usdc(self) -> float:
@@ -361,6 +367,7 @@ class PolymarketBroker:
                 response=dict(response),
                 execution_plan=plan,
                 record_index=len(self.submitted_orders) - 1,
+                condition_id=str(intent.metadata.get("condition_id") or "").strip(),
             )
         return ExecutionResult(
             status="submitted",
@@ -395,19 +402,33 @@ class PolymarketBroker:
             except Exception as exc:
                 record["last_confirmation_error"] = str(exc)
                 if self._should_timeout_confirm(pending, timestamp):
-                    fill = self._build_fill_from_pending(pending, timestamp, source="post_order_timeout_fallback")
+                    fill, src = self._resolve_fill_after_timeout(pending, timestamp)
                     record["status"] = "confirmed_timeout_fallback"
                     record["confirmation_state"] = "confirmed"
+                    record["fill_source"] = src
                     confirmed_fills.append(fill)
                     self.pending_orders.pop(order_id, None)
                 continue
 
             record["confirmation_response"] = order_payload
-            status = str((order_payload or {}).get("status") or "").lower()
+            payload_dict = self._coerce_order_payload_dict(order_payload)
+            status = str(payload_dict.get("status") or "").lower()
             if status in {"matched", "filled", "mined", "confirmed"}:
-                fill = self._build_fill_from_pending(pending, timestamp, source="get_order")
+                fill = None
+                if payload_dict:
+                    fill = self._build_fill_from_clob_order_payload(payload_dict, pending, timestamp)
+                if fill is None:
+                    fill = self._build_fill_from_pending(
+                        pending,
+                        timestamp,
+                        fill_source="exchange_get_order_estimate",
+                        fill_note="get_order 状态已成交但缺少可解析成交量，退回 post_order/计划估算",
+                    )
+                else:
+                    fill.fill_note = fill.fill_note or "CLOB get_order 解析成交量价"
                 record["status"] = "confirmed"
                 record["confirmation_state"] = status or "confirmed"
+                record["fill_source"] = fill.fill_source
                 confirmed_fills.append(fill)
                 self.pending_orders.pop(order_id, None)
                 continue
@@ -417,12 +438,46 @@ class PolymarketBroker:
                 self.pending_orders.pop(order_id, None)
                 continue
             if self._should_timeout_confirm(pending, timestamp):
-                fill = self._build_fill_from_pending(pending, timestamp, source="post_order_timeout_fallback")
+                fill, src = self._resolve_fill_after_timeout(pending, timestamp)
                 record["status"] = "confirmed_timeout_fallback"
                 record["confirmation_state"] = status or "timeout_fallback"
+                record["fill_source"] = src
                 confirmed_fills.append(fill)
                 self.pending_orders.pop(order_id, None)
         return confirmed_fills
+
+    @staticmethod
+    def _coerce_order_payload_dict(order_payload: Any) -> dict[str, Any]:
+        if isinstance(order_payload, dict):
+            return order_payload
+        if order_payload is None:
+            return {}
+        model_dump = getattr(order_payload, "model_dump", None)
+        if callable(model_dump):
+            try:
+                dumped = model_dump()
+            except Exception:
+                dumped = None
+            if isinstance(dumped, dict):
+                return dumped
+        raw = getattr(order_payload, "__dict__", None)
+        if isinstance(raw, dict):
+            return raw
+        return {}
+
+    def _resolve_fill_after_timeout(
+        self, pending: PendingOrder, timestamp: datetime
+    ) -> tuple[FillEvent, str]:
+        api_fill = self._try_build_fill_from_data_api(pending, timestamp)
+        if api_fill is not None:
+            return api_fill, api_fill.fill_source
+        est = self._build_fill_from_pending(
+            pending,
+            timestamp,
+            fill_source="timeout_estimate",
+            fill_note="get_order 失败或超时，且 Data API 未匹配到成交；份额/价为 post_order/计划估算，请与交易所对账",
+        )
+        return est, est.fill_source
 
     def _should_timeout_confirm(self, pending: PendingOrder, timestamp: datetime) -> bool:
         return (timestamp - pending.submitted_at).total_seconds() >= self.confirmation_timeout_seconds
@@ -432,7 +487,8 @@ class PolymarketBroker:
         pending: PendingOrder,
         timestamp: datetime,
         *,
-        source: str,
+        fill_source: str,
+        fill_note: str = "",
     ) -> FillEvent:
         response = pending.response or {}
         taking_amount = float(response.get("takingAmount") or 0.0)
@@ -455,6 +511,133 @@ class PolymarketBroker:
             action=pending.intent.action,
             fee=fee,
             slippage=abs(actual_price - pending.intent.reference_price),
-            reason=f"{pending.intent.reason} [{source}]",
+            reason=f"{pending.intent.reason} [{fill_source}]",
             reserved_cash=pending.reserved_cash,
+            fill_source=fill_source,
+            fill_note=fill_note,
+            broker_order_id=pending.order_id,
+        )
+
+    def _build_fill_from_clob_order_payload(
+        self,
+        order_payload: dict[str, Any],
+        pending: PendingOrder,
+        timestamp: datetime,
+    ) -> FillEvent | None:
+        def _f(name: str) -> float:
+            try:
+                return float(order_payload.get(name) or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        size_matched = _f("size_matched") or _f("sizeMatched") or _f("matched_size") or _f("matchedSize")
+        if size_matched <= 0:
+            return None
+        raw_price = (
+            _f("avg_price")
+            or _f("averagePrice")
+            or _f("avgPrice")
+            or _f("price")
+            or pending.execution_plan.estimated_vwap
+        )
+        if raw_price <= 0:
+            return None
+        gross = size_matched * raw_price
+        fee = gross * self.fee_rate
+        return FillEvent(
+            market_id=pending.intent.market_id,
+            cycle_id=pending.intent.cycle_id,
+            timestamp=timestamp,
+            price=raw_price,
+            shares=size_matched,
+            outcome=pending.intent.outcome,
+            action=pending.intent.action,
+            fee=fee,
+            slippage=abs(raw_price - pending.intent.reference_price),
+            reason=f"{pending.intent.reason} [exchange_get_order]",
+            reserved_cash=pending.reserved_cash,
+            fill_source="exchange_get_order",
+            fill_note="",
+            broker_order_id=pending.order_id,
+        )
+
+    @staticmethod
+    def _normalize_trade_ts(raw_ts: int) -> int:
+        ts = int(raw_ts or 0)
+        if ts > 10_000_000_000:
+            return ts // 1000
+        return ts
+
+    def _try_build_fill_from_data_api(
+        self,
+        pending: PendingOrder,
+        poll_timestamp: datetime,
+    ) -> FillEvent | None:
+        user = (self.purse_address or "").strip()
+        cid = (pending.condition_id or "").strip()
+        if not user.startswith("0x") or not cid.startswith("0x"):
+            return None
+        want_buy = pending.intent.action == "buy"
+        try:
+            resp = requests.get(
+                f"{DATA_API_BASE}/trades",
+                params={"user": user, "market": cid, "limit": 120},
+                headers={"User-Agent": "PolyNetAI/1.0 (+broker-reconcile)"},
+                timeout=(12.0, 45.0),
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception:
+            return None
+        if not isinstance(payload, list) or not payload:
+            return None
+        since = pending.submitted_at.timestamp()
+        best: dict[str, Any] | None = None
+        best_dt = 1e18
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            asset = str(item.get("asset") or "")
+            if asset and asset != pending.token_id:
+                continue
+            side = str(item.get("side") or "").upper()
+            if want_buy and side != "BUY":
+                continue
+            if not want_buy and side != "SELL":
+                continue
+            try:
+                sz = float(item.get("size") or 0.0)
+                px = float(item.get("price") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if sz <= 0 or px <= 0:
+                continue
+            ts = self._normalize_trade_ts(int(item.get("timestamp") or 0))
+            if ts < since - 3:
+                continue
+            dt = abs(ts - since)
+            if dt < best_dt:
+                best_dt = dt
+                best = item
+        if best is None:
+            return None
+        sz = float(best.get("size") or 0.0)
+        px = float(best.get("price") or 0.0)
+        gross = sz * px
+        fee = gross * self.fee_rate
+        return FillEvent(
+            market_id=pending.intent.market_id,
+            cycle_id=pending.intent.cycle_id,
+            timestamp=poll_timestamp,
+            price=px,
+            shares=sz,
+            outcome=pending.intent.outcome,
+            action=pending.intent.action,
+            fee=fee,
+            slippage=abs(px - pending.intent.reference_price),
+            reason=f"{pending.intent.reason} [data_api_trades]",
+            reserved_cash=pending.reserved_cash,
+            fill_source="data_api_trades",
+            fill_note="Data API /trades 按用户+condition+token 侧匹配，可能与链上最终结算仍有细微差异",
+            broker_order_id=pending.order_id,
         )

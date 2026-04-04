@@ -8,6 +8,8 @@ from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pandas as pd
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = Path(__file__).resolve().parent
 SRC = ROOT / "src"
@@ -46,6 +48,11 @@ from polynet_ai.adapters.trade_event_store import (  # noqa: E402
 from polynet_ai.execution.paper_broker import PaperBroker  # noqa: E402
 from polynet_ai.engine.live import LivePaperRunner, LiveRunnerResult, export_live_result  # noqa: E402
 from polynet_ai.engine.replay import ReplayEngine  # noqa: E402
+from polynet_ai.execution.polymarket_auto_redeem import (  # noqa: E402
+    load_auto_redeem_settings,
+    redeem_report_to_audit_rows,
+    run_auto_redeem_scan,
+)
 from polynet_ai.strategy.router import StrategyRouter  # noqa: E402
 from polynet_ai.strategy.spec import load_strategy_config, resolve_post_window_start_delay_seconds  # noqa: E402
 
@@ -88,7 +95,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--env-file",
         default=resolve_default_api_config_env(ROOT),
-        help="API 配置文件路径。当前实时仿真只做读取校验，不使用私钥下真实单。",
+        help="API 配置文件路径。策略侧为 paper，不下 CLOB 真实单；默认会尝试 Relayer 自动赎回（需凭证），可用 --no-auto-redeem 关闭。",
     )
     parser.add_argument("--account-index", type=int, default=2, help="账号编号（默认 2）；会优先读取 PURSE_ADDRESS_2 等后缀键。")
     parser.add_argument(
@@ -107,6 +114,25 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="若指定则覆盖 strategy.yaml 的 cycle.post_window_start_delay_seconds。",
     )
+    parser.add_argument(
+        "--auto-redeem",
+        action="store_true",
+        dest="auto_redeem",
+        help="自动赎回（默认已开启，可省略）。需 PURSE_PRIVATE_KEY、POLY_BUILDER_* 与 pip install -e \".[redeem]\"。",
+    )
+    parser.add_argument(
+        "--no-auto-redeem",
+        action="store_false",
+        dest="auto_redeem",
+        help="关闭流式期间的 Data API + Relayer 自动赎回。",
+    )
+    parser.add_argument(
+        "--redeem-poll-interval-seconds",
+        type=float,
+        default=180.0,
+        help="redeem 定时扫描间隔（秒）；0 表示仅周期结束时触发。",
+    )
+    parser.set_defaults(auto_redeem=True)
     return parser.parse_args()
 
 
@@ -216,8 +242,6 @@ def _build_summary_from_live_result(
     new_cycle_slugs: list[str],
 ):
     """从 LivePaperRunner 的流式处理结果中构建与批量回放兼容的 summary_df / cycle_df / decision_df。"""
-    import pandas as pd
-
     cycle_df = replay_result.cycle_df.copy()
     decision_df = replay_result.decision_df.copy()
 
@@ -279,11 +303,12 @@ def main() -> int:
 
     stage_1_start = datetime.now()
     print(f"\n[1/7] 初始化环境配置...")
+    env_values: dict[str, str] = {}
     if Path(args.env_file).exists():
         env_values = load_api_env(args.env_file)
         selected_env = select_account_env(env_values, account_index=args.account_index)
         applied = apply_proxy_env_from_dict(selected_env)
-        purse = get_account_env_value(env_values, "PURSE_ADDRESS", account_index=args.account_index)
+        _purse = get_account_env_value(env_values, "PURSE_ADDRESS", account_index=args.account_index)
         print(f"  ✓ API 配置已加载，账号: {args.account_index}")
         if applied:
             print(f"  ✓ 代理配置已应用: {', '.join(applied)}")
@@ -306,7 +331,59 @@ def main() -> int:
     )
     print(f"  ✓ 输出目录: {args.output_dir}")
     stage_times["2_init_engine"] = (datetime.now() - stage_2_start).total_seconds()
-    
+
+    redeem_settings = None
+    if args.auto_redeem:
+        redeem_settings = load_auto_redeem_settings(env_values, account_index=args.account_index)
+        if redeem_settings is None:
+            print(
+                "  ⚠ 默认已尝试启用自动赎回，但缺少 PURSE_PRIVATE_KEY、PURSE_ADDRESS 或 POLY_BUILDER_*，将跳过赎回；"
+                " 不需要时可加 --no-auto-redeem。",
+                flush=True,
+            )
+        else:
+            print(
+                f"  ✓ 自动赎回已启用（轮询 {max(0.0, float(args.redeem_poll_interval_seconds)):g}s；"
+                " 需 pip install -e \".[redeem]\"）；明细见 redeem_audit 表/CSV",
+                flush=True,
+            )
+    redeem_audit_rows: list[dict[str, object]] = []
+    on_cycle_redeem = None
+    redeem_poll_handler = None
+    redeem_poll_sec = 0.0
+    if redeem_settings is not None:
+
+        def redeem_poll_handler() -> None:
+            t0 = datetime.now(timezone.utc)
+            report = run_auto_redeem_scan(redeem_settings, priority_condition_ids=None)
+            t1 = datetime.now(timezone.utc)
+            redeem_audit_rows.extend(
+                redeem_report_to_audit_rows(
+                    report, utc_start=t0, utc_end=t1, trigger="poll"
+                )
+            )
+
+        def on_cycle_redeem(row: dict[str, object]) -> None:
+            t0 = datetime.now(timezone.utc)
+            cid = str(row.get("condition_id") or "").strip()
+            report = run_auto_redeem_scan(
+                redeem_settings,
+                priority_condition_ids=[cid] if cid else None,
+            )
+            t1 = datetime.now(timezone.utc)
+            redeem_audit_rows.extend(
+                redeem_report_to_audit_rows(
+                    report,
+                    utc_start=t0,
+                    utc_end=t1,
+                    trigger="cycle_complete",
+                    finalized_cycle_slug=str(row.get("cycle_id") or ""),
+                    priority_condition_id=cid,
+                )
+            )
+
+        redeem_poll_sec = max(0.0, float(args.redeem_poll_interval_seconds))
+
     cycle_record_dir = Path(args.record_events_dir) if args.record_events_dir else None
     run_start_timestamp = datetime.now()
     old_cycle_dirs = set()
@@ -442,6 +519,9 @@ def main() -> int:
             on_event=None if cycle_record_dir is not None else _record_event,
             on_progress=progress_callback,
             progress_interval_seconds=max(0.0, args.dashboard_refresh_seconds),
+            on_cycle_complete=on_cycle_redeem,
+            redeem_poll_interval_seconds=redeem_poll_sec,
+            on_redeem_poll=redeem_poll_handler if redeem_settings is not None and redeem_poll_sec > 0 else None,
         )
     run_elapsed = (datetime.now() - run_start_time).total_seconds()
     stage_times["4_replay"] = run_elapsed
@@ -453,12 +533,16 @@ def main() -> int:
     stage_5_start = datetime.now()
     print(f"\n[5/7] 导出结果数据...")
     export_recorded_trade_events_csv(recorded_events_path, recorded_events_csv_path)
+    redeem_audit_df = pd.DataFrame(redeem_audit_rows) if redeem_audit_rows else None
+    if redeem_audit_df is not None and redeem_audit_df.empty:
+        redeem_audit_df = None
     export_live_result(
         result,
         args.output_dir,
         title=dashboard_title,
         refresh_seconds=max(1.0, args.dashboard_refresh_seconds) if args.dashboard_refresh_seconds > 0 else 1.0,
         write_excel=True,
+        redeem_audit_df=redeem_audit_df,
     )
     print(f"  ✓ 数据已导出")
     stage_times["5_export"] = (datetime.now() - stage_5_start).total_seconds()

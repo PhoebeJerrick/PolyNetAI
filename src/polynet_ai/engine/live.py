@@ -61,6 +61,8 @@ class LivePaperRunner:
         on_progress: Callable[[LiveRunnerResult], None] | None = None,
         progress_interval_seconds: float = 0.0,
         on_cycle_complete: Callable[[dict[str, object]], None] | None = None,
+        redeem_poll_interval_seconds: float = 0.0,
+        on_redeem_poll: Callable[[], None] | None = None,
     ) -> LiveRunnerResult:
         return self._consume_events(
             events,
@@ -69,6 +71,8 @@ class LivePaperRunner:
             on_progress=on_progress,
             progress_interval_seconds=progress_interval_seconds,
             on_cycle_complete=on_cycle_complete,
+            redeem_poll_interval_seconds=redeem_poll_interval_seconds,
+            on_redeem_poll=on_redeem_poll,
         )
 
     def _apply_replay_delay(
@@ -97,12 +101,16 @@ class LivePaperRunner:
         on_progress: Callable[[LiveRunnerResult], None] | None = None,
         progress_interval_seconds: float = 0.0,
         on_cycle_complete: Callable[[dict[str, object]], None] | None = None,
+        redeem_poll_interval_seconds: float = 0.0,
+        on_redeem_poll: Callable[[], None] | None = None,
     ) -> LiveRunnerResult:
         decision_rows: list[dict[str, object]] = []
         cycle_rows: list[dict[str, object]] = []
         snapshot_rows: list[dict[str, object]] = []
         previous_ref = previous_event_ref or [None]
         last_progress_flush = time.monotonic()
+        last_redeem_poll = time.monotonic()
+        redeem_interval = float(redeem_poll_interval_seconds)
 
         for index, event in enumerate(events, start=1):
             if before_step is not None:
@@ -141,6 +149,14 @@ class LivePaperRunner:
                 on_progress(self._build_live_result(cycle_rows, decision_rows, snapshot_rows))
                 last_progress_flush = time.monotonic()
 
+            if (
+                on_redeem_poll is not None
+                and redeem_interval > 0
+                and time.monotonic() - last_redeem_poll >= redeem_interval
+            ):
+                on_redeem_poll()
+                last_redeem_poll = time.monotonic()
+
         pending = self.engine.finalize_pending_cycle()
         if pending is not None:
             cycle_rows.append(pending)
@@ -170,6 +186,7 @@ def export_live_result(
     refresh_seconds: float = 1.0,
     write_excel: bool = True,
     position_value_denominator: float | None = None,
+    redeem_audit_df: pd.DataFrame | None = None,
 ) -> Path:
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
@@ -178,6 +195,8 @@ def export_live_result(
     result.replay_result.metrics_df.to_csv(directory / "metrics.csv", index=False, encoding="utf-8-sig")
     result.snapshot_df.to_csv(directory / "snapshots.csv", index=False, encoding="utf-8-sig")
     _vtag = get_version_tag()
+    if redeem_audit_df is not None and not redeem_audit_df.empty:
+        redeem_audit_df.to_csv(directory / "redeem_audit.csv", index=False, encoding="utf-8-sig")
     # Heavy xlsx exports are optional in streaming progress flushes.
     if write_excel:
         export_trade_ledger_to_excel(
@@ -185,6 +204,7 @@ def export_live_result(
             snapshot_df=result.snapshot_df,
             output_path=directory / f"trade_ledger_{_vtag}.xlsx",
             position_value_denominator=position_value_denominator,
+            redeem_audit_df=redeem_audit_df,
         )
     if write_excel:
         with pd.ExcelWriter(directory / f"live_report_{_vtag}.xlsx", engine="openpyxl") as writer:
@@ -192,6 +212,8 @@ def export_live_result(
             result.replay_result.decision_df.to_excel(writer, sheet_name="decisions", index=False)
             result.replay_result.metrics_df.to_excel(writer, sheet_name="metrics", index=False)
             result.snapshot_df.to_excel(writer, sheet_name="snapshots", index=False)
+            if redeem_audit_df is not None and not redeem_audit_df.empty:
+                redeem_audit_df.to_excel(writer, sheet_name="redeem_audit", index=False)
     generate_dashboard_bundle(
         metrics_df=result.replay_result.metrics_df,
         cycles_df=result.replay_result.cycle_df,

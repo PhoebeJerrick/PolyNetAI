@@ -80,8 +80,33 @@ def test_finalize_cycle_settles_remaining_winner_shares_into_cash() -> None:
 
     assert cycle_row is not None
     assert cycle_row["winner"] == "up"
+    assert cycle_row.get("condition_id") == ""
     assert cycle_row["account_cash"] > 100.0
     assert round(float(cycle_row["account_cash"]), 3) == round(100.0 + float(cycle_row["cycle_net_profit"]), 3)
+
+
+def test_finalize_cycle_row_carries_condition_id_from_ws_metadata() -> None:
+    engine = ReplayEngine(build_config(), starting_cash=100.0)
+    t0 = datetime(2026, 3, 20, 12, 0, 0)
+    cid = "0x" + "ab" * 32
+    engine.state_engine.apply_market_trade(
+        TradeEvent(
+            "BTC",
+            "cycle-a",
+            t0,
+            price=0.8,
+            shares=10,
+            outcome="up",
+            action="buy",
+            metadata={"condition_id": cid},
+        )
+    )
+    engine.state_engine.apply_market_trade(
+        TradeEvent("BTC", "cycle-a", t0 + timedelta(seconds=10), price=0.8, shares=6, outcome="up", action="buy")
+    )
+    row = engine.finalize_pending_cycle()
+    assert row is not None
+    assert row.get("condition_id") == cid
 
 
 class PendingConfirmBroker:

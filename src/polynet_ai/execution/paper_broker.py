@@ -28,6 +28,7 @@ class PaperBroker:
                 fee=fee,
                 slippage=slippage,
                 reason=intent.reason,
+                fill_source="paper_simulated",
             ),
         )
 

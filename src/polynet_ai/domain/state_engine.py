@@ -82,6 +82,9 @@ class StateEngine:
 
     def apply_market_trade(self, trade: TradeEvent) -> CycleState:
         state = self.ensure_cycle(trade)
+        cid = trade.metadata.get("condition_id")
+        if cid:
+            state.condition_id = str(cid)
         self._update_price_stats(state, trade.price, trade.timestamp)
         self._update_market_price(state, trade.outcome, trade.price)
         state.market_last_price = trade.price

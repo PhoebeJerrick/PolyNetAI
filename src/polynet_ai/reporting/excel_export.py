@@ -186,6 +186,7 @@ def export_trade_ledger_to_excel(
     output_path: str | Path,
     *,
     position_value_denominator: float | None = None,
+    redeem_audit_df: pd.DataFrame | None = None,
 ) -> Path:
     output = Path(output_path)
     columns = [
@@ -221,6 +222,8 @@ def export_trade_ledger_to_excel(
     if executed.empty:
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
             pd.DataFrame(columns=columns).to_excel(writer, sheet_name=EXECUTION_LEDGER_SHEET_NAME, index=False)
+            if redeem_audit_df is not None and not redeem_audit_df.empty:
+                redeem_audit_df.to_excel(writer, sheet_name="redeem_audit", index=False)
         return output
 
     snapshots = snapshot_df.copy()
@@ -328,4 +331,6 @@ def export_trade_ledger_to_excel(
         ratio_col_idx = ledger.columns.get_loc("持仓价值占比") + 1  # openpyxl is 1-based
         for row in range(2, ws.max_row + 1):
             ws.cell(row=row, column=ratio_col_idx).number_format = "0.0%"
+        if redeem_audit_df is not None and not redeem_audit_df.empty:
+            redeem_audit_df.to_excel(writer, sheet_name="redeem_audit", index=False)
     return output

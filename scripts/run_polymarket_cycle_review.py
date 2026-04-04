@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import json
 import subprocess
 import sys
@@ -38,6 +39,11 @@ from polynet_ai.adapters.trade_event_store import (  # noqa: E402
 )
 from polynet_ai.engine.live import LivePaperRunner, export_live_result  # noqa: E402
 from polynet_ai.engine.replay import ReplayEngine  # noqa: E402
+from polynet_ai.execution.polymarket_auto_redeem import (  # noqa: E402
+    load_auto_redeem_settings,
+    redeem_report_to_audit_rows,
+    run_auto_redeem_scan,
+)
 from polynet_ai.execution.polymarket_broker import PolymarketBroker  # noqa: E402
 from polynet_ai.reporting.excel_export import get_version_tag  # noqa: E402
 from polynet_ai.strategy.spec import (  # noqa: E402
@@ -57,12 +63,45 @@ DEFAULT_OVERRIDES = (
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="运行一个完整 5m 周期并自动抓取用户成交/市场原始数据做复盘比对。")
+    parser = argparse.ArgumentParser(
+        description="运行完整 5m 周期并复盘；支持单进程连续多窗（--max-cycles，对齐 robot 式连续跟窗）。"
+    )
     parser.add_argument("--config", default="configs/strategy.yaml")
     parser.add_argument("--overrides", default=str(DEFAULT_OVERRIDES))
     parser.add_argument("--output-dir", default="artifacts/live/polymarket_cycle_review")
+    parser.add_argument(
+        "--run-subdir",
+        default="",
+        help="输出子目录名；默认空表示使用当前市场 slug（每窗独立目录）。"
+        " 设为固定名（如 current）便于外部 dashboard 始终指向同一目录。",
+    )
     parser.add_argument("--slug-prefix", default="btc-updown-5m-")
     parser.add_argument("--starting-cash", type=float, default=200.0)
+    parser.add_argument(
+        "--capital-reset-mode",
+        type=str,
+        choices=["fixed", "cumulative"],
+        default="cumulative",
+        help="周期资金模式：fixed=每周期重置名义本金（与批量 paper 一致）；cumulative=跨周期累积。",
+    )
+    parser.add_argument(
+        "--per-cycle-cash",
+        type=float,
+        default=None,
+        help="fixed 模式下每周期名义本金；默认与 --starting-cash 相同。",
+    )
+    parser.add_argument(
+        "--min-collateral-usdc",
+        type=float,
+        default=None,
+        help="仅 --real-trading 且 fixed：抵押 USDC（余额减挂单预留）低于该值则跳过本窗；默认等于 per-cycle-cash；传 0 关闭。",
+    )
+    parser.add_argument(
+        "--max-cycles",
+        type=int,
+        default=1,
+        help="在同一进程内连续执行多少个完整窗（每窗仍会等 UTC 桶切换）；默认 1。",
+    )
     parser.add_argument("--real-trading", action="store_true", help="启用真实下单；否则仅做 paper。")
     parser.add_argument("--signature-type", type=int, default=2, help="Polymarket signature type，默认 2（Gnosis Safe / proxy wallet）。")
     parser.add_argument("--status-every", type=int, default=25)
@@ -76,10 +115,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cycle-grace-seconds", type=float, default=20.0)
     parser.add_argument("--account-index", type=int, default=2)
     parser.add_argument(
+        "--auto-redeem",
+        action="store_true",
+        dest="auto_redeem",
+        help="自动赎回（默认已开启，可省略）。依赖 PURSE_*、POLY_BUILDER_* 与 pip install -e \".[redeem]\"。",
+    )
+    parser.add_argument(
+        "--no-auto-redeem",
+        action="store_false",
+        dest="auto_redeem",
+        help="关闭自动赎回（Data API + Relayer gasless redeem）。",
+    )
+    parser.add_argument(
+        "--redeem-poll-interval-seconds",
+        type=float,
+        default=180.0,
+        help="流式运行期间 redeem 轮询间隔（秒）；0 表示仅周期结束触发。",
+    )
+    parser.add_argument(
         "--env-file",
         default=resolve_default_api_config_env(ROOT),
-        help="API 配置文件路径；本脚本只会用账号地址抓成交与应用代理，不会真实下单。",
+        help="API 配置文件路径。未加 --real-trading 时仅拉取成交/代理；加 --real-trading 时会读取私钥与 CLOB 凭证并真实下单。",
     )
+    parser.set_defaults(auto_redeem=True)
     return parser.parse_args()
 
 
@@ -256,6 +314,14 @@ def _write_review_summary(
     lines = [
         "# 单周期实盘复盘摘要",
         "",
+        "## 成交与对账文件",
+        "",
+        "- `strategy_fills_audit.csv`：引擎入账的每笔成交及 `fill_source`（exchange_get_order / exchange_get_order_estimate / data_api_trades / timeout_estimate / paper_simulated）。",
+        "- `real_order_attempts.json`：CLOB 下单与确认过程；确认后含 `fill_source`。",
+        "- `account_trades_*.xlsx` / Data API：交易所侧成交，可与上两者核对。",
+        "- `ws_trade_events.ndjson` / `ws_trade_events.csv`：本脚本订阅到的**原始 WS 成交事件流**（逐条落盘）。",
+        "- `redeem_audit.csv` 及 Excel 工作表 `redeem_audit`：每次赎回扫描的 UTC 时间窗、`trigger`（poll / cycle_complete / collateral_guard）、各 condition 的 `outcome`。",
+        "",
         f"- 账号: {account_index}",
         f"- PURSE_ADDRESS: {purse_address or '未配置'}",
         f"- 周期: {cycle_slug}",
@@ -281,47 +347,83 @@ def _write_review_summary(
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def main() -> int:
-    args = parse_args()
+def _execute_one_polymarket_cycle(
+    args: argparse.Namespace,
+    *,
+    strategy_config: Any,
+    post_delay: float,
+    cycle_seconds: int,
+    per_cycle: float,
+    min_collateral: float,
+    redeem_settings: Any,
+    real_broker: PolymarketBroker | None,
+    purse_address: str,
+    cycle_ix: int,
+    max_cycles: int,
+) -> None:
+    redeem_audit_rows: list[dict[str, object]] = []
 
-    env_values = load_api_env(args.env_file) if Path(args.env_file).exists() else {}
-    selected_env = select_account_env(env_values, account_index=args.account_index)
-    applied = apply_proxy_env_from_dict(selected_env) if selected_env else []
-    purse_address = get_account_env_value(env_values, "PURSE_ADDRESS", account_index=args.account_index)
-    print(f"[env] 默认账号={args.account_index}", flush=True)
-    if purse_address:
-        print(f"[env] PURSE_ADDRESS={purse_address}", flush=True)
-    if applied:
-        print(f"[env] 已应用代理: {', '.join(applied)}", flush=True)
+    spec = None
+    target_start: datetime | None = None
+    while True:
+        target_start = next_bucket_start_utc(datetime.now(timezone.utc), cycle_seconds)
+        target_slug = f"{args.slug_prefix}{int(target_start.timestamp())}"
 
-    strategy_config = _build_strategy_config(args.config, args.overrides)
-    post_delay = resolve_post_window_start_delay_seconds(
-        config=strategy_config,
-        cli_seconds=args.start_buffer_seconds,
-    )
-    print(
-        f"[cycle] 窗起点后策略推迟: {post_delay:g}s（"
-        f"{'命令行 --start-buffer-seconds' if args.start_buffer_seconds is not None else 'strategy.yaml cycle.post_window_start_delay_seconds'}）",
-        flush=True,
-    )
+        print(f"[cycle] 目标完整周期: {target_slug}", flush=True)
+        print(f"[cycle] 精确等待 UTC 桶切换 {target_start.isoformat()} ...", flush=True)
+        sleep_until_utc_instant(target_start)
+        spec = poll_until_success(
+            lambda: fetch_market_spec(target_slug),
+            timeout_seconds=120.0,
+            interval_seconds=0.35,
+            log_fn=lambda msg: print(msg, flush=True),
+            describe=f"Gamma 市场 {target_slug}",
+        )
+        print(f"[cycle] 新窗已在 Gamma 就绪: {spec.slug}", flush=True)
 
-    cycle_seconds = cycle_seconds_from_slug_prefix(args.slug_prefix)
-    if cycle_seconds is None:
-        raise ValueError(f"无法从 slug 前缀解析周期长度: {args.slug_prefix}")
-    target_start = next_bucket_start_utc(datetime.now(timezone.utc), cycle_seconds)
-    target_slug = f"{args.slug_prefix}{int(target_start.timestamp())}"
+        skip_collateral_guard = (
+            not args.real_trading
+            or args.capital_reset_mode != "fixed"
+            or min_collateral <= 0
+            or real_broker is None
+        )
+        if skip_collateral_guard:
+            break
 
-    print(f"[cycle] 目标完整周期: {target_slug}", flush=True)
-    print(f"[cycle] 精确等待 UTC 桶切换 {target_start.isoformat()} ...", flush=True)
-    sleep_until_utc_instant(target_start)
-    spec = poll_until_success(
-        lambda: fetch_market_spec(target_slug),
-        timeout_seconds=120.0,
-        interval_seconds=0.35,
-        log_fn=lambda msg: print(msg, flush=True),
-        describe=f"Gamma 市场 {target_slug}",
-    )
-    print(f"[cycle] 新窗已在 Gamma 就绪: {spec.slug}", flush=True)
+        if redeem_settings is not None:
+            t_r0 = datetime.now(timezone.utc)
+            report = run_auto_redeem_scan(
+                redeem_settings, log_fn=lambda m: print(m, flush=True)
+            )
+            t_r1 = datetime.now(timezone.utc)
+            redeem_audit_rows.extend(
+                redeem_report_to_audit_rows(
+                    report,
+                    utc_start=t_r0,
+                    utc_end=t_r1,
+                    trigger="collateral_guard",
+                )
+            )
+        live_balance = real_broker.get_collateral_balance_usdc()
+        pending_ctx = real_broker.pending_context()
+        reserved = float(pending_ctx.get("pending_buy_reserved_cash", 0.0))
+        available = live_balance - reserved
+        if available + 1e-9 >= min_collateral:
+            print(
+                f"[cycle] 抵押检查通过: balance={live_balance:.4f} 预留≈{reserved:.4f} "
+                f"可支配≈{available:.4f} >= {min_collateral:g} USDC",
+                flush=True,
+            )
+            break
+        print(
+            f"[cycle] 跳过本窗 {spec.slug}：可支配抵押≈{available:.4f} < {min_collateral:g} USDC",
+            flush=True,
+        )
+        next_start = target_start + timedelta(seconds=cycle_seconds)
+        sleep_until_utc_instant(next_start)
+
+    assert spec is not None and target_start is not None
+
     launch_at = target_start + timedelta(seconds=post_delay)
     if datetime.now(timezone.utc) < launch_at:
         print(
@@ -329,32 +431,72 @@ def main() -> int:
             flush=True,
         )
         sleep_until_utc_instant(launch_at)
-    real_broker = None
-    effective_starting_cash = args.starting_cash
+
+    effective_starting_cash = float(args.starting_cash)
     mode_label = "Paper"
     if args.real_trading:
-        real_broker = PolymarketBroker.from_env(
-            env_values,
-            account_index=args.account_index,
-            fee_rate=float(strategy_config.get("execution.fee_rate", 0.002)),
-            signature_type=args.signature_type,
-        )
-        live_balance = real_broker.get_collateral_balance_usdc()
-        effective_starting_cash = live_balance
+        assert real_broker is not None
         mode_label = "Real"
+        if args.capital_reset_mode == "fixed":
+            effective_starting_cash = float(per_cycle)
+        else:
+            effective_starting_cash = float(real_broker.get_collateral_balance_usdc())
+        print(f"[real] 引擎名义本金={effective_starting_cash:.6f} USDC", flush=True)
+        live_balance = real_broker.get_collateral_balance_usdc()
         print(f"[real] collateral_balance={live_balance:.6f} USDC", flush=True)
         open_orders = real_broker.get_open_orders(market=spec.condition_id)
         print(f"[real] 当前目标市场未完成订单数={len(open_orders)}", flush=True)
+    elif args.capital_reset_mode == "fixed":
+        effective_starting_cash = float(per_cycle)
+        print(f"[paper] fixed：引擎名义本金={effective_starting_cash:g} USDC", flush=True)
 
     engine = ReplayEngine(
         strategy_config,
         starting_cash=effective_starting_cash,
+        capital_reset_mode=args.capital_reset_mode,
+        per_cycle_cash=float(per_cycle) if args.capital_reset_mode == "fixed" else None,
         broker=real_broker,
     )
     runner = LivePaperRunner(engine)
 
-    run_dir = Path(args.output_dir) / f"account_{args.account_index}" / spec.slug
+    run_leaf = (args.run_subdir.strip() or spec.slug)
+    run_dir = Path(args.output_dir) / f"account_{args.account_index}" / run_leaf
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    on_cycle_redeem = None
+    redeem_poll_cb = None
+    redeem_poll_sec = 0.0
+    if redeem_settings is not None:
+        def redeem_poll_cb() -> None:
+            t0 = datetime.now(timezone.utc)
+            report = run_auto_redeem_scan(redeem_settings, priority_condition_ids=None)
+            t1 = datetime.now(timezone.utc)
+            redeem_audit_rows.extend(
+                redeem_report_to_audit_rows(
+                    report, utc_start=t0, utc_end=t1, trigger="poll"
+                )
+            )
+
+        def on_cycle_redeem(row: dict[str, object]) -> None:
+            t0 = datetime.now(timezone.utc)
+            cid = str(row.get("condition_id") or "").strip()
+            report = run_auto_redeem_scan(
+                redeem_settings,
+                priority_condition_ids=[cid] if cid else None,
+            )
+            t1 = datetime.now(timezone.utc)
+            redeem_audit_rows.extend(
+                redeem_report_to_audit_rows(
+                    report,
+                    utc_start=t0,
+                    utc_end=t1,
+                    trigger="cycle_complete",
+                    finalized_cycle_slug=str(row.get("cycle_id") or ""),
+                    priority_condition_id=cid,
+                )
+            )
+
+        redeem_poll_sec = max(0.0, float(args.redeem_poll_interval_seconds))
 
     progress_callback = None
     if args.dashboard_refresh_seconds > 0:
@@ -384,19 +526,36 @@ def main() -> int:
             on_event=event_recorder.record,
             on_progress=progress_callback,
             progress_interval_seconds=max(0.0, args.dashboard_refresh_seconds),
+            on_cycle_complete=on_cycle_redeem,
+            redeem_poll_interval_seconds=redeem_poll_sec,
+            on_redeem_poll=redeem_poll_cb if redeem_settings is not None and redeem_poll_sec > 0 else None,
         )
     export_recorded_trade_events_csv(recorded_events_path, recorded_events_csv_path)
+    redeem_audit_df = pd.DataFrame(redeem_audit_rows) if redeem_audit_rows else None
+    if redeem_audit_df is not None and redeem_audit_df.empty:
+        redeem_audit_df = None
     export_live_result(
         result,
         run_dir,
         title=f"PolyNet AI {spec.slug}",
         refresh_seconds=max(1.0, args.dashboard_refresh_seconds) if args.dashboard_refresh_seconds > 0 else 1.0,
         write_excel=True,
+        redeem_audit_df=redeem_audit_df,
     )
     if real_broker is not None:
         real_broker.export_orders(run_dir / "real_order_attempts.json")
 
-    # API 拉取区间仍以 Gamma 的 start/end 为准；展示「距开盘差」等与批量报告一致时用 slug epoch。
+    if engine.account.fills:
+        pd.DataFrame([asdict(f) for f in engine.account.fills]).to_csv(
+            run_dir / "strategy_fills_audit.csv",
+            index=False,
+            encoding="utf-8-sig",
+        )
+        print(
+            "[review] strategy_fills_audit.csv 已写入（含 fill_source / fill_note，可与 account_trades 对账）",
+            flush=True,
+        )
+
     cycle_start_api = _ensure_utc(spec.start_time or target_start)
     cycle_end = _ensure_utc(spec.end_time or (target_start + timedelta(seconds=cycle_seconds)))
     slug_open_naive = window_start_naive_utc_from_slug(spec.slug)
@@ -471,7 +630,106 @@ def main() -> int:
         mode_label=mode_label,
     )
 
-    print(f"[done] 单周期复盘完成: {run_dir}", flush=True)
+    suffix = f" ({cycle_ix + 1}/{max_cycles})" if max_cycles > 1 else ""
+    print(f"[done] 单周期复盘完成{suffix}: {run_dir}", flush=True)
+
+
+def main() -> int:
+    args = parse_args()
+
+    env_values = load_api_env(args.env_file) if Path(args.env_file).exists() else {}
+    selected_env = select_account_env(env_values, account_index=args.account_index)
+    applied = apply_proxy_env_from_dict(selected_env) if selected_env else []
+    purse_address = get_account_env_value(env_values, "PURSE_ADDRESS", account_index=args.account_index)
+    print(f"[env] 默认账号={args.account_index}", flush=True)
+    if purse_address:
+        print(f"[env] PURSE_ADDRESS={purse_address}", flush=True)
+    if applied:
+        print(f"[env] 已应用代理: {', '.join(applied)}", flush=True)
+
+    strategy_config = _build_strategy_config(args.config, args.overrides)
+    post_delay = resolve_post_window_start_delay_seconds(
+        config=strategy_config,
+        cli_seconds=args.start_buffer_seconds,
+    )
+    print(
+        f"[cycle] 窗起点后策略推迟: {post_delay:g}s（"
+        f"{'命令行 --start-buffer-seconds' if args.start_buffer_seconds is not None else 'strategy.yaml cycle.post_window_start_delay_seconds'}）",
+        flush=True,
+    )
+
+    cycle_seconds = cycle_seconds_from_slug_prefix(args.slug_prefix)
+    if cycle_seconds is None:
+        raise ValueError(f"无法从 slug 前缀解析周期长度: {args.slug_prefix}")
+
+    per_cycle = args.per_cycle_cash if args.per_cycle_cash is not None else args.starting_cash
+    if args.capital_reset_mode == "fixed":
+        print(
+            f"[cycle] fixed 模式：每周期名义本金 per_cycle_cash={per_cycle:g} USDC（与 paper 批量口径对齐）",
+            flush=True,
+        )
+
+    min_collateral = 0.0
+    if args.real_trading and args.capital_reset_mode == "fixed":
+        if args.min_collateral_usdc is None:
+            min_collateral = float(per_cycle)
+        else:
+            min_collateral = float(args.min_collateral_usdc)
+        if min_collateral > 0:
+            print(
+                f"[cycle] 真实+f fixed：抵押低于 {min_collateral:g} USDC 时将跳过该窗"
+                "（默认会在检查前尝试自动赎回，可用 --no-auto-redeem 关闭）",
+                flush=True,
+            )
+
+    redeem_settings = None
+    if args.auto_redeem:
+        redeem_settings = load_auto_redeem_settings(env_values, account_index=args.account_index)
+        if redeem_settings is None:
+            print(
+                "[redeem] 默认已尝试启用自动赎回，但缺少 PURSE_PRIVATE_KEY、PURSE_ADDRESS 或 "
+                "POLY_BUILDER_API_KEY / POLY_BUILDER_API_SECRET / POLY_BUILDER_API_PASSPHRASE（及账号后缀键）；"
+                " 将跳过赎回。若不需要赎回请使用 --no-auto-redeem。",
+                flush=True,
+            )
+        else:
+            print(
+                f"[redeem] 已启用自动赎回；轮询间隔={max(0.0, float(args.redeem_poll_interval_seconds)):g}s",
+                flush=True,
+            )
+
+    real_broker: PolymarketBroker | None = None
+    if args.real_trading:
+        real_broker = PolymarketBroker.from_env(
+            env_values,
+            account_index=args.account_index,
+            fee_rate=float(strategy_config.get("execution.fee_rate", 0.002)),
+            signature_type=args.signature_type,
+        )
+
+    if args.max_cycles < 1:
+        raise ValueError("--max-cycles 须 >= 1")
+
+    for cycle_ix in range(args.max_cycles):
+        if args.max_cycles > 1:
+            print(
+                f"[cycle] 多窗进度 {cycle_ix + 1}/{args.max_cycles}（单进程连续执行）",
+                flush=True,
+            )
+        _execute_one_polymarket_cycle(
+            args,
+            strategy_config=strategy_config,
+            post_delay=post_delay,
+            cycle_seconds=cycle_seconds,
+            per_cycle=per_cycle,
+            min_collateral=min_collateral,
+            redeem_settings=redeem_settings,
+            real_broker=real_broker,
+            purse_address=purse_address,
+            cycle_ix=cycle_ix,
+            max_cycles=args.max_cycles,
+        )
+
     return 0
 
 
