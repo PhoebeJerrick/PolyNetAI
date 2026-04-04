@@ -14,25 +14,14 @@ from py_clob_client.clob_types import (
     BalanceAllowanceParams,
     MarketOrderArgs,
     OpenOrderParams,
-    OrderBookSummary,
-    OrderSummary,
     OrderType,
 )
 
 from polynet_ai.adapters.polymarket_live import get_account_env_value
 from polynet_ai.domain.models import ExecutionResult, FillEvent, OrderIntent
+from polynet_ai.execution.fok_orderbook import ExecutionPlan, estimate_fok_plan, normalize_market_amount
 
 DATA_API_BASE = "https://data-api.polymarket.com"
-
-
-@dataclass(slots=True)
-class ExecutionPlan:
-    shares: float
-    estimated_vwap: float
-    limit_price: float
-    deepest_price: float
-    tick_size: float
-    min_order_size: float
 
 
 @dataclass(slots=True)
@@ -51,89 +40,42 @@ class PendingOrder:
     last_polled_at: datetime | None = None
 
 
-def _level_price(level: OrderSummary) -> float:
-    return float(level.price or 0.0)
-
-
-def _level_size(level: OrderSummary) -> float:
-    return float(level.size or 0.0)
-
-
-def _round_to_tick(price: float, tick_size: float) -> float:
-    decimals = max(0, len(str(tick_size).split(".", 1)[1]) if "." in str(tick_size) else 0)
-    return round(price, decimals)
-
-
-def _normalize_shares_for_order(action: str, shares: float, price: float) -> float:
-    if action == "buy":
-        if price <= 0:
-            return 0.0
-        return round(shares, 4)
-    return round(shares, 2)
-
-
-def _normalize_market_amount(action: str, shares: float, price: float) -> float:
-    if action == "buy":
-        return round(shares * price, 2)
-    return round(shares, 2)
-
-
-def _estimate_fok_plan(
-    book: OrderBookSummary,
+def clob_client_from_env(
+    values: dict[str, str],
     *,
-    action: str,
-    shares: float,
-    price_buffer_ticks: int = 1,
-) -> ExecutionPlan | None:
-    if shares <= 0:
-        return None
-
-    tick_size = float(book.tick_size or "0.01")
-    if action == "buy":
-        levels = sorted(book.asks or [], key=_level_price)
-    else:
-        levels = sorted(book.bids or [], key=_level_price, reverse=True)
-    if not levels:
-        return None
-
-    remaining = shares
-    filled = 0.0
-    notional = 0.0
-    deepest = 0.0
-    for level in levels:
-        price = _level_price(level)
-        size = _level_size(level)
-        if price <= 0 or size <= 0:
-            continue
-        take = min(remaining, size)
-        if take <= 0:
-            continue
-        filled += take
-        remaining -= take
-        notional += take * price
-        deepest = price
-        if remaining <= 1e-9:
-            break
-
-    if filled + 1e-9 < shares:
-        return None
-
-    estimated_vwap = notional / filled
-    if action == "buy":
-        limit_price = min(0.99, deepest + tick_size * max(0, price_buffer_ticks))
-    else:
-        limit_price = max(0.001, deepest - tick_size * max(0, price_buffer_ticks))
-    limit_price = _round_to_tick(limit_price, tick_size)
-    normalized_shares = _normalize_shares_for_order(action, shares, limit_price)
-    if normalized_shares <= 0:
-        return None
-    return ExecutionPlan(
-        shares=normalized_shares,
-        estimated_vwap=estimated_vwap,
-        limit_price=limit_price,
-        deepest_price=deepest,
-        tick_size=tick_size,
-        min_order_size=float(book.min_order_size or 0.0),
+    account_index: int = 2,
+    signature_type: int = 2,
+    host: str = "https://clob.polymarket.com",
+) -> ClobClient:
+    private_key = get_account_env_value(values, "PURSE_PRIVATE_KEY", account_index=account_index)
+    funder = get_account_env_value(values, "PURSE_ADDRESS", account_index=account_index)
+    api_key = get_account_env_value(values, "POLY_DERIVE_API_KEY", account_index=account_index)
+    api_secret = get_account_env_value(values, "POLY_DERIVE_API_SECRET", account_index=account_index)
+    api_passphrase = get_account_env_value(values, "POLY_DERIVE_API_PASSPHRASE", account_index=account_index)
+    missing = [
+        name
+        for name, value in {
+            "PURSE_PRIVATE_KEY": private_key,
+            "PURSE_ADDRESS": funder,
+            "POLY_DERIVE_API_KEY": api_key,
+            "POLY_DERIVE_API_SECRET": api_secret,
+            "POLY_DERIVE_API_PASSPHRASE": api_passphrase,
+        }.items()
+        if not value
+    ]
+    if missing:
+        raise ValueError(f"账号 {account_index} 缺少 CLOB 所需配置: {', '.join(missing)}")
+    return ClobClient(
+        host=host,
+        chain_id=137,
+        key=private_key,
+        creds=ApiCreds(
+            api_key=str(api_key),
+            api_secret=str(api_secret),
+            api_passphrase=str(api_passphrase),
+        ),
+        signature_type=signature_type,
+        funder=str(funder),
     )
 
 
@@ -165,36 +107,12 @@ class PolymarketBroker:
         signature_type: int = 2,
         host: str = "https://clob.polymarket.com",
     ) -> "PolymarketBroker":
-        private_key = get_account_env_value(values, "PURSE_PRIVATE_KEY", account_index=account_index)
         funder = get_account_env_value(values, "PURSE_ADDRESS", account_index=account_index)
-        api_key = get_account_env_value(values, "POLY_DERIVE_API_KEY", account_index=account_index)
-        api_secret = get_account_env_value(values, "POLY_DERIVE_API_SECRET", account_index=account_index)
-        api_passphrase = get_account_env_value(values, "POLY_DERIVE_API_PASSPHRASE", account_index=account_index)
-        missing = [
-            name
-            for name, value in {
-                "PURSE_PRIVATE_KEY": private_key,
-                "PURSE_ADDRESS": funder,
-                "POLY_DERIVE_API_KEY": api_key,
-                "POLY_DERIVE_API_SECRET": api_secret,
-                "POLY_DERIVE_API_PASSPHRASE": api_passphrase,
-            }.items()
-            if not value
-        ]
-        if missing:
-            raise ValueError(f"账号 {account_index} 缺少真实下单所需配置: {', '.join(missing)}")
-
-        client = ClobClient(
-            host=host,
-            chain_id=137,
-            key=private_key,
-            creds=ApiCreds(
-                api_key=str(api_key),
-                api_secret=str(api_secret),
-                api_passphrase=str(api_passphrase),
-            ),
+        client = clob_client_from_env(
+            values,
+            account_index=account_index,
             signature_type=signature_type,
-            funder=str(funder),
+            host=host,
         )
         return cls(
             client=client,
@@ -273,7 +191,7 @@ class PolymarketBroker:
         market_min_order_size = max(0.0, raw_market_min if self.use_orderbook_min_order_size else 0.0)
         enforce_min_order_size = intent.action == "buy" or self.enforce_sell_min_order_size
         required_min_order_size = market_min_order_size if enforce_min_order_size else 0.0
-        plan = _estimate_fok_plan(
+        plan = estimate_fok_plan(
             book,
             action=intent.action,
             shares=float(intent.shares),
@@ -314,7 +232,7 @@ class PolymarketBroker:
                 reason=f"归一化后份额低于市场最小下单量 {required_min_order_size:g}",
             )
 
-        market_amount = _normalize_market_amount(intent.action, plan.shares, plan.limit_price)
+        market_amount = normalize_market_amount(intent.action, plan.shares, plan.limit_price)
         if market_amount <= 0:
             record["status"] = "invalid_amount"
             self.submitted_orders.append(record)

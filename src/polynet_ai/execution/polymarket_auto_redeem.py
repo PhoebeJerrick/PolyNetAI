@@ -281,7 +281,22 @@ def run_auto_redeem_scan(
     """
     log = log_fn or (lambda m: print(m, flush=True))
     audit: list[dict[str, Any]] = []
-    items = fetch_redeemable_positions_aggregated(settings.purse_address)
+    try:
+        items = fetch_redeemable_positions_aggregated(settings.purse_address)
+    except Exception as exc:  # noqa: BLE001 — 网络抖动不应拖垮整段 live paper 主流程
+        log(f"[redeem] Data API 拉取可赎回仓位失败，已跳过本次扫描: {exc}")
+        return RedeemScanReport(
+            success_count=0,
+            data_api_group_count=0,
+            condition_rows=[
+                {
+                    "condition_id": "",
+                    "slug": "",
+                    "outcome": "data_api_request_failed",
+                    "detail": str(exc)[:500],
+                }
+            ],
+        )
     if not items:
         log("[redeem] Data API 无可赎回仓位 (redeemable=0)")
         return RedeemScanReport(

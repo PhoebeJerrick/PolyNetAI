@@ -126,12 +126,14 @@ class ReplayEngine:
         starting_cash: float = 200.0,
         capital_reset_mode: str = "cumulative",
         per_cycle_cash: float | None = None,
+        broker: object | None = None,
     ) -> "ReplayEngine":
         return cls(
             load_strategy_config(path),
             starting_cash=starting_cash,
             capital_reset_mode=capital_reset_mode,
             per_cycle_cash=per_cycle_cash,
+            broker=broker,
         )
 
     def display_cash(self, cycle_net_profit: float) -> float:

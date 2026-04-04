@@ -137,6 +137,22 @@ def _discover_cycle_event_files(input_dir: Path) -> list[Path]:
     return [path for path in files if _event_file_matches_cycle_dir(path)]
 
 
+def _effective_use_streaming(*, use_streaming: bool, processing_mode: str | None) -> bool:
+    """与 run_recorded_live_paper 的 processing_mode 语义对齐：per-cycle=流式逐文件；merged=单引擎合并。"""
+    if processing_mode is None:
+        return use_streaming
+    raw = str(processing_mode).strip().lower().replace("_", "-")
+    aliases = {
+        "per-cycle": True,
+        "streaming": True,
+        "merged": False,
+        "merge": False,
+    }
+    if raw in aliases:
+        return aliases[raw]
+    return use_streaming
+
+
 class StreamingAggregator:
     """流式聚合器，维护必要的跨周期指标"""
 
@@ -212,8 +228,13 @@ def run_batch_replay(
     report_name_prefix: str = "",
     use_streaming: bool = True,  # 新增参数：默认使用流式处理
     post_window_start_delay_seconds: float | None = None,
+    processing_mode: str | None = None,
 ) -> Path | None:
-    """核心 batch replay 逻辑，可被外部脚本调用。返回 Excel 绩效报告路径。"""
+    """核心 batch replay 逻辑，可被外部脚本调用。返回 Excel 绩效报告路径。
+
+    ``processing_mode`` 与 ``use_streaming`` 同时传入时，以 ``processing_mode`` 为准
+    （例如 ``per-cycle`` / ``merged``），便于与实盘脚本参数对齐。
+    """
     input_resolved = _resolve_existing_path("输入目录", input_dir)
     output_resolved = Path(output_dir) if output_dir else input_resolved / "batch_replay_outputs"
     output_resolved.mkdir(parents=True, exist_ok=True)
@@ -233,6 +254,8 @@ def run_batch_replay(
     print(f"  ℹ 共需回放 {total_files} 个周期文件")
     print(f"  ℹ 窗起点后策略推迟: {_pwd:g}s（与实盘/WebSocket 路径一致）")
 
+    stream = _effective_use_streaming(use_streaming=use_streaming, processing_mode=processing_mode)
+
     # 引擎内部根据 capital_reset_mode 处理周期资金
     engine = ReplayEngine(
         config,
@@ -241,7 +264,7 @@ def run_batch_replay(
         per_cycle_cash=per_cycle_cash,
     )
 
-    if use_streaming:
+    if stream:
         # 流式处理模式：逐周期处理，增量输出
         aggregator = StreamingAggregator()
 

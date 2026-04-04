@@ -16,6 +16,8 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from polynet_ai.adapters.cycle_window_timing import filter_trade_events_after_post_window_delay
+from polynet_ai.adapters.polymarket_live import load_api_env, select_account_env
+from polynet_ai.execution.paper_broker import paper_broker_for_config
 from polynet_ai.strategy.spec import load_strategy_config, resolve_post_window_start_delay_seconds
 from polynet_ai.adapters.trade_event_store import load_recorded_trade_events
 from polynet_ai.engine.live import LivePaperRunner, LiveRunnerResult, export_live_result
@@ -121,7 +123,53 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="可选：每完成一个周期写入一次轻量进度文件（用于 record.sh ms 快速读取进度）。",
     )
+    parser.add_argument(
+        "--env-file",
+        default="",
+        help="CLOB 凭证（与实盘相同）；空则 paper 退回 legacy 滑点（auto 模式）。",
+    )
+    parser.add_argument("--account-index", type=int, default=2)
+    parser.add_argument(
+        "--paper-execution",
+        type=str,
+        choices=["auto", "orderbook", "legacy"],
+        default="auto",
+        help="auto=有凭证则订单簿 FOK；orderbook=必须凭证；legacy=参考价滑点。",
+    )
     return parser.parse_args()
+
+
+def _resolve_env_file_for_recorded(args: argparse.Namespace) -> Path | None:
+    raw = str(getattr(args, "env_file", "") or "").strip()
+    if not raw:
+        return None
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        p = ROOT / p
+    return p.resolve() if p.exists() else None
+
+
+def build_replay_engine_for_recorded(args: argparse.Namespace, config_path: str | Path) -> ReplayEngine:
+    cfg = load_strategy_config(config_path)
+    env_path = _resolve_env_file_for_recorded(args)
+    env_values: dict[str, str] | None = None
+    if env_path is not None:
+        env_values = select_account_env(load_api_env(str(env_path)), account_index=args.account_index)
+    mode = str(getattr(args, "paper_execution", "auto"))
+    broker = paper_broker_for_config(
+        cfg,
+        env_values=env_values,
+        account_index=args.account_index,
+        force_legacy_slippage=mode == "legacy",
+        require_orderbook_client=mode == "orderbook",
+    )
+    return ReplayEngine(
+        cfg,
+        starting_cash=args.starting_cash,
+        capital_reset_mode=args.capital_reset_mode,
+        per_cycle_cash=args.per_cycle_cash,
+        broker=broker,
+    )
 
 
 def _cycle_sort_key(path: Path) -> tuple[int, str]:
@@ -581,16 +629,13 @@ def main_streaming(args: argparse.Namespace | None = None) -> int:
     print(f"  ✓ 发现 {len(cycle_dirs)} 个周期目录")
 
     print(f"\n[2/5] 初始化回放引擎...")
-    engine = ReplayEngine.from_yaml(
-        args.config,
-        starting_cash=args.starting_cash,
-        capital_reset_mode=args.capital_reset_mode,
-        per_cycle_cash=args.per_cycle_cash,
-    )
+    engine = build_replay_engine_for_recorded(args, args.config)
     runner = LivePaperRunner(engine)
+    _pb = engine.broker
+    _pm = "orderbook_fok" if getattr(_pb, "clob_client", None) is not None else "legacy_slippage"
     print(
         f"  ✓ 引擎已初始化，初始资金: {args.starting_cash} USDT | "
-        f"资金模式: {args.capital_reset_mode}"
+        f"资金模式: {args.capital_reset_mode} | paper: {_pm}"
     )
 
     # 初始化流式聚合器
@@ -852,21 +897,18 @@ def main(args: argparse.Namespace | None = None) -> int:
         print(f"  ✓ 事件限制: 使用前 {len(events)} 条")
 
     print(f"\n[2/5] 初始化回放引擎...")
-    _cfg = load_strategy_config(args.config)
+    engine = build_replay_engine_for_recorded(args, args.config)
+    _cfg = engine.config
     position_value_denominator = resolve_position_value_denominator_from_config(_cfg)
     phase_end_seconds = resolve_phase_end_seconds_from_config(_cfg)
-    engine = ReplayEngine.from_yaml(
-        args.config,
-        starting_cash=args.starting_cash,
-        capital_reset_mode=args.capital_reset_mode,
-        per_cycle_cash=args.per_cycle_cash,
-    )
     runner = LivePaperRunner(engine)
+    _pb = engine.broker
+    _pm = "orderbook_fok" if getattr(_pb, "clob_client", None) is not None else "legacy_slippage"
     print(
         f"  ✓ 引擎已初始化，初始资金: {args.starting_cash} USDT | "
-        f"资金模式: {args.capital_reset_mode}"
+        f"资金模式: {args.capital_reset_mode} | paper: {_pm}"
     )
-    
+
     event_stream = iter_events_with_pacing(
         events,
         pace_factor=args.pace_factor,

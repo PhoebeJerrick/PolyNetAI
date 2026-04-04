@@ -5,10 +5,18 @@ from pathlib import Path
 import pandas as pd
 
 from polynet_ai.reporting.dashboard import (
+    _sanitize_json_for_html_script,
     generate_dashboard_bundle,
     generate_dashboard_from_directory,
     refresh_dashboard_html_shell,
 )
+
+
+def test_sanitize_json_for_html_script_avoids_closing_tag() -> None:
+    raw = '{"note":"x</script>y"}'
+    out = _sanitize_json_for_html_script(raw)
+    assert "</script>" not in out
+    assert r"<\/script" in out
 
 
 def build_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:

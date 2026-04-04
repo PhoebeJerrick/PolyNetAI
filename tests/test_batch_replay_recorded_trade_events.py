@@ -2,8 +2,17 @@ from __future__ import annotations
 
 import pandas as pd
 
-from scripts.batch_replay_recorded_trade_events import _discover_cycle_event_files
+from scripts.batch_replay_recorded_trade_events import (
+    _discover_cycle_event_files,
+    _effective_use_streaming,
+)
 from scripts.build_batch_replay_performance_report import write_batch_trade_process_zh
+
+
+def test_effective_use_streaming_processing_mode_overrides() -> None:
+    assert _effective_use_streaming(use_streaming=True, processing_mode="merged") is False
+    assert _effective_use_streaming(use_streaming=False, processing_mode="per-cycle") is True
+    assert _effective_use_streaming(use_streaming=False, processing_mode=None) is False
 
 
 def test_discover_cycle_event_files_reads_per_cycle_ndjson(tmp_path) -> None:

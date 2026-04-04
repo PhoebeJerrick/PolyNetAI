@@ -45,9 +45,9 @@ from polynet_ai.adapters.trade_event_store import (  # noqa: E402
     TradeEventRecorder,
     export_recorded_trade_events_csv,
 )
-from polynet_ai.execution.paper_broker import PaperBroker  # noqa: E402
 from polynet_ai.engine.live import LivePaperRunner, LiveRunnerResult, export_live_result  # noqa: E402
 from polynet_ai.engine.replay import ReplayEngine  # noqa: E402
+from polynet_ai.execution.paper_broker import paper_broker_for_config  # noqa: E402
 from polynet_ai.execution.polymarket_auto_redeem import (  # noqa: E402
     load_auto_redeem_settings,
     redeem_report_to_audit_rows,
@@ -98,6 +98,13 @@ def parse_args() -> argparse.Namespace:
         help="API 配置文件路径。策略侧为 paper，不下 CLOB 真实单；默认会尝试 Relayer 自动赎回（需凭证），可用 --no-auto-redeem 关闭。",
     )
     parser.add_argument("--account-index", type=int, default=2, help="账号编号（默认 2）；会优先读取 PURSE_ADDRESS_2 等后缀键。")
+    parser.add_argument(
+        "--paper-execution",
+        type=str,
+        choices=["auto", "orderbook", "legacy"],
+        default="auto",
+        help="Paper 成交：auto=有 CLOB 凭证则与实盘同逻辑（订单簿 FOK）；orderbook=必须有凭证；legacy=参考价±滑点。",
+    )
     parser.add_argument(
         "--record-events-dir",
         default=None,
@@ -216,6 +223,9 @@ def _wrap_event_stream_with_config_reload(
     *,
     config_path: str | Path,
     engine: ReplayEngine,
+    env_values: dict[str, str] | None,
+    account_index: int,
+    paper_execution: str,
 ) :
     cfg_path = Path(config_path)
     last_mtime = cfg_path.stat().st_mtime if cfg_path.exists() else None
@@ -228,9 +238,12 @@ def _wrap_event_stream_with_config_reload(
                 config = load_strategy_config(cfg_path)
                 engine.config = config
                 engine.router = StrategyRouter(config)
-                engine.broker = PaperBroker(
-                    fee_rate=float(config.get("execution.fee_rate", 0.002)),
-                    slippage_bps=float(config.get("execution.slippage_bps", 10)),
+                engine.broker = paper_broker_for_config(
+                    config,
+                    env_values=env_values,
+                    account_index=account_index,
+                    force_legacy_slippage=paper_execution == "legacy",
+                    require_orderbook_client=paper_execution == "orderbook",
                 )
                 last_mtime = current_mtime
                 print(f"[config] 检测到 strategy 配置变更，已热加载: {cfg_path}")
@@ -316,18 +329,35 @@ def main() -> int:
 
     stage_2_start = datetime.now()
     print(f"\n[2/7] 初始化回放引擎...")
-    engine = ReplayEngine.from_yaml(
-        args.config,
+    _live_cfg = load_strategy_config(args.config)
+    _broker_env = (
+        select_account_env(env_values, account_index=args.account_index) if env_values else None
+    )
+    _paper_broker = paper_broker_for_config(
+        _live_cfg,
+        env_values=_broker_env,
+        account_index=args.account_index,
+        force_legacy_slippage=args.paper_execution == "legacy",
+        require_orderbook_client=args.paper_execution == "orderbook",
+    )
+    engine = ReplayEngine(
+        _live_cfg,
         starting_cash=args.starting_cash,
         capital_reset_mode=args.capital_reset_mode,
         per_cycle_cash=args.per_cycle_cash,
+        broker=_paper_broker,
     )
     runner = LivePaperRunner(engine)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    _pmode = (
+        "legacy_slippage"
+        if _paper_broker.clob_client is None
+        else "orderbook_fok"
+    )
     print(
         f"  ✓ 引擎已初始化，初始资金: {args.starting_cash} USDT | "
-        f"资金模式: {args.capital_reset_mode}"
+        f"资金模式: {args.capital_reset_mode} | paper 执行: {_pmode} (--paper-execution {args.paper_execution})"
     )
     print(f"  ✓ 输出目录: {args.output_dir}")
     stage_times["2_init_engine"] = (datetime.now() - stage_2_start).total_seconds()
@@ -468,6 +498,9 @@ def main() -> int:
         event_stream,
         config_path=args.config,
         engine=engine,
+        env_values=_broker_env,
+        account_index=args.account_index,
+        paper_execution=args.paper_execution,
     )
     stage_times["3_subscribe"] = (datetime.now() - stage_3_start).total_seconds()
 

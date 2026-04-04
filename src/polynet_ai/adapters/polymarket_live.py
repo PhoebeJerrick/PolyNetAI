@@ -23,6 +23,16 @@ from polynet_ai.domain.models import TradeEvent
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 
+
+def _ws_error_detail(exc: BaseException, *, max_len: int = 220) -> str:
+    """将 WebSocket 相关异常压缩为一行，便于日志区分网络/代理问题与程序错误。"""
+    text = f"{exc.__class__.__name__}: {exc}"
+    text = " ".join(text.split())
+    if len(text) > max_len:
+        return text[: max_len - 3] + "..."
+    return text
+
+
 _HTTP_HEADERS = {
     "User-Agent": "PolyNetAI/0.1 (+https://polymarket.com)",
     "Accept": "application/json",
@@ -524,6 +534,7 @@ def iter_polymarket_trade_events(
             ws_kw.update(_websocket_proxy_kwargs())
             connection = None
             while True:
+                connect_err: BaseException | None = None
                 try:
                     connection = websocket.create_connection(MARKET_WS_URL, **ws_kw)
                     connection.settimeout(receive_timeout_seconds)
@@ -539,9 +550,11 @@ def iter_polymarket_trade_events(
                     reconnect_attempt = 0
                     last_ping = time.monotonic()
                     break
-                except closed_exc:
+                except closed_exc as e:
+                    connect_err = e
                     reconnect_attempt += 1
-                except Exception:
+                except Exception as e:
+                    connect_err = e
                     reconnect_attempt += 1
                 finally:
                     if connection is not None and reconnect_attempt > 0:
@@ -554,7 +567,11 @@ def iter_polymarket_trade_events(
                 if close_after is not None and time.monotonic() >= close_after:
                     break
                 if log_fn is not None:
-                    log_fn(f"[polymarket] 连接 {spec.slug} 失败，{reconnect_delay_seconds:.1f}s 后重试（第 {reconnect_attempt} 次）")
+                    why = f" {_ws_error_detail(connect_err)}" if connect_err is not None else ""
+                    log_fn(
+                        f"[polymarket] 连接 {spec.slug} 失败{why}，"
+                        f"{reconnect_delay_seconds:.1f}s 后重试（第 {reconnect_attempt} 次）"
+                    )
                 time.sleep(max(0.1, reconnect_delay_seconds))
 
             if connection is None:
@@ -593,10 +610,13 @@ def iter_polymarket_trade_events(
                             if eff_cutoff_naive is not None and event.timestamp < eff_cutoff_naive:
                                 continue
                             yield event
-            except closed_exc:
+            except closed_exc as e:
                 reconnect_attempt += 1
                 if log_fn is not None:
-                    log_fn(f"[polymarket] 连接中断 {spec.slug}，{reconnect_delay_seconds:.1f}s 后重连（第 {reconnect_attempt} 次）")
+                    log_fn(
+                        f"[polymarket] 连接中断 {spec.slug}（{_ws_error_detail(e)}），"
+                        f"{reconnect_delay_seconds:.1f}s 后重连（第 {reconnect_attempt} 次）"
+                    )
                 time.sleep(max(0.1, reconnect_delay_seconds))
                 continue
             finally:

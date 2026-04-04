@@ -44,6 +44,7 @@ from polynet_ai.execution.polymarket_auto_redeem import (  # noqa: E402
     redeem_report_to_audit_rows,
     run_auto_redeem_scan,
 )
+from polynet_ai.execution.paper_broker import paper_broker_for_config  # noqa: E402
 from polynet_ai.execution.polymarket_broker import PolymarketBroker  # noqa: E402
 from polynet_ai.reporting.excel_export import get_version_tag  # noqa: E402
 from polynet_ai.strategy.spec import (  # noqa: E402
@@ -360,6 +361,7 @@ def _execute_one_polymarket_cycle(
     purse_address: str,
     cycle_ix: int,
     max_cycles: int,
+    env_values: dict[str, str],
 ) -> None:
     redeem_audit_rows: list[dict[str, object]] = []
 
@@ -450,12 +452,22 @@ def _execute_one_polymarket_cycle(
         effective_starting_cash = float(per_cycle)
         print(f"[paper] fixed：引擎名义本金={effective_starting_cash:g} USDC", flush=True)
 
+    if args.real_trading:
+        broker_for_engine: Any = real_broker
+    else:
+        broker_for_engine = paper_broker_for_config(
+            strategy_config,
+            env_values=env_values if env_values else None,
+            account_index=args.account_index,
+            signature_type=args.signature_type,
+        )
+
     engine = ReplayEngine(
         strategy_config,
         starting_cash=effective_starting_cash,
         capital_reset_mode=args.capital_reset_mode,
         per_cycle_cash=float(per_cycle) if args.capital_reset_mode == "fixed" else None,
-        broker=real_broker,
+        broker=broker_for_engine,
     )
     runner = LivePaperRunner(engine)
 
@@ -728,6 +740,7 @@ def main() -> int:
             purse_address=purse_address,
             cycle_ix=cycle_ix,
             max_cycles=args.max_cycles,
+            env_values=env_values,
         )
 
     return 0

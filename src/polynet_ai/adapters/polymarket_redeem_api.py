@@ -5,11 +5,16 @@ Polymarket Data API：可赎回持仓（redeemable positions）。
 """
 from __future__ import annotations
 
+import json
+import time
 from typing import Any
 
 import requests
 
 DATA_API_BASE = "https://data-api.polymarket.com"
+
+# 与 Gamma `_fetch_json` 类似：应对偶发 TCP 重置 / 中间设备断连（如 Windows 10054）。
+_REDEEM_POSITIONS_RETRY_DELAYS_SEC = (0.0, 0.6, 1.2, 2.4)
 
 
 def fetch_redeemable_positions_aggregated(
@@ -29,14 +34,38 @@ def fetch_redeemable_positions_aggregated(
         return []
     sess = session or requests.Session()
     sess.headers.setdefault("User-Agent", "PolyNetAI/1.0 (+redeem)")
-    resp = sess.get(
-        f"{DATA_API_BASE}/positions",
-        params={"user": addr, "redeemable": "true", "limit": int(limit)},
-        timeout=timeout,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    if not isinstance(data, list):
+
+    last_exc: BaseException | None = None
+    data: Any | None = None
+    for attempt, delay_sec in enumerate(_REDEEM_POSITIONS_RETRY_DELAYS_SEC):
+        if delay_sec:
+            time.sleep(delay_sec)
+        try:
+            resp = sess.get(
+                f"{DATA_API_BASE}/positions",
+                params={"user": addr, "redeemable": "true", "limit": int(limit)},
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            raw = resp.json()
+        except (
+            requests.exceptions.RequestException,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            last_exc = exc
+            if attempt == len(_REDEEM_POSITIONS_RETRY_DELAYS_SEC) - 1:
+                raise
+            continue
+        if not isinstance(raw, list):
+            return []
+        data = raw
+        break
+
+    if data is None:
+        if last_exc is not None:
+            raise last_exc
         return []
 
     by_cond: dict[str, dict[str, Any]] = {}

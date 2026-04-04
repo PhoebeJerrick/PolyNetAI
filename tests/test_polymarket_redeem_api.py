@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import requests
+from unittest.mock import MagicMock, patch
 
 from polynet_ai.adapters.polymarket_redeem_api import fetch_redeemable_positions_aggregated
 
@@ -8,6 +9,20 @@ from polynet_ai.adapters.polymarket_redeem_api import fetch_redeemable_positions
 def test_fetch_redeemable_empty_address() -> None:
     assert fetch_redeemable_positions_aggregated("") == []
     assert fetch_redeemable_positions_aggregated("not_hex") == []
+
+
+@patch("polynet_ai.adapters.polymarket_redeem_api.time.sleep", lambda *_: None)
+def test_fetch_redeemable_retries_on_connection_error() -> None:
+    ok = MagicMock()
+    ok.json.return_value = []
+    ok.raise_for_status = MagicMock()
+    session = MagicMock()
+    session.get.side_effect = [
+        requests.exceptions.ConnectionError("reset"),
+        ok,
+    ]
+    assert fetch_redeemable_positions_aggregated("0xabc", session=session) == []
+    assert session.get.call_count == 2
 
 
 def test_fetch_redeemable_aggregates_by_condition() -> None:

@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 import pandas as pd
+
+
+def _sanitize_json_for_html_script(json_text: str) -> str:
+    """打断字面量 ``</script``，避免 HTML 解析器在 <script> 内提前闭合标签（与 JS 字符串边界无关）。"""
+    return re.sub(r"(?i)</script", r"<\\/script", json_text)
 
 
 @dataclass(slots=True)
@@ -340,7 +346,8 @@ def build_dashboard_state(
 
 
 def _build_dashboard_state_script(state: dict[str, Any]) -> str:
-    return "window.__POLYNET_DASHBOARD_STATE__ = " + json.dumps(state, ensure_ascii=False) + ";\n"
+    raw = json.dumps(state, ensure_ascii=False)
+    return "window.__POLYNET_DASHBOARD_STATE__ = " + _sanitize_json_for_html_script(raw) + ";\n"
 
 
 def _dashboard_rule_price_param_meta() -> dict[str, dict[str, str]]:
@@ -776,7 +783,7 @@ def _dashboard_config_schemas_json() -> str:
 
 
 def _dashboard_config_param_meta_script() -> str:
-    payload = json.dumps(_build_dashboard_config_param_meta(), ensure_ascii=False)
+    payload = _sanitize_json_for_html_script(json.dumps(_build_dashboard_config_param_meta(), ensure_ascii=False))
     return (
         f"\n    const CONFIG_PARAM_META = {payload};\n"
         "    function enrichConfigSchemaField(field) {\n"
@@ -807,8 +814,8 @@ def build_dashboard_html(
         refresh_seconds=refresh_seconds,
     )
     safe_title = html.escape(str(state["title"]))
-    initial_state_json = json.dumps(state, ensure_ascii=False)
-    config_schemas_json = _dashboard_config_schemas_json()
+    initial_state_json = _sanitize_json_for_html_script(json.dumps(state, ensure_ascii=False))
+    config_schemas_json = _sanitize_json_for_html_script(_dashboard_config_schemas_json())
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1026,6 +1033,7 @@ def build_dashboard_html(
       profiles: [],
       draftOverrides: {{}},
       runningSnapshot: null,
+      _lastPollError: null,
     }};
     const CONFIG_SCHEMAS = {config_schemas_json};
     {_dashboard_config_param_meta_script()}    function setConfigStatus(message, level) {{
@@ -1190,8 +1198,27 @@ def build_dashboard_html(
       }}
       form.innerHTML = sections.join("");
     }}
-    async function fetchConfigJson(url, options) {{
-      const response = await fetch(url, options);
+    async function fetchConfigJson(url, options, timeoutMs) {{
+      const opts = Object.assign({{}}, options || {{}});
+      const t = timeoutMs == null ? 0 : Number(timeoutMs);
+      let timer = null;
+      if (t > 0 && typeof AbortController !== "undefined") {{
+        const controller = new AbortController();
+        timer = setTimeout(function() {{ controller.abort(); }}, t);
+        opts.signal = controller.signal;
+      }}
+      let response;
+      try {{
+        response = await fetch(url, opts);
+      }} catch (error) {{
+        if (timer) clearTimeout(timer);
+        const name = error && error.name ? error.name : "";
+        if (name === "AbortError") {{
+          throw new Error(`请求超时（>${{t}}ms）: ${{url}}`);
+        }}
+        throw error;
+      }}
+      if (timer) clearTimeout(timer);
       if (!response.ok) {{
         let message = response.status + " " + response.statusText;
         try {{
@@ -1445,6 +1472,30 @@ def build_dashboard_html(
         if (status && status.log_path) {{
           statusLines.push(`运行日志：<code>${{configEscapeHtml(status.log_path)}}</code>`);
         }}
+        if (status && status.running) {{
+          const prog = [];
+          if (status.elapsed_seconds != null && status.elapsed_seconds !== "") {{
+            prog.push(`已运行 ${{configEscapeHtml(String(status.elapsed_seconds))}}s`);
+          }}
+          if (status.total_cycles != null && status.total_cycles !== "") {{
+            const done = status.completed_cycles != null ? status.completed_cycles : 0;
+            prog.push(`周期 ${{configEscapeHtml(String(done))}} / ${{configEscapeHtml(String(status.total_cycles))}}`);
+          }}
+          if (
+            status.estimated_remaining_seconds != null &&
+            status.estimated_remaining_seconds !== "" &&
+            Number(status.estimated_remaining_seconds) > 0
+          ) {{
+            prog.push(`预计剩余约 ${{configEscapeHtml(String(status.estimated_remaining_seconds))}}s`);
+          }}
+          if (prog.length) {{
+            statusLines.push(`进度：<strong>${{prog.join(" · ")}}</strong>`);
+          }} else {{
+            statusLines.push(
+              "进度：已启动，尚未从 <code>cycles.csv</code> 读到已完成周期（常见于启动后正在连行情 / 等第一个周期落盘）。",
+            );
+          }}
+        }}
         metaNode.innerHTML = statusLines.join("<br>");
       }}
       if (stopButton) {{
@@ -1452,31 +1503,31 @@ def build_dashboard_html(
       }}
     }}
     async function loadLauncherCatalog() {{
-      return fetchConfigJson("/api/launcher", {{ cache: "no-store" }});
+      return fetchConfigJson("/api/launcher", {{ cache: "no-store" }}, 60000);
     }}
     async function refreshLauncherStatus() {{
-      return fetchConfigJson("/api/launcher/status", {{ cache: "no-store" }});
+      return fetchConfigJson("/api/launcher/status", {{ cache: "no-store" }}, 15000);
     }}
     async function startLauncherProfile(profileName, overrides) {{
       return fetchConfigJson("/api/launcher/start", {{
         method: "POST",
         headers: {{ "Content-Type": "application/json" }},
         body: JSON.stringify({{ profile: profileName, overrides: overrides || {{}} }}),
-      }});
+      }}, 60000);
     }}
     async function saveLauncherDefaults(profileName, overrides) {{
       return fetchConfigJson("/api/launcher/defaults", {{
         method: "POST",
         headers: {{ "Content-Type": "application/json" }},
         body: JSON.stringify({{ profile: profileName, overrides: overrides || {{}} }}),
-      }});
+      }}, 60000);
     }}
     async function stopLauncherProfile() {{
       return fetchConfigJson("/api/launcher/stop", {{
         method: "POST",
         headers: {{ "Content-Type": "application/json" }},
         body: JSON.stringify({{}}),
-      }});
+      }}, 30000);
     }}
     async function initializeRunConsole() {{
       const profilesNode = document.getElementById("launcher-profiles");
@@ -1503,13 +1554,14 @@ def build_dashboard_html(
           updateLauncherDraft(profileName, fieldName, target.checked);
         }});
         profilesNode.addEventListener("click", async function(event) {{
-          const target = event.target;
-          if (!target) return;
-          const isStartButton = target.classList && target.classList.contains("launcher-start-btn");
-          const isSaveDefaultsButton = target.classList && target.classList.contains("launcher-save-defaults-btn");
-          const profileName = target.getAttribute("data-launch-profile");
-          const saveProfileName = target.getAttribute("data-launch-save-profile");
-          if (isStartButton && profileName) {{
+          const rawTarget = event.target;
+          if (!rawTarget) return;
+          const el = rawTarget.nodeType === 3 && rawTarget.parentElement ? rawTarget.parentElement : rawTarget;
+          const startBtn = el.closest ? el.closest(".launcher-start-btn") : null;
+          const saveBtn = el.closest ? el.closest(".launcher-save-defaults-btn") : null;
+          if (startBtn) {{
+            const profileName = startBtn.getAttribute("data-launch-profile");
+            if (!profileName) return;
             const overrides = collectLauncherOverrides(profileName);
             setLauncherStatus(`正在启动 ${{profileName}} ...`, "");
             try {{
@@ -1532,7 +1584,9 @@ def build_dashboard_html(
             }}
             return;
           }}
-          if (isSaveDefaultsButton && saveProfileName) {{
+          if (saveBtn) {{
+            const saveProfileName = saveBtn.getAttribute("data-launch-save-profile");
+            if (!saveProfileName) return;
             const overrides = collectLauncherOverrides(saveProfileName);
             setLauncherStatus(`正在保存 ${{saveProfileName}} 默认值...`, "");
             try {{
@@ -1599,6 +1653,7 @@ def build_dashboard_html(
         setInterval(async function() {{
           try {{
             const status = await refreshLauncherStatus();
+            launcherState._lastPollError = null;
             renderLauncherMeta(status || {{}}, payload.help_command || "", payload.preferences_path || "");
             const runningNow = Boolean(status && status.running);
             const shouldReloadCatalog = launcherState.runningSnapshot !== runningNow;
@@ -1620,6 +1675,14 @@ def build_dashboard_html(
               }}
             }}
           }} catch (error) {{
+            const msg = error && error.message ? error.message : String(error);
+            if (launcherState._lastPollError !== msg) {{
+              launcherState._lastPollError = msg;
+              setLauncherStatus(
+                `运行状态轮询失败: ${{msg}}。请确认本页是通过「python scripts/run_dashboard_console.py」打开的同一主机/端口，且控制台进程仍在运行。`,
+                "error",
+              );
+            }}
           }}
         }}, 3000);
       }} catch (error) {{
@@ -1691,10 +1754,21 @@ def build_dashboard_html(
         setConfigStatus("参数控制台未连接。请使用 `python scripts/run_dashboard_console.py --dashboard-dir <输出目录>` 通过 http://localhost 打开 dashboard。", "error");
       }}
     }}
-    applyDashboardState(window.__POLYNET_DASHBOARD_STATE__);
-    setInterval(reloadDashboardStateScript, Math.max(250, Number(window.__POLYNET_DASHBOARD_STATE__.refresh_seconds || 1) * 1000));
-    initializeConfigConsole();
-    initializeRunConsole();
+    (function dashboardBoot() {{
+      try {{
+        applyDashboardState(window.__POLYNET_DASHBOARD_STATE__);
+        setInterval(reloadDashboardStateScript, Math.max(250, Number(window.__POLYNET_DASHBOARD_STATE__.refresh_seconds || 1) * 1000));
+        void initializeConfigConsole();
+        void initializeRunConsole();
+      }} catch (error) {{
+        const msg = error && error.message ? error.message : String(error);
+        const node = document.getElementById("launcher-status");
+        if (node) {{
+          node.textContent = "Dashboard 脚本初始化失败: " + msg;
+          node.className = "config-status error";
+        }}
+      }}
+    }})();
   </script>
 </body>
 </html>

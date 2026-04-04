@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable
 
 import pandas as pd
 
+from polynet_ai.adapters.cycle_window_timing import window_start_naive_utc_from_slug
 from polynet_ai.domain.models import TradeEvent
 from polynet_ai.engine.replay import ReplayEngine, ReplayResult
 from polynet_ai.reporting.dashboard import generate_dashboard_bundle
@@ -17,6 +19,19 @@ from polynet_ai.reporting.excel_export import export_trade_ledger_to_excel, get_
 class LiveRunnerResult:
     replay_result: ReplayResult
     snapshot_df: pd.DataFrame
+
+
+def _format_time_since_cycle_start(cycle_id: str, event_time: datetime) -> str:
+    """相对 slug 时间桶起点（如 btc-updown-5m-<epoch>）的经过时间，供 [live] 状态行展示。"""
+    start = window_start_naive_utc_from_slug(cycle_id)
+    if start is None:
+        return "t_rel=n/a"
+    delta_sec = (event_time - start).total_seconds()
+    if delta_sec < 0 or delta_sec < 60.0:
+        return f"t_rel={delta_sec:.1f}s"
+    minutes = int(delta_sec // 60)
+    seconds = delta_sec - minutes * 60
+    return f"t_rel={minutes}m{seconds:04.1f}s"
 
 
 class LivePaperRunner:
@@ -135,8 +150,9 @@ class LivePaperRunner:
             snapshot_rows.append(snapshot_row)
 
             if status_every > 0 and index % status_every == 0:
+                t_rel = _format_time_since_cycle_start(event.cycle_id, event.timestamp)
                 print(
-                    f"[live] events={index} cycle={step.snapshot.cycle_id} "
+                    f"[live] events={index} cycle={step.snapshot.cycle_id} {t_rel} "
                     f"net={step.snapshot.net_position:.3f} pnl={step.snapshot.cycle_net_profit:.3f} "
                     f"cash={self.engine.account.cash:.3f}"
                 )
