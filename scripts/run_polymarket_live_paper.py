@@ -8,12 +8,15 @@ from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS_DIR = Path(__file__).resolve().parent
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+# 必须把仓库根目录放进 sys.path，否则 `import scripts.*` 可能命中 site-packages 里
+# pywin32 提供的同名命名空间包（…/win32/scripts），从而找不到本仓库的 scripts 包。
+for _p in (SRC, ROOT, SCRIPTS_DIR):
+    _s = str(_p)
+    if _s not in sys.path:
+        sys.path.insert(0, _s)
 
 from polynet_ai.adapters.cycle_window_timing import (  # noqa: E402
     cycle_seconds_from_market_slug,
