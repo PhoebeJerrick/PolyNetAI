@@ -15,6 +15,11 @@ from pathlib import Path
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from polynet_ai.adapters.polymarket_live import resolve_default_api_config_env  # noqa: E402
 
 
 def _is_process_running(pid: int) -> bool:
@@ -446,7 +451,7 @@ def build_parser() -> argparse.ArgumentParser:
         target.add_argument("--start-buffer-seconds", type=float, default=2.0)
         target.add_argument("--market-slugs", nargs="*", default=None)
         target.add_argument("--market-slugs-file", default=None)
-        target.add_argument("--env-file", default=str(ROOT.parent / "APIs" / "ApiConfig.env"))
+        target.add_argument("--env-file", default=resolve_default_api_config_env(ROOT))
         target.add_argument("--account-index", type=int, default=2)
 
     start_parser = subparsers.add_parser("start", help="后台开始抓数据")

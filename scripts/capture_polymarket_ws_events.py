@@ -24,6 +24,7 @@ from polynet_ai.adapters.polymarket_live import (  # noqa: E402
     get_account_env_value,
     iter_polymarket_trade_events,
     load_api_env,
+    resolve_default_api_config_env,
     select_account_env,
 )
 from polynet_ai.adapters.trade_event_store import TradeEventRecorder  # noqa: E402
@@ -168,7 +169,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--market-slugs-file", default=None, help="每行一个 market slug")
     parser.add_argument(
         "--env-file",
-        default=str(ROOT.parent / "APIs" / "ApiConfig.env"),
+        default=resolve_default_api_config_env(ROOT),
         help="用于加载代理等环境变量；仅抓公开 websocket，不会真实下单。",
     )
     parser.add_argument("--account-index", type=int, default=2, help="账号编号；主要用于读取带后缀的代理/配置键")

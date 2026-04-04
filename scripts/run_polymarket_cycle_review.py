@@ -29,6 +29,7 @@ from polynet_ai.adapters.polymarket_live import (  # noqa: E402
     get_account_env_value,
     iter_polymarket_trade_events,
     load_api_env,
+    resolve_default_api_config_env,
     select_account_env,
 )
 from polynet_ai.adapters.trade_event_store import (  # noqa: E402
@@ -76,7 +77,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--account-index", type=int, default=2)
     parser.add_argument(
         "--env-file",
-        default=str(ROOT.parent / "APIs" / "ApiConfig.env"),
+        default=resolve_default_api_config_env(ROOT),
         help="API 配置文件路径；本脚本只会用账号地址抓成交与应用代理，不会真实下单。",
     )
     return parser.parse_args()

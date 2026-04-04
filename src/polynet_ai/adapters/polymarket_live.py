@@ -132,6 +132,22 @@ def _fetch_json(url: str) -> Any:
         raise RuntimeError(hint) from (last if last is not None else urllib_exc)
 
 
+def default_api_config_env_candidates(root: Path) -> tuple[Path, ...]:
+    """相对仓库根目录 `root` 的 ApiConfig.env 默认搜索路径（按顺序）。"""
+    return (
+        root.parent / "APIs" / "ApiConfig.env",
+        root.parent.parent / "APIs" / "ApiConfig.env",
+    )
+
+
+def resolve_default_api_config_env(root: Path) -> str:
+    """返回第一个存在的默认 ApiConfig.env 路径；均不存在时返回首选路径字符串。"""
+    for candidate in default_api_config_env_candidates(root):
+        if candidate.exists():
+            return str(candidate.resolve())
+    return str(default_api_config_env_candidates(root)[0].resolve())
+
+
 def load_api_env(path: str | Path) -> dict[str, str]:
     values: dict[str, str] = {}
     env_path = Path(path)
