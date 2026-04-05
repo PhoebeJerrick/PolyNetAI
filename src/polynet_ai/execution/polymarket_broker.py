@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import requests
+
+logger = logging.getLogger(__name__)
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import (
     ApiCreds,
@@ -135,6 +138,20 @@ class PolymarketBroker:
         )
         raw_balance = float((payload or {}).get("balance") or 0.0)
         return raw_balance / 1_000_000.0
+
+    def _query_conditional_token_balance(self, token_id: str) -> float | None:
+        """查询链上条件代币余额（ERC1155），返回 None 表示查询失败。"""
+        try:
+            payload = self.client.get_balance_allowance(
+                BalanceAllowanceParams(
+                    asset_type=AssetType.CONDITIONAL,
+                    token_id=token_id,
+                    signature_type=self.signature_type,
+                )
+            )
+            return float((payload or {}).get("balance") or 0.0) / 1_000_000.0
+        except Exception:
+            return None
 
     def get_open_orders(
         self,
@@ -290,8 +307,40 @@ class PolymarketBroker:
             success = False
         if not success:
             record["status"] = "rejected"
+            error_msg = str((record.get("response") or {}).get("errorMsg") or "订单被拒绝")
+            is_balance_error = "balance" in error_msg.lower()
+            result_metadata: dict[str, Any] = {}
+            if is_balance_error:
+                if intent.action == "sell":
+                    # SELL: ERC1155 条件代币余额不足 — 显示引擎持仓 vs 链上余额
+                    chain_balance = self._query_conditional_token_balance(token_id)
+                    chain_str = f"{chain_balance:.6f}" if chain_balance is not None else "查询失败"
+                    error_msg = (
+                        f"卖出失败：链上代币余额不足 | "
+                        f"方向={intent.outcome} "
+                        f"引擎欲卖={plan.shares:.4f} "
+                        f"链上余额={chain_str} "
+                        f"(CLOB: {error_msg})"
+                    )
+                    # 将链上余额传回引擎，用于矫正 PositionBook.held
+                    if chain_balance is not None:
+                        result_metadata["chain_balance_correction"] = {
+                            "outcome": intent.outcome,
+                            "chain_balance": chain_balance,
+                            "engine_wanted": plan.shares,
+                        }
+                else:
+                    # BUY: USDC 余额不足
+                    error_msg = (
+                        f"买入失败：USDC 余额不足 | "
+                        f"方向={intent.outcome} "
+                        f"所需金额≈{market_amount * (1.0 + self.fee_rate):.2f}U "
+                        f"(CLOB: {error_msg})"
+                    )
+                logger.warning("[broker] %s", error_msg)
+            record["error_msg"] = error_msg
             self.submitted_orders.append(record)
-            return ExecutionResult(status="rejected", reason=str((record.get("response") or {}).get("errorMsg") or "订单被拒绝"))
+            return ExecutionResult(status="rejected", reason=error_msg, metadata=result_metadata)
 
         order_id = str((response or {}).get("orderID") or "")
         reserved_cash = market_amount * (1.0 + self.fee_rate) if intent.action == "buy" else 0.0
@@ -370,6 +419,21 @@ class PolymarketBroker:
                     )
                 else:
                     fill.fill_note = fill.fill_note or "CLOB get_order 解析成交量价"
+                    # BUY 订单的 size_matched 为扣费前 gross token，尝试 Data API 获取净份额
+                    if pending.intent.action == "buy":
+                        api_fill = self._try_build_fill_from_data_api_short(pending, timestamp)
+                        if api_fill is not None:
+                            fill = api_fill
+                        else:
+                            fill.fill_note = (
+                                f"CLOB get_order 解析（gross token）| "
+                                f"Data API 对账未命中，size_matched={fill.shares:.6f} 可能高于实际净份额"
+                            )
+                            logger.warning(
+                                "[broker] BUY 对账回退: order=%s size_matched=%.6f, "
+                                "Data API 未命中, 引擎将记录 gross token（可能偏高~4%%）",
+                                order_id, fill.shares,
+                            )
                 record["status"] = "confirmed"
                 record["confirmation_state"] = status or "confirmed"
                 record["fill_source"] = fill.fill_source
@@ -477,13 +541,25 @@ class PolymarketBroker:
         size_matched = _f("size_matched") or _f("sizeMatched") or _f("matched_size") or _f("matchedSize")
         if size_matched <= 0:
             return None
-        raw_price = (
-            _f("avg_price")
-            or _f("averagePrice")
-            or _f("avgPrice")
-            or _f("price")
-            or pending.execution_plan.estimated_vwap
-        )
+
+        # ── 实际成交价：优先从 post_order 的 makingAmount/takingAmount 推导 ──
+        # get_order 的 price 字段仅为限价，不是成交均价。
+        _resp = pending.response or {}
+        _making = float(_resp.get("makingAmount") or 0.0)
+        _taking = float(_resp.get("takingAmount") or 0.0)
+        if _making > 0 and _taking > 0:
+            if pending.intent.action == "buy":
+                raw_price = _making / _taking        # USDC 支出 / 收到 token
+            else:
+                raw_price = _taking / _making         # USDC 收入 / 卖出 token
+        else:
+            raw_price = (
+                _f("avg_price")
+                or _f("averagePrice")
+                or _f("avgPrice")
+                or _f("price")
+                or pending.execution_plan.estimated_vwap
+            )
         if raw_price <= 0:
             return None
         gross = size_matched * raw_price
@@ -585,3 +661,69 @@ class PolymarketBroker:
             fill_note="Data API /trades 按用户+condition+token 侧匹配，可能与链上最终结算仍有细微差异",
             broker_order_id=pending.order_id,
         )
+
+    def _try_build_fill_from_data_api_short(
+        self,
+        pending: PendingOrder,
+        poll_timestamp: datetime,
+    ) -> FillEvent | None:
+        """用 post_order 的 transactionHash 快速查 Data API 获取扣费后净 shares。
+
+        超时 3 秒；不命中则返回 None，调用方退回 CLOB 估算。
+        """
+        user = (self.purse_address or "").strip()
+        cid = (pending.condition_id or "").strip()
+        if not user.startswith("0x") or not cid.startswith("0x"):
+            return None
+        resp_body = pending.response or {}
+        known_tx: set[str] = set()
+        for tx in resp_body.get("transactionsHashes") or []:
+            if tx:
+                known_tx.add(str(tx).strip().lower())
+        if not known_tx:
+            return None
+        try:
+            resp = requests.get(
+                f"{DATA_API_BASE}/trades",
+                params={"user": user, "market": cid, "limit": 60},
+                headers={"User-Agent": "PolyNetAI/1.0 (+broker-reconcile-tx)"},
+                timeout=(3.0, 5.0),
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception:
+            return None
+        if not isinstance(payload, list):
+            return None
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            tx_hash = str(item.get("transactionHash") or "").strip().lower()
+            if tx_hash not in known_tx:
+                continue
+            try:
+                sz = float(item.get("size") or 0.0)
+                px = float(item.get("price") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if sz <= 0 or px <= 0:
+                continue
+            gross = sz * px
+            fee = gross * self.fee_rate
+            return FillEvent(
+                market_id=pending.intent.market_id,
+                cycle_id=pending.intent.cycle_id,
+                timestamp=poll_timestamp,
+                price=px,
+                shares=sz,
+                outcome=pending.intent.outcome,
+                action=pending.intent.action,
+                fee=fee,
+                slippage=abs(px - pending.intent.reference_price),
+                reason=f"{pending.intent.reason} [data_api_trades]",
+                reserved_cash=pending.reserved_cash,
+                fill_source="data_api_trades",
+                fill_note="Data API 按 transactionHash 精确匹配（BUY 扣费后净份额）",
+                broker_order_id=pending.order_id,
+            )
+        return None

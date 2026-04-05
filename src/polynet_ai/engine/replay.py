@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime
 import json
+import logging
 import os
 from pathlib import Path
 from collections import deque
@@ -353,6 +354,10 @@ class ReplayEngine:
                         row["account_cash"] = self.account.cash
                         row["available_cash"] = self.account.available_cash
                     elif execution.status != "filled":
+                        # SELL 因链上余额不足被拒 → 用链上实际余额矫正引擎持仓
+                        correction = (execution.metadata or {}).get("chain_balance_correction")
+                        if correction and risk_decision.intent.action == "sell":
+                            self._correct_held_from_chain(correction)
                         self._sync_account_reservations()
                         row["risk_status"] = execution.status
                         row["risk_reason"] = execution.reason
@@ -466,6 +471,33 @@ class ReplayEngine:
     def _sync_account_reservations(self) -> None:
         pending_context = self._pending_context()
         self.account.reserved_cash = float(pending_context.get("pending_buy_reserved_cash", 0.0))
+
+    def _correct_held_from_chain(self, correction: dict) -> None:
+        """SELL 被拒时，用链上实际余额矫正引擎 PositionBook.held。"""
+        state = self.state_engine.state
+        if state is None:
+            return
+        outcome = correction.get("outcome")
+        chain_bal = correction.get("chain_balance")
+        if outcome is None or chain_bal is None:
+            return
+        pos = state.up_position if outcome == "up" else state.down_position
+        old_held = pos.held
+        if chain_bal >= old_held:
+            return  # 链上余额不低于引擎记录，无需矫正
+        pos.held = chain_bal
+        if pos.held <= 1e-10:
+            pos.held = 0.0
+            pos.cost = 0.0
+            pos.avg_price = 0.0
+        else:
+            pos.cost = pos.held * pos.avg_price
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            "[持仓矫正] %s held: %.6f → %.6f（链上余额 %.6f，引擎偏高 %.4f%%）",
+            outcome, old_held, pos.held, chain_bal,
+            (old_held - chain_bal) / old_held * 100 if old_held > 0 else 0,
+        )
 
     def _build_result(
         self,
