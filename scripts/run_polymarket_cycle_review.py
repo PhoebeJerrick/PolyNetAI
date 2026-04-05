@@ -762,6 +762,29 @@ def main() -> int:
     if args.max_cycles < 1:
         raise ValueError("--max-cycles 须 >= 1")
 
+    # ── 启动赎回：仅真实下单模式下，首次交易前尝试赎回已结算仓位 ──
+    if args.real_trading and redeem_settings is not None:
+        print("[redeem] 启动赎回：检查是否有可赎回的已结算仓位 ...", flush=True)
+        try:
+            t_r0 = datetime.now(timezone.utc)
+            startup_report = run_auto_redeem_scan(
+                redeem_settings, log_fn=lambda m: print(m, flush=True),
+            )
+            t_r1 = datetime.now(timezone.utc)
+            startup_rows = redeem_report_to_audit_rows(
+                startup_report, utc_start=t_r0, utc_end=t_r1, trigger="startup",
+            )
+            redeemed = sum(
+                1 for r in startup_rows if r.get("outcome") == "relayer_ok"
+            )
+            print(
+                f"[redeem] 启动赎回完成：扫描 {len(startup_rows)} 条，"
+                f"成功赎回 {redeemed} 条",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[redeem] 启动赎回异常（不影响后续交易）: {exc}", flush=True)
+
     for cycle_ix in range(args.max_cycles):
         if args.max_cycles > 1:
             print(

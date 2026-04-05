@@ -148,12 +148,15 @@ def _encode_redeem_calldata(condition_id: str) -> bytes:
     cond_bytes = _to_bytes32(_normalize_condition_hex(condition_id))
     w3 = Web3()
     ctf = w3.eth.contract(address=Web3.to_checksum_address(CTF_ADDRESS), abi=CTF_ABI)
-    return ctf.functions.redeemPositions(
+    args = [
         Web3.to_checksum_address(USDC_E_ADDRESS),
         PARENT_COLLECTION_ID_BYTES,
         cond_bytes,
         [1, 2],
-    ).encode_abi()
+    ]
+    # web3.py v7: encode_abi 从 ContractFunction 移至 Contract 对象
+    hex_data: str = ctf.encode_abi("redeemPositions", args=args)
+    return bytes.fromhex(hex_data.removeprefix("0x"))
 
 
 def redeem_condition_via_relayer(
