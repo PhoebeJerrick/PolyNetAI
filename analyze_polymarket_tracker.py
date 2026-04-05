@@ -298,6 +298,7 @@ def new_bucket() -> dict[str, float]:
 
 
 def winner(s: dict[str, float]) -> str | None:
+    """基于用户最后成交价推断赢家（仅作 fallback）。"""
     u, d = s["last_up"], s["last_dn"]
     if u > 0 and d > 0:
         return "up" if u >= d else "down"
@@ -308,10 +309,13 @@ def winner(s: dict[str, float]) -> str | None:
     return None
 
 
-def settlement_summary(s: dict[str, float]) -> dict[str, float]:
+def settlement_summary(
+    s: dict[str, float],
+    override_winner: str | None = None,
+) -> dict[str, float]:
     rem_up = s["up_held"]
     rem_dn = s["dn_held"]
-    w = winner(s)
+    w = override_winner or winner(s)
 
     up_stl = dn_stl = 0.0
     if w == "up":
@@ -365,6 +369,7 @@ def append_subtotals(
     pnl_stats: dict[tuple[object, ...], dict[str, float]],
     marker_col: str,
     group_cols: list[str],
+    winner_override: str | None = None,
 ) -> pd.DataFrame:
     if df.empty:
         return df
@@ -387,7 +392,7 @@ def append_subtotals(
         key = tuple(last[c] for c in group_cols)
         stats = pnl_stats.get(key)
         if stats:
-            sm = settlement_summary(stats)
+            sm = settlement_summary(stats, override_winner=winner_override)
             sub["Up已成交差价盈亏"] = sm["up_realized_total"]
             sub["Down已成交差价盈亏"] = sm["dn_realized_total"]
             sub["未平仓UP盈亏"] = sm["未平仓UP盈亏"]
@@ -400,7 +405,11 @@ def append_subtotals(
     return pd.DataFrame(rows, columns=all_cols)
 
 
-def compute(df: pd.DataFrame, args: argparse.Namespace) -> tuple[pd.DataFrame, dict[str, object]]:
+def compute(
+    df: pd.DataFrame,
+    args: argparse.Namespace,
+    winner_override: str | None = None,
+) -> tuple[pd.DataFrame, dict[str, object]]:
     if df.empty:
         raise ValueError("工作表为空。")
 
@@ -533,7 +542,7 @@ def compute(df: pd.DataFrame, args: argparse.Namespace) -> tuple[pd.DataFrame, d
     res["Down已成交差价盈亏"] = dn_pnl_v
     res["浮动盈亏"] = float_pnl_v
     res = insert_columns(res, prc_c)
-    res = append_subtotals(res, cyc_c, pnl_s, marker_col, groups)
+    res = append_subtotals(res, cyc_c, pnl_s, marker_col, groups, winner_override=winner_override)
     res = round_all(res)
 
     return res, {
@@ -696,6 +705,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--group-cols", type=split_group_cols, default=None)
     p.add_argument("--config", default="configs/strategy.yaml")
     p.add_argument("--position-value-denominator", type=float, default=None)
+    p.add_argument(
+        "--winner",
+        choices=["up", "down"],
+        default=None,
+        help="覆盖周期 winner 判定（来自引擎结算结果），不传则按用户最后成交价推断。",
+    )
     return p.parse_args()
 
 
@@ -738,7 +753,7 @@ def main() -> int:
         for sn in xls.sheet_names:
             df = pd.read_excel(xls, sheet_name=sn)
             if sn in tgts:
-                proc, sm = compute(df, args)
+                proc, sm = compute(df, args, winner_override=args.winner)
                 frames[sn] = proc
                 sums.append((sn, sm))
             else:

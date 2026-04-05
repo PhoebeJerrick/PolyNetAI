@@ -643,19 +643,23 @@ def _execute_one_polymarket_cycle(
     if user_trade_df.empty:
         print("[review] 该周期未抓到账号成交，跳过 analyze_polymarket_tracker.py。", flush=True)
     else:
-        subprocess.run(
-            [
-                sys.executable,
-                str(ROOT / "analyze_polymarket_tracker.py"),
-                "--input",
-                str(user_trade_xlsx),
-                "--output",
-                str(analyzed_xlsx),
-                "--sheet",
-                "BTC",
-            ],
-            check=True,
-        )
+        analyze_cmd = [
+            sys.executable,
+            str(ROOT / "analyze_polymarket_tracker.py"),
+            "--input",
+            str(user_trade_xlsx),
+            "--output",
+            str(analyzed_xlsx),
+            "--sheet",
+            "BTC",
+        ]
+        # 从引擎结算结果传入正确的 winner，避免分析脚本仅靠用户成交价推断
+        _cycle_df = result.replay_result.cycle_df
+        if _cycle_df is not None and not _cycle_df.empty:
+            _engine_winner = str(_cycle_df.iloc[-1].get("winner", "")).strip().lower()
+            if _engine_winner in ("up", "down"):
+                analyze_cmd.extend(["--winner", _engine_winner])
+        subprocess.run(analyze_cmd, check=True)
 
     _write_review_summary(
         run_dir / "review_summary.md",
