@@ -20,6 +20,16 @@ from polynet_ai.adapters.polymarket_live import (
 from polynet_ai.domain.models import TradeEvent
 
 
+def test_load_api_env_strips_export_prefix_and_bom(tmp_path) -> None:
+    env_file = tmp_path / "ApiConfig.env"
+    env_file.write_bytes(
+        "\ufeffexport PURSE_ADDRESS_2=0xabc\nexport POLY_DERIVE_API_KEY_2 =k2\n".encode("utf-8")
+    )
+    values = load_api_env(env_file)
+    assert values["PURSE_ADDRESS_2"] == "0xabc"
+    assert values["POLY_DERIVE_API_KEY_2"] == "k2"
+
+
 def test_load_api_env_ignores_titles_and_blank_lines(tmp_path) -> None:
     env_file = tmp_path / "ApiConfig.env"
     env_file.write_text(

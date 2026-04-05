@@ -159,16 +159,31 @@ def resolve_default_api_config_env(root: Path) -> str:
 
 
 def load_api_env(path: str | Path) -> dict[str, str]:
+    """
+    解析 `ApiConfig.env` 类文件（KEY=value，一行一项）。
+
+    兼容常见写法：
+    - UTF-8 BOM（utf-8-sig）；
+    - shell 风格 `export KEY=value` / `export KEY = value`（会去掉前缀 export）。
+    """
     values: dict[str, str] = {}
     env_path = Path(path)
     if not env_path.exists():
         return values
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+    text = env_path.read_text(encoding="utf-8-sig")
+    for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
+        if line.lower().startswith("export "):
+            line = line[7:].lstrip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
         key, value = line.split("=", 1)
-        values[key.strip()] = value.strip()
+        key = key.strip()
+        if not key:
+            continue
+        values[key] = value.strip()
     return values
 
 

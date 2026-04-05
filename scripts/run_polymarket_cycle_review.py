@@ -658,10 +658,17 @@ def _execute_one_polymarket_cycle(
 def main() -> int:
     args = parse_args()
 
-    env_values = load_api_env(args.env_file) if Path(args.env_file).exists() else {}
+    env_path = Path(args.env_file)
+    if args.real_trading and not env_path.exists():
+        raise FileNotFoundError(
+            f"实盘需要 ApiConfig：文件不存在 {env_path.resolve()}（可用 --env-file 或环境变量 RECORD_ENV_FILE 指定）"
+        )
+    env_values = load_api_env(args.env_file) if env_path.exists() else {}
     selected_env = select_account_env(env_values, account_index=args.account_index)
     applied = apply_proxy_env_from_dict(selected_env) if selected_env else []
-    purse_address = get_account_env_value(env_values, "PURSE_ADDRESS", account_index=args.account_index)
+    # 与代理一致：凭证在 select_account_env 后读取（裸键已由 *_<N> 提升，且与 get_account_env_value 后缀规则一致）
+    cred_env = selected_env
+    purse_address = get_account_env_value(cred_env, "PURSE_ADDRESS", account_index=args.account_index)
     print(f"[env] 默认账号={args.account_index}", flush=True)
     if purse_address:
         print(f"[env] PURSE_ADDRESS={purse_address}", flush=True)
@@ -705,7 +712,7 @@ def main() -> int:
 
     redeem_settings = None
     if args.auto_redeem:
-        redeem_settings = load_auto_redeem_settings(env_values, account_index=args.account_index)
+        redeem_settings = load_auto_redeem_settings(cred_env, account_index=args.account_index)
         if redeem_settings is None:
             print(
                 "[redeem] 默认已尝试启用自动赎回，但缺少带账号后缀的 PURSE_PRIVATE_KEY_<N>、PURSE_ADDRESS_<N> 或 "
@@ -722,7 +729,7 @@ def main() -> int:
     real_broker: PolymarketBroker | None = None
     if args.real_trading:
         real_broker = PolymarketBroker.from_env(
-            env_values,
+            cred_env,
             account_index=args.account_index,
             fee_rate=float(strategy_config.get("execution.fee_rate", 0.002)),
             signature_type=args.signature_type,
@@ -749,7 +756,7 @@ def main() -> int:
             purse_address=purse_address,
             cycle_ix=cycle_ix,
             max_cycles=args.max_cycles,
-            env_values=env_values,
+            env_values=cred_env,
         )
 
     return 0
