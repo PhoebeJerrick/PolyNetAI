@@ -779,7 +779,7 @@ def main() -> int:
                 startup_report, utc_start=t_r0, utc_end=t_r1, trigger="startup",
             )
             redeemed = sum(
-                1 for r in startup_rows if r.get("outcome") == "relayer_ok"
+                1 for r in startup_rows if r.get("outcome") == "success"
             )
             print(
                 f"[redeem] 启动赎回完成：扫描 {len(startup_rows)} 条，"
