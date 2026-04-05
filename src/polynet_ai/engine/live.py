@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -126,8 +127,12 @@ class LivePaperRunner:
         last_progress_flush = time.monotonic()
         last_redeem_poll = time.monotonic()
         redeem_interval = float(redeem_poll_interval_seconds)
+        cycle_ws_event_index: dict[tuple[str, str], int] = defaultdict(int)
 
         for index, event in enumerate(events, start=1):
+            cycle_key = (event.market_id, event.cycle_id)
+            cycle_ws_event_index[cycle_key] += 1
+            ws_idx = cycle_ws_event_index[cycle_key]
             if before_step is not None:
                 before_step(event)
             if on_event is not None:
@@ -141,10 +146,12 @@ class LivePaperRunner:
                     on_cycle_complete(step.finalized_cycle_row)
             decision_row = dict(step.decision_row)
             decision_row["event_index"] = index
+            decision_row["cycle_ws_event_index"] = ws_idx
             decision_rows.append(decision_row)
 
             snapshot_row = asdict(step.snapshot)
             snapshot_row["event_index"] = index
+            snapshot_row["cycle_ws_event_index"] = ws_idx
             snapshot_row["account_cash"] = self.engine.display_cash(step.snapshot.cycle_net_profit)
             snapshot_row["available_cash"] = self.engine.account.available_cash
             snapshot_rows.append(snapshot_row)
@@ -153,7 +160,9 @@ class LivePaperRunner:
                 t_rel = _format_time_since_cycle_start(event.cycle_id, event.timestamp)
                 print(
                     f"[live] events={index} cycle={step.snapshot.cycle_id} {t_rel} "
+                    f"ws_idx={ws_idx} "
                     f"net={step.snapshot.net_position:.3f} pnl={step.snapshot.cycle_net_profit:.3f} "
+                    f"up={step.snapshot.up_last_price:.3f} down={step.snapshot.down_last_price:.3f} "
                     f"cash={self.engine.account.cash:.3f}"
                 )
 
