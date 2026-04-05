@@ -174,12 +174,17 @@ def load_api_env(path: str | Path) -> dict[str, str]:
 
 def select_account_env(values: dict[str, str], account_index: int = 2) -> dict[str, str]:
     """
-    从 `ApiConfig.env` 中挑选指定账号的配置，并将 `FOO_2` 形式映射为无后缀键 `FOO`。
+    从 `ApiConfig.env` 中挑选指定账号的配置，并将 `FOO_<N>` 映射为无后缀键 `FOO`（供仍读裸键的下游使用）。
+
+    多账户实盘约定（默认 N=2）：
+    - CLOB/钱包：`PURSE_PRIVATE_KEY_2`、`PURSE_ADDRESS_2`、`POLY_DERIVE_API_KEY_2`、
+      `POLY_DERIVE_API_SECRET_2`、`POLY_DERIVE_API_PASSPHRASE_2`；
+    - 账号 1 则用 `_1` 后缀；`--account-index` 与后缀 N 一致。
 
     规则：
-    - 保留原始所有键，兼容旧逻辑；
-    - 若存在 `<KEY>_<account_index>`，则额外写入 `<KEY>`；
-    - 默认账号 2，便于双账号场景直接切换。
+    - 保留原始所有键；
+    - 若存在 `<KEY>_<account_index>`，则额外写入 `<KEY>`（覆盖同名裸键，以当前账号为准）；
+    - 默认账号 2，与 `get_account_env_value` 默认一致。
     """
     selected = dict(values)
     suffix = f"_{int(account_index)}"
@@ -196,12 +201,21 @@ def get_account_env_value(
     account_index: int = 2,
     default: str | None = None,
 ) -> str | None:
+    """
+    读取某配置项：优先 `<key>_<account_index>`（如 `PURSE_ADDRESS_2`），否则回退裸 `<key>`（兼容旧单账户文件）。
+    """
     suffix_key = f"{key}_{int(account_index)}"
     if suffix_key in values:
         return values[suffix_key]
     if key in values:
         return values[key]
     return default
+
+
+def account_env_keys_for_index(keys: Iterable[str], account_index: int) -> list[str]:
+    """将逻辑键名转为带账号后缀的 ApiConfig 键名列表（用于报错提示）。"""
+    n = int(account_index)
+    return [f"{k}_{n}" for k in keys]
 
 
 def _strip_env_value(raw: str) -> str:

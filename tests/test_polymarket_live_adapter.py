@@ -7,6 +7,7 @@ from polynet_ai.adapters import polymarket_live
 from polynet_ai.adapters.polymarket_live import (
     PolymarketMarketSpec,
     _discover_time_bucket_markets,
+    account_env_keys_for_index,
     apply_proxy_env_from_dict,
     discover_active_markets,
     get_account_env_value,
@@ -134,6 +135,13 @@ def test_get_account_env_value_prefers_selected_suffix_then_base() -> None:
     assert get_account_env_value(values, "PURSE_ADDRESS", account_index=2) == "0x222"
     assert get_account_env_value(values, "CHAIN_ID", account_index=2) == "137"
     assert get_account_env_value(values, "MISSING", account_index=2, default="fallback") == "fallback"
+
+
+def test_account_env_keys_for_index_suffixes_keys() -> None:
+    assert account_env_keys_for_index(["PURSE_ADDRESS", "POLY_DERIVE_API_KEY"], 2) == [
+        "PURSE_ADDRESS_2",
+        "POLY_DERIVE_API_KEY_2",
+    ]
 
 
 def test_discover_active_markets_filters_by_slug_prefix(monkeypatch) -> None:

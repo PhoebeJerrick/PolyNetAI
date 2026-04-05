@@ -17,7 +17,7 @@ from py_clob_client.clob_types import (
     OrderType,
 )
 
-from polynet_ai.adapters.polymarket_live import get_account_env_value
+from polynet_ai.adapters.polymarket_live import account_env_keys_for_index, get_account_env_value
 from polynet_ai.domain.models import ExecutionResult, FillEvent, OrderIntent
 from polynet_ai.execution.fok_orderbook import ExecutionPlan, estimate_fok_plan, normalize_market_amount
 
@@ -64,7 +64,11 @@ def clob_client_from_env(
         if not value
     ]
     if missing:
-        raise ValueError(f"账号 {account_index} 缺少 CLOB 所需配置: {', '.join(missing)}")
+        hinted = ", ".join(account_env_keys_for_index(missing, account_index))
+        raise ValueError(
+            f"账号 {account_index} 缺少 CLOB 所需配置: {', '.join(missing)} "
+            f"（建议在 ApiConfig.env 使用带后缀键: {hinted}）"
+        )
     return ClobClient(
         host=host,
         chain_id=137,

@@ -89,6 +89,7 @@ print_help() {
     "  RECORD_DASHBOARD_REFRESH_EVERY_CYCLES=6  mstart replay 每 N 个周期刷新一次中途 dashboard（默认 6）" \
     "  RECORD_REAL_CYCLE_DIR=...    cre/creb/dcre 的 --output-dir（默认 \$OUTPUT_DIR/polymarket_cycle_review）" \
     "  RECORD_SIGNATURE_TYPE=2      Polymarket CLOB signature type（默认 2）" \
+    "  RECORD_ACCOUNT_INDEX=2       ApiConfig 多账户后缀 N（默认 2：读取 PURSE_PRIVATE_KEY_2、POLY_DERIVE_API_*_2 等）" \
     "" \
     "Linux 云服务器推荐：" \
     "  RECORD_DASHBOARD_HOST=0.0.0.0 ./record.sh dmb10" \

@@ -110,12 +110,17 @@ def parse_args() -> argparse.Namespace:
         help="若指定则覆盖 strategy.yaml 的 cycle.post_window_start_delay_seconds。",
     )
     parser.add_argument("--cycle-grace-seconds", type=float, default=20.0)
-    parser.add_argument("--account-index", type=int, default=2)
+    parser.add_argument(
+        "--account-index",
+        type=int,
+        default=2,
+        help="账号编号（默认 2）；实盘读取 PURSE_PRIVATE_KEY_2、PURSE_ADDRESS_2、POLY_DERIVE_API_*_2 等后缀键（优先于无后缀键）。",
+    )
     parser.add_argument(
         "--auto-redeem",
         action="store_true",
         dest="auto_redeem",
-        help="自动赎回（默认已开启，可省略）。依赖 PURSE_*、POLY_BUILDER_* 与 pip install -e \".[redeem]\"。",
+        help="自动赎回（默认已开启，可省略）。依赖带账号后缀的 PURSE_*_<N>、POLY_BUILDER_*_<N>（默认 N=2）与 pip install -e \".[redeem]\"。",
     )
     parser.add_argument(
         "--no-auto-redeem",
@@ -703,8 +708,8 @@ def main() -> int:
         redeem_settings = load_auto_redeem_settings(env_values, account_index=args.account_index)
         if redeem_settings is None:
             print(
-                "[redeem] 默认已尝试启用自动赎回，但缺少 PURSE_PRIVATE_KEY、PURSE_ADDRESS 或 "
-                "POLY_BUILDER_API_KEY / POLY_BUILDER_API_SECRET / POLY_BUILDER_API_PASSPHRASE（及账号后缀键）；"
+                "[redeem] 默认已尝试启用自动赎回，但缺少带账号后缀的 PURSE_PRIVATE_KEY_<N>、PURSE_ADDRESS_<N> 或 "
+                "POLY_BUILDER_API_*_<N>（默认 N=2，与 --account-index 一致；无后缀裸键仅作兼容）；"
                 " 将跳过赎回。若不需要赎回请使用 --no-auto-redeem。",
                 flush=True,
             )

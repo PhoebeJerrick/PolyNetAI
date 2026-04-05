@@ -125,7 +125,7 @@ def parse_args() -> argparse.Namespace:
         "--auto-redeem",
         action="store_true",
         dest="auto_redeem",
-        help="自动赎回（默认已开启，可省略）。需 PURSE_PRIVATE_KEY、POLY_BUILDER_* 与 pip install -e \".[redeem]\"。",
+        help="自动赎回（默认已开启，可省略）。需 PURSE_PRIVATE_KEY_<N>、POLY_BUILDER_*_<N>（默认 N=2）与 pip install -e \".[redeem]\"。",
     )
     parser.add_argument(
         "--no-auto-redeem",
@@ -367,7 +367,7 @@ def main() -> int:
         redeem_settings = load_auto_redeem_settings(env_values, account_index=args.account_index)
         if redeem_settings is None:
             print(
-                "  ⚠ 默认已尝试启用自动赎回，但缺少 PURSE_PRIVATE_KEY、PURSE_ADDRESS 或 POLY_BUILDER_*，将跳过赎回；"
+                "  ⚠ 默认已尝试启用自动赎回，但缺少带账号后缀的 PURSE_PRIVATE_KEY_<N>、PURSE_ADDRESS_<N> 或 POLY_BUILDER_*_<N>（默认 N=2），将跳过赎回；"
                 " 不需要时可加 --no-auto-redeem。",
                 flush=True,
             )
