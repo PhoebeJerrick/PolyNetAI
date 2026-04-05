@@ -142,7 +142,7 @@ def on_chain_redeemable_balance(
         return -1
 
 
-def _encode_redeem_calldata(condition_id: str) -> bytes:
+def _encode_redeem_calldata(condition_id: str) -> str:
     from web3 import Web3
 
     cond_bytes = _to_bytes32(_normalize_condition_hex(condition_id))
@@ -156,7 +156,9 @@ def _encode_redeem_calldata(condition_id: str) -> bytes:
     ]
     # web3.py v7: encode_abi 从 ContractFunction 移至 Contract 对象
     hex_data: str = ctf.encode_abi("redeemPositions", args=args)
-    return bytes.fromhex(hex_data.removeprefix("0x"))
+    if not hex_data.startswith("0x"):
+        hex_data = "0x" + hex_data
+    return hex_data
 
 
 def redeem_condition_via_relayer(
