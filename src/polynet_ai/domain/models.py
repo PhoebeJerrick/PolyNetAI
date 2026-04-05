@@ -202,13 +202,8 @@ class CycleState:
         return "Up" if up > down else "Down"
 
     def net_position_value(self) -> float:
-        direction = self.net_direction()
-        net_shares = self.net_position()
-        if direction in {"空仓", "平衡"}:
-            return 0.0
-        if direction == "Up":
-            return net_shares * self.up_position.avg_price
-        return net_shares * self.down_position.avg_price
+        return (self.up_balance * self.up_position.avg_price
+                - self.down_balance * self.down_position.avg_price)
 
 
 @dataclass(slots=True)

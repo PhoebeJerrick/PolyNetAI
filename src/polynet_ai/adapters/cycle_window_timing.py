@@ -88,6 +88,21 @@ def next_bucket_start_utc(now_utc: datetime, cycle_seconds: int) -> datetime:
     return datetime.fromtimestamp(target_ts, tz=timezone.utc)
 
 
+def current_or_next_bucket_start_utc(
+    now_utc: datetime,
+    cycle_seconds: int,
+    max_late_join_seconds: float,
+) -> datetime:
+    """优先返回当前正在进行中的 bucket（如果已过时间 <= max_late_join_seconds），
+    否则返回下一个 bucket。用于连续多周期执行时避免跳过刚开始的 bucket。"""
+    epoch_seconds = now_utc.timestamp()
+    current_bucket_ts = math.floor(epoch_seconds / cycle_seconds) * cycle_seconds
+    elapsed_in_bucket = epoch_seconds - current_bucket_ts
+    if elapsed_in_bucket <= max_late_join_seconds:
+        return datetime.fromtimestamp(current_bucket_ts, tz=timezone.utc)
+    return datetime.fromtimestamp(current_bucket_ts + cycle_seconds, tz=timezone.utc)
+
+
 def sleep_until_utc_instant(deadline_utc: datetime) -> None:
     """睡到 wall clock 到达 ``deadline_utc``（timezone-aware UTC），末段细粒度 sleep。"""
     deadline_ts = deadline_utc.timestamp()

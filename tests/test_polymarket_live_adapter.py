@@ -297,6 +297,9 @@ def test_iter_polymarket_trade_events_reconnects_after_socket_closed(monkeypatch
         def send(self, payload):
             return None
 
+        def ping(self):
+            return None
+
         def recv(self):
             item = self.replies.pop(0)
             if isinstance(item, Exception):
@@ -345,3 +348,104 @@ def test_iter_polymarket_trade_events_reconnects_after_socket_closed(monkeypatch
     assert len(events) == 2
     assert events[0].outcome == "up"
     assert events[1].outcome == "down"
+
+
+def test_data_silence_watchdog_forces_reconnect(monkeypatch) -> None:
+    """P0-fix: 连接存活但长时间无有效事件时，看门狗强制断开并重连。"""
+    spec = PolymarketMarketSpec(
+        slug="btc-updown-5m-1774012500",
+        series_slug="btc-up-or-down-5m",
+        condition_id="0x1",
+        yes_token_id="yes-1",
+        no_token_id="no-1",
+        start_time=datetime(2099, 1, 1, 12, 0, 0),
+        end_time=datetime(2099, 1, 1, 12, 5, 0),
+        raw={},
+    )
+
+    class ClosedExc(Exception):
+        pass
+
+    class TimeoutExc(Exception):
+        pass
+
+    # 模拟时间：每次调用 monotonic() 递增 1 秒
+    call_count = 0
+
+    def _advancing_monotonic():
+        nonlocal call_count
+        call_count += 1
+        return 100.0 + call_count * 1.0
+
+    class FakeConnection:
+        def __init__(self, replies):
+            self.replies = list(replies)
+
+        def settimeout(self, timeout):
+            return None
+
+        def send(self, payload):
+            return None
+
+        def ping(self):
+            return None
+
+        def recv(self):
+            item = self.replies.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        def close(self):
+            return None
+
+    class FakeWebSocketModule:
+        WebSocketTimeoutException = TimeoutExc
+        WebSocketConnectionClosedException = ClosedExc
+
+        def __init__(self):
+            # 连接 1: 只返回超时（无数据），触发 watchdog 后强制重连
+            # 连接 2: 返回一条有效事件，然后 market_resolved
+            self.connections = [
+                FakeConnection(
+                    [TimeoutExc()] * 10  # 持续无数据
+                ),
+                FakeConnection(
+                    [
+                        '[{"event_type":"last_trade_price","asset_id":"yes-1","price":"0.55","size":"5","side":"BUY","timestamp":"4070952001000"}]',
+                        '{"event_type":"market_resolved","assets_ids":["yes-1","no-1"]}',
+                        TimeoutExc(),
+                    ]
+                ),
+            ]
+
+        def create_connection(self, url, **kwargs):
+            return self.connections.pop(0)
+
+    log_messages: list[str] = []
+
+    monkeypatch.setattr(polymarket_live, "_import_websocket_module", lambda: FakeWebSocketModule())
+    monkeypatch.setattr(
+        polymarket_live,
+        "time",
+        type("FakeTime", (), {
+            "monotonic": staticmethod(_advancing_monotonic),
+            "sleep": staticmethod(lambda _: None),
+        })(),
+    )
+
+    events = list(
+        iter_polymarket_trade_events(
+            [spec],
+            receive_timeout_seconds=0.01,
+            cycle_grace_seconds=0.0,
+            data_silence_timeout_seconds=5.0,  # 5s 无数据即触发
+            post_window_start_delay_seconds=0.0,
+            log_fn=log_messages.append,
+        )
+    )
+
+    assert len(events) == 1
+    assert events[0].outcome == "up"
+    # 验证看门狗日志被输出
+    assert any("silent freeze" in msg or "数据静默" in msg for msg in log_messages)

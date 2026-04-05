@@ -111,7 +111,7 @@ def _make_features(up_held: float, up_avg_price: float) -> FeatureSnapshot:
     v["up_avg_price"] = up_avg_price
     v["net_direction"] = "Up" if up_held > 0 else "空仓"
     v["net_position"] = up_held
-    v["net_position_value"] = up_held * up_avg_price
+    v["net_position_value"] = up_held * up_avg_price - v.get("down_held", 0.0) * v.get("down_avg_price", 0.0)
     return FeatureSnapshot(**v)
 
 

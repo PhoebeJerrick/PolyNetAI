@@ -259,14 +259,8 @@ def preprocess_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
 
 
 def net_position_value(up_bal: float, dn_bal: float, up_avg: float, dn_avg: float) -> int | float:
-    """净持仓份数 × 净持仓方向上的加权均价。"""
-    direction = net_dir(up_bal, dn_bal)
-    net_shares = up_bal - dn_bal
-    if direction in ("空仓", "平衡"):
-        return 0
-    if direction == "Up":
-        return f3(net_shares * up_avg)
-    return f3(net_shares * dn_avg)
+    """成本口径净敞口：up_cost − down_cost。"""
+    return f3(up_bal * up_avg - dn_bal * dn_avg)
 
 
 # ═══════════════════════ Column resolution ═══════════════════════════

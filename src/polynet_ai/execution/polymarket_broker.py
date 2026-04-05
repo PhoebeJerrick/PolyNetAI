@@ -164,18 +164,40 @@ class PolymarketBroker:
         pending_buy_reserved_cash = 0.0
         pending_up_sell_shares = 0.0
         pending_down_sell_shares = 0.0
+        # P0-fix: 按方向统计 pending buy 的预估仓位价值 & 计数
+        pending_buy_up_value = 0.0
+        pending_buy_down_value = 0.0
+        pending_buy_up_count = 0
+        pending_buy_down_count = 0
+        pending_sell_up_count = 0
+        pending_sell_down_count = 0
         for pending in self.pending_orders.values():
             if pending.intent.action == "buy":
                 pending_buy_reserved_cash += pending.reserved_cash
+                est_value = pending.execution_plan.shares * pending.execution_plan.estimated_vwap
+                if pending.intent.outcome == "up":
+                    pending_buy_up_value += est_value
+                    pending_buy_up_count += 1
+                else:
+                    pending_buy_down_value += est_value
+                    pending_buy_down_count += 1
             elif pending.intent.outcome == "up":
                 pending_up_sell_shares += pending.reserved_shares
+                pending_sell_up_count += 1
             else:
                 pending_down_sell_shares += pending.reserved_shares
+                pending_sell_down_count += 1
         return {
             "pending_order_count": len(self.pending_orders),
             "pending_buy_reserved_cash": pending_buy_reserved_cash,
             "pending_up_sell_shares": pending_up_sell_shares,
             "pending_down_sell_shares": pending_down_sell_shares,
+            "pending_buy_up_value": pending_buy_up_value,
+            "pending_buy_down_value": pending_buy_down_value,
+            "pending_buy_up_count": pending_buy_up_count,
+            "pending_buy_down_count": pending_buy_down_count,
+            "pending_sell_up_count": pending_sell_up_count,
+            "pending_sell_down_count": pending_sell_down_count,
         }
 
     def _resolve_token_id(self, intent: OrderIntent) -> str:

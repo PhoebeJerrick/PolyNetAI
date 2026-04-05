@@ -106,6 +106,12 @@ class ReplayEngine:
         self._last_strategy_fill_price_down: float | None = None
         self._recent_buy_fill_times_up: deque[datetime] = deque()
         self._recent_buy_fill_times_down: deque[datetime] = deque()
+        # P0-fix: 提交即计时 — 记录最近一次订单提交时间（含尚未确认的）
+        self._last_order_submitted_at_up: datetime | None = None
+        self._last_order_submitted_at_down: datetime | None = None
+        # 卖出提交时间（用于卖出限频）
+        self._last_strategy_sell_submitted_at_up: datetime | None = None
+        self._last_strategy_sell_submitted_at_down: datetime | None = None
 
     def reset(self) -> None:
         self.state_engine = StateEngine()
@@ -118,6 +124,10 @@ class ReplayEngine:
         self._last_strategy_fill_price_down = None
         self._recent_buy_fill_times_up.clear()
         self._recent_buy_fill_times_down.clear()
+        self._last_order_submitted_at_up = None
+        self._last_order_submitted_at_down = None
+        self._last_strategy_sell_submitted_at_up = None
+        self._last_strategy_sell_submitted_at_down = None
 
     @classmethod
     def from_yaml(
@@ -306,10 +316,14 @@ class ReplayEngine:
                     row["broker_order_id"] = execution.order_id
                     if execution.status == "submitted":
                         row["submitted"] = True
+                        # P0-fix: 提交即计时 — 更新方向节流时间戳
+                        self._record_order_submission(risk_decision.intent, event.timestamp)
                         self._sync_account_reservations()
                         row["risk_status"] = "submitted"
                         row["available_cash"] = self.account.available_cash
                     elif execution.fill is not None:
+                        # P0-fix: 即时成交也更新提交时间戳（PaperBroker 路径）
+                        self._record_order_submission(risk_decision.intent, event.timestamp)
                         self._apply_fill(execution.fill)
                         self._sync_account_reservations()
                         # region agent log
@@ -398,6 +412,18 @@ class ReplayEngine:
         queue.append(timestamp)
         self._prune_queue(queue, timestamp, window_seconds=1.0)
 
+    def _record_order_submission(self, intent, timestamp: datetime) -> None:
+        """P0-fix: 提交即计时 — 无论订单是否已确认成交，立即更新方向节流时间戳。"""
+        if intent.outcome == "up":
+            self._last_order_submitted_at_up = timestamp
+        else:
+            self._last_order_submitted_at_down = timestamp
+        if intent.action == "sell":
+            if intent.outcome == "up":
+                self._last_strategy_sell_submitted_at_up = timestamp
+            else:
+                self._last_strategy_sell_submitted_at_down = timestamp
+
     def _prune_recent_buy_fill_times(self, now: datetime) -> None:
         self._prune_queue(self._recent_buy_fill_times_up, now, window_seconds=1.0)
         self._prune_queue(self._recent_buy_fill_times_down, now, window_seconds=1.0)
@@ -430,6 +456,12 @@ class ReplayEngine:
         metadata["last_strategy_fill_price_down"] = self._last_strategy_fill_price_down
         metadata["recent_buy_fill_count_1s_up"] = len(self._recent_buy_fill_times_up)
         metadata["recent_buy_fill_count_1s_down"] = len(self._recent_buy_fill_times_down)
+        # P0-fix: 提交即计时
+        metadata["last_order_submitted_at_up"] = self._last_order_submitted_at_up
+        metadata["last_order_submitted_at_down"] = self._last_order_submitted_at_down
+        # 卖出限频
+        metadata["last_strategy_sell_submitted_at_up"] = self._last_strategy_sell_submitted_at_up
+        metadata["last_strategy_sell_submitted_at_down"] = self._last_strategy_sell_submitted_at_down
 
     def _sync_account_reservations(self) -> None:
         pending_context = self._pending_context()

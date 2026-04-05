@@ -158,9 +158,11 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
 
     min_gap = float(config.get("execution.min_seconds_between_orders", 2.0))
     if min_gap > 0:
-        # 按方向独立追踪下单间隔：UP 与 DOWN 分开计时。
-        direction_key = "last_strategy_fill_at_up" if clipped.outcome == "up" else "last_strategy_fill_at_down"
-        last_at = _coerce_datetime(clipped.metadata.get(direction_key))
+        # P0-fix: 按提交时间计时，而非等待确认成交后才计时。
+        # 优先使用 last_order_submitted_at_*（含 pending），回退到 last_strategy_fill_at_*。
+        submit_key = "last_order_submitted_at_up" if clipped.outcome == "up" else "last_order_submitted_at_down"
+        fill_key = "last_strategy_fill_at_up" if clipped.outcome == "up" else "last_strategy_fill_at_down"
+        last_at = _coerce_datetime(clipped.metadata.get(submit_key)) or _coerce_datetime(clipped.metadata.get(fill_key))
         if last_at is not None:
             delta = (features.timestamp - last_at).total_seconds()
             if delta <= min_gap:
@@ -198,6 +200,21 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
                     None,
                     f"同方向卖出限频：{sell_same_direction_window_seconds:g}秒内仅允许一次（{clipped.outcome}方向）",
                 )
+
+    # P1-fix: 限制同方向并发 pending 订单数（防止异步确认延迟导致订单洪泛）
+    max_pending_per_direction = int(config.get("execution.max_pending_orders_per_direction", 2))
+    if max_pending_per_direction > 0:
+        if clipped.action == "buy":
+            count_key = "pending_buy_up_count" if clipped.outcome == "up" else "pending_buy_down_count"
+        else:
+            count_key = "pending_sell_up_count" if clipped.outcome == "up" else "pending_sell_down_count"
+        pending_dir_count = int(clipped.metadata.get(count_key, 0))
+        if pending_dir_count >= max_pending_per_direction:
+            return RiskDecision(
+                False,
+                None,
+                f"同方向pending订单已达上限{max_pending_per_direction}笔（{clipped.outcome} {clipped.action}）",
+            )
 
     # 价格波动检查：仅对买入单生效；卖出单（止盈/止损/减仓）不受此约束
     min_move = float(config.get("execution.min_same_outcome_price_move_ratio", 0.005))
@@ -238,22 +255,37 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
                     # endregion
                     return RiskDecision(False, None, f"同方向买入价格相对上次成交价波动不足{pct:g}%")
 
-    if features.net_position_value and abs(features.net_position_value) > max_exposure and clipped.action == "buy":
+    # P0-fix: 预取 pending buy 仓位价值，用于敞口与仓位红线检查
+    _pending_buy_up_val = float(clipped.metadata.get("pending_buy_up_value", 0.0))
+    _pending_buy_down_val = float(clipped.metadata.get("pending_buy_down_value", 0.0))
+
+    # 净敞口预检 — 统一用成本价值口径：|up_cost − down_cost|
+    _up_cost_val = features.up_held * features.up_avg_price + _pending_buy_up_val
+    _down_cost_val = features.down_held * features.down_avg_price + _pending_buy_down_val
+    effective_net_exposure = abs(_up_cost_val - _down_cost_val)
+
+    if effective_net_exposure and effective_net_exposure > max_exposure and clipped.action == "buy":
         if clipped.category not in {"hedge", "last_minute"}:
-            return RiskDecision(False, None, "净敞口已超限，仅允许对冲或尾盘调整")
+            return RiskDecision(False, None, "净敞口已超限（含pending），仅允许对冲或尾盘调整")
 
     if clipped.metadata.get("strategy_trades", 0) >= max_trades and clipped.category != "last_minute":
         return RiskDecision(False, None, "本周期策略成交次数已达上限")
 
-    projected_exposure = abs(features.net_position_value)
+    # 成本口径投射：按方向重新计算下单后的 up_cost / down_cost
     projected_delta = clipped.reference_price * clipped.shares
     if clipped.action == "buy":
-        projected_exposure += projected_delta
+        if clipped.outcome == "up":
+            projected_exposure = abs((_up_cost_val + projected_delta) - _down_cost_val)
+        else:
+            projected_exposure = abs(_up_cost_val - (_down_cost_val + projected_delta))
     else:
-        projected_exposure = max(0.0, projected_exposure - projected_delta)
+        if clipped.outcome == "up":
+            projected_exposure = abs(max(0.0, _up_cost_val - projected_delta) - _down_cost_val)
+        else:
+            projected_exposure = abs(_up_cost_val - max(0.0, _down_cost_val - projected_delta))
 
     if projected_exposure > max_exposure and clipped.category not in {"hedge", "last_minute"}:
-        return RiskDecision(False, None, "下单后净敞口超过风控阈值")
+        return RiskDecision(False, None, "下单后净敞口超过风控阈值（含pending）")
 
     if clipped.action == "buy":
         phase = determine_phase(features.cycle_elapsed_seconds, config)
@@ -299,7 +331,8 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
         if max_position_value > 1e-12:
             current_up_value = float(features.up_held * features.up_avg_price)
             current_down_value = float(features.down_held * features.down_avg_price)
-            current_total_value = max(0.0, current_up_value + current_down_value)
+            # P0-fix: 仓位红线计入 pending buy 的预估仓位价值
+            current_total_value = max(0.0, current_up_value + current_down_value + _pending_buy_up_val + _pending_buy_down_val)
 
             remaining_value = max(0.0, max_position_value - current_total_value)
             ref_px = float(clipped.reference_price)
@@ -322,6 +355,15 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
                     if clipped.shares <= 1e-12:
                         return RiskDecision(False, None, "超过最大仓位红线(position.max_position_value)")
     else:
+        # P1-fix: 卖出最低价格保护 — 防止在极低价位（如 0.01）挂卖导致巨额亏损
+        min_sell_price = float(config.get("execution.min_sell_price", 0.05))
+        if min_sell_price > 0 and clipped.reference_price < min_sell_price:
+            return RiskDecision(
+                False,
+                None,
+                f"卖出价格{clipped.reference_price:.4f}低于最低保护价{min_sell_price:g}",
+            )
+
         held_shares = features.up_held if clipped.outcome == "up" else features.down_held
         pending_sell_shares = float(
             clipped.metadata.get(

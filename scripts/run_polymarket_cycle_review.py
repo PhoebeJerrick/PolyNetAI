@@ -18,6 +18,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from polynet_ai.adapters.cycle_window_timing import (  # noqa: E402
+    current_or_next_bucket_start_utc,
     cycle_seconds_from_slug_prefix,
     next_bucket_start_utc,
     poll_until_success,
@@ -377,12 +378,29 @@ def _execute_one_polymarket_cycle(
 
     spec = None
     target_start: datetime | None = None
+    # 连续多周期时允许迟到加入：只要在 opening_entry.window_seconds 内即可
+    max_late_join = float(strategy_config.get("opening_entry.window_seconds", 50.0))
     while True:
-        target_start = next_bucket_start_utc(datetime.now(timezone.utc), cycle_seconds)
+        if cycle_ix == 0:
+            # 首个周期：等待下一个桶边界（传统行为）
+            target_start = next_bucket_start_utc(datetime.now(timezone.utc), cycle_seconds)
+        else:
+            # 后续周期：优先加入当前正在进行的桶（如果在 opening window 内）
+            target_start = current_or_next_bucket_start_utc(
+                datetime.now(timezone.utc), cycle_seconds, max_late_join,
+            )
         target_slug = f"{args.slug_prefix}{int(target_start.timestamp())}"
 
-        print(f"[cycle] 目标完整周期: {target_slug}", flush=True)
-        print(f"[cycle] 精确等待 UTC 桶切换 {target_start.isoformat()} ...", flush=True)
+        now_utc = datetime.now(timezone.utc)
+        elapsed_in_target = max(0.0, (now_utc - target_start).total_seconds())
+        if elapsed_in_target > 0:
+            print(
+                f"[cycle] 目标完整周期: {target_slug}（已进行{elapsed_in_target:.0f}s，迟到加入）",
+                flush=True,
+            )
+        else:
+            print(f"[cycle] 目标完整周期: {target_slug}", flush=True)
+            print(f"[cycle] 精确等待 UTC 桶切换 {target_start.isoformat()} ...", flush=True)
         sleep_until_utc_instant(target_start)
         spec = poll_until_success(
             lambda: fetch_market_spec(target_slug),

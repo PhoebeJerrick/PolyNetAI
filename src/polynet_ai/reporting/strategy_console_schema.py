@@ -297,6 +297,10 @@ def build_strategy_dashboard_sections() -> list[dict[str, Any]]:
                 _field("execution.min_seconds_between_orders", "最小下单间隔（秒）", "", ui="range", min=0, max=60, step=0.5, risk="medium"),
                 _field("execution.max_same_direction_buy_fills_per_second", "同秒同向买成交上限", "0 表示不限制。", min=0, max=50, step=1, risk="medium"),
                 _field("execution.min_same_outcome_price_move_ratio", "同向最小价格波动比例", "", ui="range", min=0.0, max=0.2, step=0.001, risk="medium"),
+                _field("execution.max_pending_orders_per_direction", "同方向最大pending订单数", "0 表示不限制。", min=0, max=10, step=1, risk="high"),
+                _field("execution.min_sell_price", "卖出最低价格保护", "低于此价位的卖单将被拒绝。", ui="range", min=0.0, max=0.5, step=0.01, risk="high"),
+                _field("execution.paper_use_orderbook", "Paper 使用订单簿", "有 API 时 paper 与实盘同逻辑。", ui="checkbox", risk="low"),
+                _field("execution.price_buffer_ticks", "限价缓冲 tick 数", "", min=0, max=10, step=1, risk="medium"),
             ],
         },
         {

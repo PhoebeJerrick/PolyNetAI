@@ -531,6 +531,8 @@ def iter_polymarket_trade_events(
     receive_timeout_seconds: float = 1.0,
     cycle_grace_seconds: float = 20.0,
     reconnect_delay_seconds: float = 1.0,
+    reconnect_max_delay_seconds: float = 8.0,
+    data_silence_timeout_seconds: float = 45.0,
     post_window_start_delay_seconds: float = DEFAULT_POST_WINDOW_START_DELAY_SECONDS,
     log_fn: Callable[[str], None] | None = None,
 ) -> Iterable[TradeEvent]:
@@ -602,22 +604,44 @@ def iter_polymarket_trade_events(
 
                 if close_after is not None and time.monotonic() >= close_after:
                     break
+                # P2-fix: 指数退避重连
+                backoff_delay = min(reconnect_max_delay_seconds, reconnect_delay_seconds * (2 ** min(reconnect_attempt - 1, 5)))
                 if log_fn is not None:
                     why = f" {_ws_error_detail(connect_err)}" if connect_err is not None else ""
                     log_fn(
                         f"[polymarket] 连接 {spec.slug} 失败{why}，"
-                        f"{reconnect_delay_seconds:.1f}s 后重试（第 {reconnect_attempt} 次）"
+                        f"{backoff_delay:.1f}s 后重试（第 {reconnect_attempt} 次）"
                     )
-                time.sleep(max(0.1, reconnect_delay_seconds))
+                time.sleep(max(0.1, backoff_delay))
 
             if connection is None:
                 break
 
+            # P0-fix: 数据静默看门狗 — 记录最近一次收到有效 trade 事件的时间
+            last_data_at = time.monotonic()
+
             try:
                 while True:
                     now = time.monotonic()
+
+                    # P0-fix: 数据静默超时 — 连接存活但长时间无有效事件，强制断开重连
+                    if data_silence_timeout_seconds > 0 and now - last_data_at >= data_silence_timeout_seconds:
+                        if log_fn is not None:
+                            log_fn(
+                                f"[polymarket] {spec.slug} 数据静默超过 "
+                                f"{data_silence_timeout_seconds:.0f}s（silent freeze），强制重连"
+                            )
+                        break
+
+                    # P1-fix: 使用 RFC 6455 协议层 ping 帧代替文本 "PING"
                     if now - last_ping >= ping_interval_seconds:
-                        connection.send("PING")
+                        try:
+                            if hasattr(connection, "ping"):
+                                connection.ping()
+                            else:
+                                connection.send("PING")
+                        except Exception:
+                            break
                         last_ping = now
 
                     try:
@@ -643,17 +667,20 @@ def iter_polymarket_trade_events(
 
                         event = ws_message_to_trade_event(message, spec)
                         if event is not None:
+                            last_data_at = time.monotonic()
                             if eff_cutoff_naive is not None and event.timestamp < eff_cutoff_naive:
                                 continue
                             yield event
             except closed_exc as e:
                 reconnect_attempt += 1
+                # P2-fix: 指数退避重连
+                backoff_delay = min(reconnect_max_delay_seconds, reconnect_delay_seconds * (2 ** min(reconnect_attempt - 1, 5)))
                 if log_fn is not None:
                     log_fn(
                         f"[polymarket] 连接中断 {spec.slug}（{_ws_error_detail(e)}），"
-                        f"{reconnect_delay_seconds:.1f}s 后重连（第 {reconnect_attempt} 次）"
+                        f"{backoff_delay:.1f}s 后重连（第 {reconnect_attempt} 次）"
                     )
-                time.sleep(max(0.1, reconnect_delay_seconds))
+                time.sleep(max(0.1, backoff_delay))
                 continue
             finally:
                 try:
@@ -668,9 +695,12 @@ def iter_polymarket_trade_events(
                 if close_after is not None and time.monotonic() >= close_after:
                     break
             if close_after is None:
+                reconnect_attempt += 1
+                # P2-fix: 指数退避重连
+                backoff_delay = min(reconnect_max_delay_seconds, reconnect_delay_seconds * (2 ** min(reconnect_attempt - 1, 5)))
                 if log_fn is not None:
-                    log_fn(f"[polymarket] 连接结束但窗口未完结，{reconnect_delay_seconds:.1f}s 后重连 {spec.slug}")
-                time.sleep(max(0.1, reconnect_delay_seconds))
+                    log_fn(f"[polymarket] 连接结束但窗口未完结，{backoff_delay:.1f}s 后重连 {spec.slug}")
+                time.sleep(max(0.1, backoff_delay))
                 continue
 
             if close_after is not None and time.monotonic() >= close_after:
@@ -686,6 +716,7 @@ def iter_polymarket_trade_events_robot(
     ping_interval_seconds: float = 10.0,
     receive_timeout_seconds: float = 1.0,
     cycle_grace_seconds: float = 20.0,
+    data_silence_timeout_seconds: float = 45.0,
     post_window_start_delay_seconds: float = DEFAULT_POST_WINDOW_START_DELAY_SECONDS,
     log_fn: Callable[[str], None] | None = None,
 ) -> Iterable[TradeEvent]:
@@ -728,6 +759,7 @@ def iter_polymarket_trade_events_robot(
                 ping_interval_seconds=ping_interval_seconds,
                 receive_timeout_seconds=receive_timeout_seconds,
                 cycle_grace_seconds=cycle_grace_seconds,
+                data_silence_timeout_seconds=data_silence_timeout_seconds,
                 post_window_start_delay_seconds=post_window_start_delay_seconds,
                 log_fn=log_fn,
             )
