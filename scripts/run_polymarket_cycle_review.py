@@ -53,14 +53,6 @@ from polynet_ai.strategy.spec import (  # noqa: E402
 )
 
 DATA_API_BASE = "https://data-api.polymarket.com"
-DEFAULT_OVERRIDES = (
-    ROOT
-    / "artifacts"
-    / "optimization"
-    / "optimize_btc_last_6h_100u_smallcap_v2_20260321T014000Z"
-    / "trial_022"
-    / "overrides.json"
-)
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,7 +60,11 @@ def parse_args() -> argparse.Namespace:
         description="运行完整 5m 周期并复盘；支持单进程连续多窗（--max-cycles，对齐 robot 式连续跟窗）。"
     )
     parser.add_argument("--config", default="configs/strategy.yaml")
-    parser.add_argument("--overrides", default=str(DEFAULT_OVERRIDES))
+    parser.add_argument(
+        "--overrides",
+        default=None,
+        help="可选：trial 的 overrides.json；不传则仅使用 --config（避免依赖本机未必存在的 optimization 产物）。",
+    )
     parser.add_argument("--output-dir", default="artifacts/live/polymarket_cycle_review")
     parser.add_argument(
         "--run-subdir",
@@ -163,14 +159,22 @@ def _load_overrides(path: str | Path) -> dict[str, Any]:
     return data
 
 
-def _build_engine(config_path: str | Path, overrides_path: str | Path, starting_cash: float) -> ReplayEngine:
+def _build_engine(
+    config_path: str | Path,
+    overrides_path: str | Path | None,
+    starting_cash: float,
+) -> ReplayEngine:
     config = load_strategy_config(config_path)
-    overrides = _load_overrides(overrides_path)
-    return ReplayEngine(config.with_overrides(overrides), starting_cash=starting_cash)
+    if overrides_path:
+        overrides = _load_overrides(overrides_path)
+        config = config.with_overrides(overrides)
+    return ReplayEngine(config, starting_cash=starting_cash)
 
 
-def _build_strategy_config(config_path: str | Path, overrides_path: str | Path):
+def _build_strategy_config(config_path: str | Path, overrides_path: str | Path | None):
     config = load_strategy_config(config_path)
+    if not overrides_path:
+        return config
     overrides = _load_overrides(overrides_path)
     return config.with_overrides(overrides)
 
