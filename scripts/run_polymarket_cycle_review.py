@@ -26,6 +26,7 @@ from polynet_ai.adapters.cycle_window_timing import (  # noqa: E402
 )
 from polynet_ai.adapters.polymarket_live import (  # noqa: E402
     apply_proxy_env_from_dict,
+    default_api_config_env_candidates,
     fetch_market_spec,
     get_account_env_value,
     iter_polymarket_trade_events,
@@ -660,8 +661,13 @@ def main() -> int:
 
     env_path = Path(args.env_file)
     if args.real_trading and not env_path.exists():
+        tried = "\n  ".join(str(p.resolve()) for p in default_api_config_env_candidates(ROOT))
         raise FileNotFoundError(
-            f"实盘需要 ApiConfig：文件不存在 {env_path.resolve()}（可用 --env-file 或环境变量 RECORD_ENV_FILE 指定）"
+            "实盘需要 ApiConfig：以下路径均不存在或未找到配置文件：\n"
+            f"  {env_path.resolve()}\n"
+            "未传 --env-file 时默认按顺序尝试：\n"
+            f"  {tried}\n"
+            "请将 ApiConfig.env 放到上述任一路径，或设置环境变量 RECORD_ENV_FILE / 使用 --env-file 指向实际文件。"
         )
     env_values = load_api_env(args.env_file) if env_path.exists() else {}
     selected_env = select_account_env(env_values, account_index=args.account_index)

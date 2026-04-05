@@ -143,10 +143,17 @@ def _fetch_json(url: str) -> Any:
 
 
 def default_api_config_env_candidates(root: Path) -> tuple[Path, ...]:
-    """相对仓库根目录 `root` 的 ApiConfig.env 默认搜索路径（按顺序）。"""
+    """相对仓库根目录 `root` 的 ApiConfig.env 默认搜索路径（按顺序）。
+
+    常见布局（与 `record.sh` 一致）：
+    1. ``<workspace>/APIs/ApiConfig.env`` — 与 ``PolyMkt`` 同级，例如 ``Projects/PolyMkt/PolyNetAI`` → ``Projects/APIs``；
+    2. ``<PolyMkt>/APIs/ApiConfig.env`` — 与仓库同在一级目录下；
+    3. ``<repo>/APIs/ApiConfig.env`` — 仅在本仓库内。
+    """
     return (
-        root.parent / "APIs" / "ApiConfig.env",
         root.parent.parent / "APIs" / "ApiConfig.env",
+        root.parent / "APIs" / "ApiConfig.env",
+        root / "APIs" / "ApiConfig.env",
     )
 
 

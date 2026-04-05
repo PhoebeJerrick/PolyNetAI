@@ -31,7 +31,24 @@ fi
 DEFAULT_OVERRIDES="${RECORD_OVERRIDES:-}"
 DEFAULT_STARTING_CASH="${RECORD_STARTING_CASH:-100}"
 DEFAULT_PER_CYCLE_CASH="${RECORD_PER_CYCLE_CASH:-}"
-DEFAULT_ENV_FILE="${RECORD_ENV_FILE:-../APIs/ApiConfig.env}"
+# ApiConfig.env：未设置 RECORD_ENV_FILE 时按顺序选用第一个存在的路径（与 resolve_default_api_config_env 一致）
+if [[ -n "${RECORD_ENV_FILE:-}" ]]; then
+  DEFAULT_ENV_FILE="$RECORD_ENV_FILE"
+else
+  DEFAULT_ENV_FILE=""
+  for _env_cand in \
+    "$ROOT_DIR/../../APIs/ApiConfig.env" \
+    "$ROOT_DIR/../APIs/ApiConfig.env" \
+    "$ROOT_DIR/APIs/ApiConfig.env"; do
+    if [[ -f "$_env_cand" ]]; then
+      DEFAULT_ENV_FILE="$_env_cand"
+      break
+    fi
+  done
+  if [[ -z "${DEFAULT_ENV_FILE}" ]]; then
+    DEFAULT_ENV_FILE="$ROOT_DIR/../../APIs/ApiConfig.env"
+  fi
+fi
 DEFAULT_ACCOUNT_INDEX="${RECORD_ACCOUNT_INDEX:-2}"
 DEFAULT_START_BUFFER_SECONDS="${RECORD_START_BUFFER_SECONDS:-2}"
 OPEN_EDGE_ON_DASHBOARD="${RECORD_OPEN_DASHBOARD_EDGE:-1}"
@@ -90,6 +107,7 @@ print_help() {
     "  RECORD_REAL_CYCLE_DIR=...    cre/creb/dcre 的 --output-dir（默认 \$OUTPUT_DIR/polymarket_cycle_review）" \
     "  RECORD_SIGNATURE_TYPE=2      Polymarket CLOB signature type（默认 2）" \
     "  RECORD_ACCOUNT_INDEX=2       ApiConfig 多账户后缀 N（默认 2：读取 PURSE_PRIVATE_KEY_2、POLY_DERIVE_API_*_2 等）" \
+    "  RECORD_ENV_FILE=PATH         显式指定 ApiConfig.env；未设置时自动选 ../../APIs（与 PolyMkt 同级的 APIs）、../APIs、./APIs 中第一个存在的文件" \
     "" \
     "Linux 云服务器推荐：" \
     "  RECORD_DASHBOARD_HOST=0.0.0.0 ./record.sh dmb10" \
