@@ -26,6 +26,7 @@ from polynet_ai.adapters.cycle_window_timing import (  # noqa: E402
     window_start_naive_utc_from_slug,
 )
 from polynet_ai.adapters.polymarket_live import (  # noqa: E402
+    OrderBookTopSnapshotEnricher,
     apply_proxy_env_from_dict,
     default_api_config_env_candidates,
     fetch_market_spec,
@@ -112,6 +113,17 @@ def parse_args() -> argparse.Namespace:
         help="若指定则覆盖 strategy.yaml 的 cycle.post_window_start_delay_seconds。",
     )
     parser.add_argument("--cycle-grace-seconds", type=float, default=20.0)
+    parser.add_argument(
+        "--record-orderbook-top",
+        action="store_true",
+        help="将 UP/Down 的买一卖一价格与挂单量附加写入 ws_trade_events.ndjson metadata（需可用 CLOB client）。",
+    )
+    parser.add_argument(
+        "--orderbook-refresh-seconds",
+        type=float,
+        default=0.5,
+        help="写盘口快照时的最小刷新间隔；0 表示每条事件都重新拉取 order book。",
+    )
     parser.add_argument(
         "--account-index",
         type=int,
@@ -490,6 +502,23 @@ def _execute_one_polymarket_cycle(
             signature_type=args.signature_type,
         )
 
+    orderbook_metadata_enricher = None
+    if args.record_orderbook_top:
+        quote_client = real_broker.client if real_broker is not None else getattr(broker_for_engine, "clob_client", None)
+        if quote_client is None:
+            print("[cycle] 已启用盘口快照落盘，但当前无可用 CLOB client，将跳过买一卖一补充", flush=True)
+        else:
+            refresh_seconds = max(0.0, float(args.orderbook_refresh_seconds))
+            orderbook_metadata_enricher = OrderBookTopSnapshotEnricher(
+                quote_client,
+                refresh_interval_seconds=refresh_seconds,
+                log_fn=lambda msg: print(msg, flush=True),
+            ).enrich
+            print(
+                f"[cycle] 原始事件将附带 UP/Down 买一卖一快照（最小刷新间隔 {refresh_seconds:g}s）",
+                flush=True,
+            )
+
     engine = ReplayEngine(
         strategy_config,
         starting_cash=effective_starting_cash,
@@ -558,6 +587,7 @@ def _execute_one_polymarket_cycle(
         result = runner.run_stream(
             iter_polymarket_trade_events(
                 [spec],
+                metadata_enricher=orderbook_metadata_enricher,
                 cycle_grace_seconds=args.cycle_grace_seconds,
                 post_window_start_delay_seconds=post_delay,
                 log_fn=print,

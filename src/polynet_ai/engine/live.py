@@ -10,6 +10,7 @@ from typing import Callable, Iterable
 import pandas as pd
 
 from polynet_ai.adapters.cycle_window_timing import window_start_naive_utc_from_slug
+from polynet_ai.adapters.trade_event_store import ORDERBOOK_TOP_METADATA_FIELDS
 from polynet_ai.domain.models import TradeEvent
 from polynet_ai.engine.replay import ReplayEngine, ReplayResult
 from polynet_ai.reporting.dashboard import generate_dashboard_bundle
@@ -154,6 +155,9 @@ class LivePaperRunner:
             snapshot_row["cycle_ws_event_index"] = ws_idx
             snapshot_row["account_cash"] = self.engine.display_cash(step.snapshot.cycle_net_profit)
             snapshot_row["available_cash"] = self.engine.account.available_cash
+            for key in ORDERBOOK_TOP_METADATA_FIELDS:
+                if key in event.metadata:
+                    snapshot_row[key] = event.metadata.get(key)
             snapshot_rows.append(snapshot_row)
 
             if status_every > 0 and index % status_every == 0:

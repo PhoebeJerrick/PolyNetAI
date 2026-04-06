@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from polynet_ai.adapters import polymarket_live
 from polynet_ai.adapters.polymarket_live import (
+    OrderBookTopSnapshotEnricher,
     PolymarketMarketSpec,
     _discover_time_bucket_markets,
     account_env_keys_for_index,
@@ -98,6 +99,175 @@ def test_ws_message_to_trade_event_maps_yes_no_into_up_down() -> None:
     assert down_event is not None
     assert down_event.outcome == "down"
     assert down_event.action == "sell"
+
+
+def test_orderbook_top_snapshot_enricher_caches_books(monkeypatch) -> None:
+    spec = PolymarketMarketSpec(
+        slug="btc-updown-5m-1773826800",
+        series_slug="btc-up-or-down-5m",
+        condition_id="0xabc",
+        yes_token_id="yes-token",
+        no_token_id="no-token",
+        start_time=datetime(2026, 3, 20, 12, 0, 0),
+        end_time=datetime(2026, 3, 20, 12, 5, 0),
+        raw={},
+    )
+
+    class FakeLevel:
+        def __init__(self, price: str, size: str) -> None:
+            self.price = price
+            self.size = size
+
+    class FakeBook:
+        def __init__(self, bids, asks) -> None:
+            self.bids = bids
+            self.asks = asks
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def get_order_book(self, token_id: str):
+            self.calls.append(token_id)
+            if token_id == "yes-token":
+                return FakeBook(
+                    bids=[FakeLevel("0.47", "13")],
+                    asks=[FakeLevel("0.48", "9")],
+                )
+            return FakeBook(
+                bids=[FakeLevel("0.52", "11")],
+                asks=[FakeLevel("0.53", "7")],
+            )
+
+    class FakeTime:
+        current = 100.0
+
+        @staticmethod
+        def monotonic() -> float:
+            return FakeTime.current
+
+        @staticmethod
+        def sleep(_: float) -> None:
+            return None
+
+    monkeypatch.setattr(polymarket_live, "time", FakeTime)
+
+    client = FakeClient()
+    enricher = OrderBookTopSnapshotEnricher(client, refresh_interval_seconds=0.5)
+
+    first = enricher.enrich(
+        TradeEvent(
+            market_id=spec.series_slug,
+            cycle_id=spec.slug,
+            timestamp=datetime(2026, 3, 20, 12, 0, 1),
+            price=0.5,
+            shares=1.0,
+            outcome="up",
+        ),
+        spec,
+    )
+    FakeTime.current = 100.2
+    second = enricher.enrich(
+        TradeEvent(
+            market_id=spec.series_slug,
+            cycle_id=spec.slug,
+            timestamp=datetime(2026, 3, 20, 12, 0, 2),
+            price=0.51,
+            shares=2.0,
+            outcome="down",
+        ),
+        spec,
+    )
+
+    assert client.calls == ["yes-token", "no-token"]
+    assert first["up_bid1_price"] == 0.47
+    assert first["up_ask1_size"] == 9.0
+    assert first["down_bid1_size"] == 11.0
+    assert first["down_ask1_price"] == 0.53
+    assert second["orderbook_snapshot_age_ms"] == 200.0
+
+
+def test_iter_polymarket_trade_events_applies_metadata_enricher(monkeypatch) -> None:
+    spec = PolymarketMarketSpec(
+        slug="btc-updown-5m-1774012500",
+        series_slug="btc-up-or-down-5m",
+        condition_id="0x1",
+        yes_token_id="yes-1",
+        no_token_id="no-1",
+        start_time=datetime(2099, 1, 1, 12, 0, 0),
+        end_time=datetime(2099, 1, 1, 12, 5, 0),
+        raw={},
+    )
+
+    class ClosedExc(Exception):
+        pass
+
+    class TimeoutExc(Exception):
+        pass
+
+    class FakeConnection:
+        def __init__(self, replies):
+            self.replies = list(replies)
+
+        def settimeout(self, timeout):
+            return None
+
+        def send(self, payload):
+            return None
+
+        def ping(self):
+            return None
+
+        def recv(self):
+            item = self.replies.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        def close(self):
+            return None
+
+    class FakeWebSocketModule:
+        WebSocketTimeoutException = TimeoutExc
+        WebSocketConnectionClosedException = ClosedExc
+
+        def create_connection(self, url, **kwargs):
+            return FakeConnection(
+                [
+                    '[{"event_type":"last_trade_price","asset_id":"yes-1","price":"0.51","size":"3","side":"BUY","timestamp":"4070952001000"}]',
+                    '{"event_type":"market_resolved","assets_ids":["yes-1","no-1"]}',
+                    TimeoutExc(),
+                ]
+            )
+
+    class FakeTime:
+        @staticmethod
+        def monotonic() -> float:
+            return 100.0
+
+        @staticmethod
+        def sleep(_: float) -> None:
+            return None
+
+    monkeypatch.setattr(polymarket_live, "_import_websocket_module", lambda: FakeWebSocketModule())
+    monkeypatch.setattr(polymarket_live, "time", FakeTime)
+
+    events = list(
+        iter_polymarket_trade_events(
+            [spec],
+            metadata_enricher=lambda event, current_spec: {
+                "enriched_slug": current_spec.slug,
+                "up_bid1_price": event.price,
+            },
+            receive_timeout_seconds=0.01,
+            cycle_grace_seconds=0.0,
+            post_window_start_delay_seconds=0.0,
+        )
+    )
+
+    assert len(events) == 1
+    assert events[0].metadata["enriched_slug"] == spec.slug
+    assert events[0].metadata["up_bid1_price"] == 0.51
 
 
 def test_apply_proxy_env_from_dict_strips_quotes_and_sets_lowercase(monkeypatch) -> None:

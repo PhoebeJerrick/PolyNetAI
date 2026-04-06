@@ -3,12 +3,18 @@
 Polymarket 交易明细 Excel 持仓分析 + 盈亏汇总。
 
 插入到"成交价格"后的列（若输入中存在）：
-  同向成交价波动幅度(%) — 相对本周期内上一次同结果代币成交价的涨跌幅百分比，首笔为空；
-  其后为 Up积累份数 / Up的加权均价 / Down积累份数 / Down加权均价 /
-  当前总持仓份数 / 持仓价值占比 / 净持仓份数 / 净持仓价值 / 净持仓方向 /
-  Up已成交差价盈亏 / Down已成交差价盈亏 / 浮动盈亏
+    同向成交价波动幅度(%) — 表示相对本周期内上一次同结果代币成交价的涨跌幅百分比，首笔为空；
+    相对于加权均价的价格波动百分比 — 表示当前行成交价相对该方向当前加权均价的涨跌幅百分比；
+    其后为 Up积累份数 / Up持仓成本 / Up的加权均价 / Down积累份数 / Down持仓成本 / Down加权均价 /
+    当前总持仓份数 / 持仓价值占比 / 持仓价值加/减仓百分比 / 净持仓份数 / 净持仓成本差额 / 净持仓方向 / 持仓异常 /
+    Up已成交差价盈亏 / Down已成交差价盈亏 / 浮动盈亏
 
-净持仓价值 = 净持仓份数 × 净持仓方向对应方向的加权均价（空仓/平衡为 0）。
+净持仓成本差额 = Up持仓成本 − Down持仓成本。
+若出现卖出超过当前已持有份数，不再把超卖部分继续计入负持仓；
+该超卖部分会被单独标记到「持仓异常」列，并且不参与持仓/持仓价值/浮动盈亏计算。
+
+持仓价值加/减仓百分比 = 本笔成交对应的持仓成本变动额 / 变动前该方向持仓成本。
+加仓记为正，减仓记为负；若该方向变动前没有持仓，则留空。
 
 输出前会删除列：市场ID、交易类型、订单类型、备注、时间；
 用「下注时间距开盘差(分，秒)」代替「时间」并置于首列。
@@ -66,18 +72,22 @@ DOWN_KEYWORDS = ("down", "no", "跌", "看跌", "做空", "空")
 
 # ── column groups ────────────────────────────────────────────────────
 # 可选；由批量回放等上游提供，insert_columns 会紧挨「成交价格」插入，再插入 INSERTED_COLUMNS
-EXTRA_COLUMNS_AFTER_PRICE = ("同向成交价波动幅度(%)",)
+EXTRA_COLUMNS_AFTER_PRICE = ("同向成交价波动幅度(%)", "相对于加权均价的价格波动百分比")
 
 INSERTED_COLUMNS = (
     "Up积累份数",
+    "Up持仓成本",
     "Up的加权均价",
     "Down积累份数",
+    "Down持仓成本",
     "Down加权均价",
     "当前总持仓份数",
     "持仓价值占比",
+    "持仓价值加/减仓百分比",
     "净持仓份数",
-    "净持仓价值",
+    "净持仓成本差额",
     "净持仓方向",
+    "持仓异常",
     "Up已成交差价盈亏",
     "Down已成交差价盈亏",
     "浮动盈亏",
@@ -96,6 +106,7 @@ DOWN_FILL = PatternFill(fill_type="solid", fgColor="FCE4D6")
 TOTAL_FILL = PatternFill(fill_type="solid", fgColor="FFF2CC")
 NET_POS_FILL = PatternFill(fill_type="solid", fgColor="E8DAEF")
 DIRECTION_FILL = PatternFill(fill_type="solid", fgColor="D9EAF7")
+ANOMALY_FILL = PatternFill(fill_type="solid", fgColor="FDE9D9")
 UP_PNL_FILL = PatternFill(fill_type="solid", fgColor="E2EFDA")
 DN_PNL_FILL = PatternFill(fill_type="solid", fgColor="FBE5D6")
 
@@ -125,14 +136,18 @@ CYCLE_FILLS = (
 
 COL_FILLS = {
     "Up积累份数": UP_FILL,
+    "Up持仓成本": UP_FILL,
     "Up的加权均价": UP_FILL,
     "Down积累份数": DOWN_FILL,
+    "Down持仓成本": DOWN_FILL,
     "Down加权均价": DOWN_FILL,
     "当前总持仓份数": TOTAL_FILL,
     "持仓价值占比": TOTAL_FILL,
+    "持仓价值加/减仓百分比": TOTAL_FILL,
     "净持仓份数": NET_POS_FILL,
-    "净持仓价值": NET_POS_FILL,
+    "净持仓成本差额": NET_POS_FILL,
     "净持仓方向": DIRECTION_FILL,
+    "持仓异常": ANOMALY_FILL,
     "Up已成交差价盈亏": UP_PNL_FILL,
     "Down已成交差价盈亏": DN_PNL_FILL,
     "浮动盈亏": PatternFill(fill_type="solid", fgColor="E7E9FF"),
@@ -258,9 +273,40 @@ def preprocess_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
     return out, marker
 
 
-def net_position_value(up_bal: float, dn_bal: float, up_avg: float, dn_avg: float) -> int | float:
+def net_position_cost_gap(up_bal: float, dn_bal: float, up_avg: float, dn_avg: float) -> int | float:
     """成本口径净敞口：up_cost − down_cost。"""
     return f3(up_bal * up_avg - dn_bal * dn_avg)
+
+
+def same_outcome_price_move_pct(current_price: float, previous_price: float) -> float | str:
+    if previous_price <= 1e-12:
+        return ""
+    return current_price / previous_price - 1.0
+
+
+def relative_to_weighted_avg_price_move_pct(current_price: float, weighted_avg_price: float) -> float | str:
+    if weighted_avg_price <= 1e-12:
+        return ""
+    return current_price / weighted_avg_price - 1.0
+
+
+def position_value_change_pct(
+    *,
+    signed_qty: float,
+    shares: float,
+    price: float,
+    pre_held: float,
+    pre_cost: float,
+    pre_avg: float,
+) -> float | str:
+    if pre_cost <= 1e-12:
+        return ""
+    if signed_qty > 0:
+        return (shares * price) / pre_cost
+    matched = min(shares, pre_held)
+    if matched <= 1e-12:
+        return ""
+    return -((matched * pre_avg) / pre_cost)
 
 
 # ═══════════════════════ Column resolution ═══════════════════════════
@@ -293,8 +339,13 @@ def new_bucket() -> dict[str, float]:
         "up_realized": 0.0,
         "dn_held": 0.0, "dn_cost": 0.0, "dn_avg": 0.0,
         "dn_realized": 0.0,
+        "anomaly_count": 0.0,
         "last_up": 0.0, "last_dn": 0.0,
     }
+
+
+def format_position_anomaly(direction: str, excess_shares: float) -> str:
+    return f"{direction}卖出超持仓 {f3(excess_shares)}份"
 
 
 def winner(s: dict[str, float]) -> str | None:
@@ -399,6 +450,9 @@ def append_subtotals(
             sub["未平仓Down盈亏"] = sm["未平仓Down盈亏"]
             sub["周期净利润"] = sm["周期净利润"]
             sub["最终Winner方向"] = sm["最终Winner方向"]
+            anomaly_count = int(round(float(stats.get("anomaly_count", 0.0))))
+            if anomaly_count > 0:
+                sub["持仓异常"] = f"本周期持仓异常 {anomaly_count} 笔"
 
         rows.append(sub)
 
@@ -426,18 +480,23 @@ def compute(
         groups[-1],
     )
 
-    bals: dict[tuple, dict[str, float]] = {}
     pnl_s: dict[tuple, dict[str, float]] = {}
 
     up_v: list[object] = []
+    up_cost_v: list[object] = []
     up_avg_v: list[object] = []
     dn_v: list[object] = []
+    dn_cost_v: list[object] = []
     dn_avg_v: list[object] = []
     tot_v: list[object] = []
     pos_ratio_v: list[object] = []
+    pos_value_delta_pct_v: list[object] = []
     net_v: list[object] = []
     net_val_v: list[object] = []
     dir_v: list[str] = []
+    anomaly_v: list[str] = []
+    same_outcome_move_v: list[object] = []
+    weighted_avg_move_v: list[object] = []
     up_pnl_v: list[object] = []
     dn_pnl_v: list[object] = []
     float_pnl_v: list[object] = []
@@ -458,45 +517,107 @@ def compute(
         else:
             signed = abs(qty) * act
 
-        st = bals.setdefault(gk, {"up": 0.0, "down": 0.0})
-        st[outcome] += signed
-
-        up_v.append(f3(st["up"]))
-        dn_v.append(f3(st["down"]))
-        tot_v.append(f3(st["up"] + st["down"]))
-        net_v.append(f3(st["up"] - st["down"]))
-        dir_v.append(net_dir(st["up"], st["down"]))
-
         price = float(row[prc_c]) if pd.notna(row[prc_c]) else 0.0
         b = pnl_s.setdefault(gk, new_bucket())
         shares = abs(signed)
+        pre_up_held = b["up_held"]
+        pre_up_cost = b["up_cost"]
+        pre_up_avg = b["up_avg"]
+        pre_dn_held = b["dn_held"]
+        pre_dn_cost = b["dn_cost"]
+        pre_dn_avg = b["dn_avg"]
+        pre_last_up = b["last_up"]
+        pre_last_dn = b["last_dn"]
         trade_pnl_up = ""
         trade_pnl_dn = ""
+        row_anomalies: list[str] = []
+        same_outcome_move = ""
+        position_value_delta_pct = ""
 
         if outcome == "up":
+            same_outcome_move = same_outcome_price_move_pct(price, pre_last_up)
+            position_value_delta_pct = position_value_change_pct(
+                signed_qty=signed,
+                shares=shares,
+                price=price,
+                pre_held=pre_up_held,
+                pre_cost=pre_up_cost,
+                pre_avg=pre_up_avg,
+            )
             if signed > 0:
                 b["up_held"] += shares
                 b["up_cost"] += shares * price
                 b["up_avg"] = b["up_cost"] / b["up_held"] if b["up_held"] > 1e-10 else 0.0
             else:
-                tp = shares * (price - b["up_avg"])
-                b["up_realized"] += tp
-                trade_pnl_up = f3(tp)
-                b["up_held"] -= shares
-                b["up_cost"] = b["up_held"] * b["up_avg"]
+                matched = min(shares, b["up_held"])
+                excess = shares - matched
+                if matched > 1e-10:
+                    tp = matched * (price - b["up_avg"])
+                    b["up_realized"] += tp
+                    trade_pnl_up = f3(tp)
+                    b["up_held"] -= matched
+                    if b["up_held"] > 1e-10:
+                        b["up_cost"] = b["up_held"] * b["up_avg"]
+                    else:
+                        b["up_held"] = 0.0
+                        b["up_cost"] = 0.0
+                        b["up_avg"] = 0.0
+                if excess > 1e-10:
+                    b["anomaly_count"] += 1.0
+                    row_anomalies.append(format_position_anomaly("Up", excess))
             b["last_up"] = price
         else:
+            same_outcome_move = same_outcome_price_move_pct(price, pre_last_dn)
+            position_value_delta_pct = position_value_change_pct(
+                signed_qty=signed,
+                shares=shares,
+                price=price,
+                pre_held=pre_dn_held,
+                pre_cost=pre_dn_cost,
+                pre_avg=pre_dn_avg,
+            )
             if signed > 0:
                 b["dn_held"] += shares
                 b["dn_cost"] += shares * price
                 b["dn_avg"] = b["dn_cost"] / b["dn_held"] if b["dn_held"] > 1e-10 else 0.0
             else:
-                tp = shares * (price - b["dn_avg"])
-                b["dn_realized"] += tp
-                trade_pnl_dn = f3(tp)
-                b["dn_held"] -= shares
-                b["dn_cost"] = b["dn_held"] * b["dn_avg"]
+                matched = min(shares, b["dn_held"])
+                excess = shares - matched
+                if matched > 1e-10:
+                    tp = matched * (price - b["dn_avg"])
+                    b["dn_realized"] += tp
+                    trade_pnl_dn = f3(tp)
+                    b["dn_held"] -= matched
+                    if b["dn_held"] > 1e-10:
+                        b["dn_cost"] = b["dn_held"] * b["dn_avg"]
+                    else:
+                        b["dn_held"] = 0.0
+                        b["dn_cost"] = 0.0
+                        b["dn_avg"] = 0.0
+                if excess > 1e-10:
+                    b["anomaly_count"] += 1.0
+                    row_anomalies.append(format_position_anomaly("Down", excess))
             b["last_dn"] = price
+
+        up_held = b["up_held"]
+        dn_held = b["dn_held"]
+
+        up_v.append(f3(up_held))
+        up_cost_v.append(f3(b["up_cost"]))
+        dn_v.append(f3(dn_held))
+        dn_cost_v.append(f3(b["dn_cost"]))
+        tot_v.append(f3(up_held + dn_held))
+        net_v.append(f3(up_held - dn_held))
+        dir_v.append(net_dir(up_held, dn_held))
+        anomaly_v.append("；".join(row_anomalies))
+        same_outcome_move_v.append(same_outcome_move)
+        weighted_avg_move_v.append(
+            relative_to_weighted_avg_price_move_pct(
+                price,
+                b["up_avg"] if outcome == "up" else b["dn_avg"],
+            )
+        )
+        pos_value_delta_pct_v.append(position_value_delta_pct)
 
         # 持仓价值占比 = 当前总持仓成本价值 / 分母（默认对齐 position.max_position_value）
         ratio_denominator = float(
@@ -524,20 +645,24 @@ def compute(
 
         up_avg_v.append(f3(b["up_avg"]) if b["up_held"] > 1e-10 else 0)
         dn_avg_v.append(f3(b["dn_avg"]) if b["dn_held"] > 1e-10 else 0)
-        net_val_v.append(
-            net_position_value(st["up"], st["down"], b["up_avg"], b["dn_avg"])
-        )
+        net_val_v.append(net_position_cost_gap(up_held, dn_held, b["up_avg"], b["dn_avg"]))
 
     res = df.copy()
+    res["同向成交价波动幅度(%)"] = same_outcome_move_v
+    res["相对于加权均价的价格波动百分比"] = weighted_avg_move_v
     res["Up积累份数"] = up_v
+    res["Up持仓成本"] = up_cost_v
     res["Up的加权均价"] = up_avg_v
     res["Down积累份数"] = dn_v
+    res["Down持仓成本"] = dn_cost_v
     res["Down加权均价"] = dn_avg_v
     res["当前总持仓份数"] = tot_v
     res["持仓价值占比"] = pos_ratio_v
+    res["持仓价值加/减仓百分比"] = pos_value_delta_pct_v
     res["净持仓份数"] = net_v
-    res["净持仓价值"] = net_val_v
+    res["净持仓成本差额"] = net_val_v
     res["净持仓方向"] = dir_v
+    res["持仓异常"] = anomaly_v
     res["Up已成交差价盈亏"] = up_pnl_v
     res["Down已成交差价盈亏"] = dn_pnl_v
     res["浮动盈亏"] = float_pnl_v
@@ -668,11 +793,18 @@ def format_ws(ws, marker_col: str | None = None) -> None:
                 c.number_format = "0.000"
             c.alignment = Alignment(horizontal="right")
 
-    # 持仓价值占比列使用百分比格式（例如 23.4%）
-    ratio_ci = cm.get("持仓价值占比")
-    if ratio_ci:
+    percent_cols = (
+        "同向成交价波动幅度(%)",
+        "相对于加权均价的价格波动百分比",
+        "持仓价值占比",
+        "持仓价值加/减仓百分比",
+    )
+    for col_name in percent_cols:
+        percent_ci = cm.get(col_name)
+        if not percent_ci:
+            continue
         for ri in range(2, ws.max_row + 1):
-            c = ws.cell(ri, ratio_ci)
+            c = ws.cell(ri, percent_ci)
             if isinstance(c.value, (int, float)):
                 c.number_format = "0.0%"
             c.alignment = Alignment(horizontal="right")

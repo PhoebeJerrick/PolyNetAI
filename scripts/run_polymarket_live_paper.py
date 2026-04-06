@@ -30,6 +30,7 @@ from polynet_ai.adapters.cycle_window_timing import (  # noqa: E402
 )
 from polynet_ai.domain.models import TradeEvent  # noqa: E402
 from polynet_ai.adapters.polymarket_live import (  # noqa: E402
+    OrderBookTopSnapshotEnricher,
     apply_proxy_env_from_dict,
     build_market_specs,
     fetch_market_spec,
@@ -109,6 +110,17 @@ def parse_args() -> argparse.Namespace:
         "--record-events-dir",
         default=None,
         help="可选：按周期目录额外落盘实时事件流，输出结构兼容 record_job/<cycle_slug>/ws_trade_events.ndjson。",
+    )
+    parser.add_argument(
+        "--record-orderbook-top",
+        action="store_true",
+        help="将 UP/Down 的买一卖一价格与挂单量附加写入 ws_trade_events.ndjson metadata（需可用 CLOB client）。",
+    )
+    parser.add_argument(
+        "--orderbook-refresh-seconds",
+        type=float,
+        default=0.5,
+        help="写盘口快照时的最小刷新间隔；0 表示每条事件都重新拉取 order book。",
     )
     parser.add_argument(
         "--no-wait-cycle-boundary",
@@ -362,6 +374,19 @@ def main() -> int:
     print(f"  ✓ 输出目录: {args.output_dir}")
     stage_times["2_init_engine"] = (datetime.now() - stage_2_start).total_seconds()
 
+    orderbook_metadata_enricher = None
+    if args.record_orderbook_top:
+        if _paper_broker.clob_client is None:
+            print("  ⚠ 已启用盘口快照落盘，但当前无可用 CLOB client，将跳过买一卖一补充")
+        else:
+            refresh_seconds = max(0.0, float(args.orderbook_refresh_seconds))
+            orderbook_metadata_enricher = OrderBookTopSnapshotEnricher(
+                _paper_broker.clob_client,
+                refresh_interval_seconds=refresh_seconds,
+                log_fn=print,
+            ).enrich
+            print(f"  ✓ 原始事件将附带 UP/Down 买一卖一快照（最小刷新间隔 {refresh_seconds:g}s）")
+
     redeem_settings = None
     if args.auto_redeem:
         redeem_settings = load_auto_redeem_settings(env_values, account_index=args.account_index)
@@ -462,6 +487,7 @@ def main() -> int:
             print(f"  ✓ 将跟踪 {len(specs)} 个周期")
             event_stream = iter_polymarket_trade_events(
                 specs,
+                metadata_enricher=orderbook_metadata_enricher,
                 post_window_start_delay_seconds=_iter_ws_delay,
                 log_fn=print,
             )
@@ -475,6 +501,7 @@ def main() -> int:
             event_stream = iter_polymarket_trade_events_robot(
                 slug_prefix=args.slug_prefix,
                 max_cycles=args.max_cycles,
+                metadata_enricher=orderbook_metadata_enricher,
                 poll_interval_seconds=args.poll_interval_seconds,
                 post_window_start_delay_seconds=_iter_ws_delay,
                 log_fn=print,
@@ -490,6 +517,7 @@ def main() -> int:
         print(f"  ✓ 发现 {len(specs)} 个市场")
         event_stream = iter_polymarket_trade_events(
             specs,
+            metadata_enricher=orderbook_metadata_enricher,
             post_window_start_delay_seconds=_iter_ws_delay,
             log_fn=print,
         )

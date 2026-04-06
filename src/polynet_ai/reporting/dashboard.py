@@ -10,6 +10,8 @@ from typing import Any, Callable
 
 import pandas as pd
 
+from polynet_ai.adapters.trade_event_store import ORDERBOOK_TOP_METADATA_FIELDS
+
 
 def _sanitize_json_for_html_script(json_text: str) -> str:
     """打断字面量 ``</script``，避免 HTML 解析器在 <script> 内提前闭合标签（与 JS 字符串边界无关）。"""
@@ -178,6 +180,41 @@ def _render_table(
     return f'<table class="table"><thead><tr>{headers}</tr></thead><tbody>{"".join(rows)}</tbody></table>'
 
 
+def _build_orderbook_snapshot_html(snapshots_df: pd.DataFrame) -> str:
+    if snapshots_df.empty or not any(column in snapshots_df.columns for column in ORDERBOOK_TOP_METADATA_FIELDS):
+        return "<p>No orderbook snapshot.</p>"
+    last = snapshots_df.iloc[-1]
+    rows = pd.DataFrame(
+        [
+            {
+                "outcome": "Up",
+                "bid1_price": last.get("up_bid1_price", ""),
+                "bid1_size": last.get("up_bid1_size", ""),
+                "ask1_price": last.get("up_ask1_price", ""),
+                "ask1_size": last.get("up_ask1_size", ""),
+            },
+            {
+                "outcome": "Down",
+                "bid1_price": last.get("down_bid1_price", ""),
+                "bid1_size": last.get("down_bid1_size", ""),
+                "ask1_price": last.get("down_ask1_price", ""),
+                "ask1_size": last.get("down_ask1_size", ""),
+            },
+        ]
+    )
+    meta_parts: list[str] = []
+    snapshot_at = str(last.get("orderbook_snapshot_at", "") or "")
+    snapshot_age_ms = last.get("orderbook_snapshot_age_ms", "")
+    if snapshot_at:
+        meta_parts.append(f"快照时刻: {html.escape(snapshot_at)}")
+    if snapshot_age_ms not in ("", None):
+        meta_parts.append(f"快照年龄: {html.escape(_format_value(snapshot_age_ms))} ms")
+    if bool(last.get("orderbook_snapshot_stale", False)):
+        meta_parts.append("当前为缓存旧快照")
+    meta_html = f'<div class="muted" style="margin-bottom:10px">{" | ".join(meta_parts)}</div>' if meta_parts else ""
+    return meta_html + _render_table(rows)
+
+
 def _build_summary_frame(metrics_df: pd.DataFrame, cycles_df: pd.DataFrame, decisions_df: pd.DataFrame, snapshots_df: pd.DataFrame) -> pd.DataFrame:
     metrics = metrics_df.iloc[0].to_dict() if not metrics_df.empty else {}
     latest_cash = float(pd.to_numeric(snapshots_df.get("account_cash", pd.Series(dtype=float)), errors="coerce").fillna(0).iloc[-1]) if not snapshots_df.empty and "account_cash" in snapshots_df.columns else 0.0
@@ -309,6 +346,7 @@ def build_dashboard_state(
         recent_cycles,
         row_class_fn=lambda row: "row-danger" if _to_float(row.get("cycle_net_profit", 0.0)) < 0 else "",
     ) if not recent_cycles.empty else "<p>No cycle summary.</p>"
+    orderbook_snapshot_html = _build_orderbook_snapshot_html(snapshots_df)
 
     cards = [
         ("净利润", _format_value(summary.get("total_net_profit", 0.0))),
@@ -340,6 +378,7 @@ def build_dashboard_state(
         "outcome_curve_html": outcome_curve,
         "signal_counts_html": signal_counts,
         "executed_counts_html": executed_counts,
+        "orderbook_snapshot_html": orderbook_snapshot_html,
         "decision_html": decision_html,
         "cycle_html": cycle_html,
     }
@@ -968,6 +1007,10 @@ def build_dashboard_html(
       <h2>规则实际执行次数</h2>
       <div id="dashboard-executed-counts">{state["executed_counts_html"]}</div>
     </div>
+    <div class="panel">
+      <h2>最近盘口快照</h2>
+      <div id="dashboard-orderbook-snapshot">{state["orderbook_snapshot_html"]}</div>
+    </div>
   </div>
   <div class="panel">
     <h2>最近决策</h2>
@@ -1010,6 +1053,7 @@ def build_dashboard_html(
       dashboardSetHtml("dashboard-cycle-curve", state.cycle_curve_html || "");
       dashboardSetHtml("dashboard-signal-counts", state.signal_counts_html || "");
       dashboardSetHtml("dashboard-executed-counts", state.executed_counts_html || "");
+      dashboardSetHtml("dashboard-orderbook-snapshot", state.orderbook_snapshot_html || "");
       dashboardSetHtml("dashboard-decisions", state.decision_html || "");
       dashboardSetHtml("dashboard-cycles", state.cycle_html || "");
     }}
@@ -1805,8 +1849,25 @@ def build_daily_markdown_report(
         f"- 最新现金: {_format_value(summary.get('latest_cash', 0.0))}",
         f"- 最新净持仓: {_format_value(summary.get('latest_net_position', 0.0))}",
         "",
-        "## 告警视图",
+        "## 最近盘口快照",
     ]
+    if not snapshots_df.empty and any(column in snapshots_df.columns for column in ORDERBOOK_TOP_METADATA_FIELDS):
+        last = snapshots_df.iloc[-1]
+        lines.extend([
+            f"- Up 买一: {_format_value(last.get('up_bid1_price', ''))} / 量 {_format_value(last.get('up_bid1_size', ''))}",
+            f"- Up 卖一: {_format_value(last.get('up_ask1_price', ''))} / 量 {_format_value(last.get('up_ask1_size', ''))}",
+            f"- Down 买一: {_format_value(last.get('down_bid1_price', ''))} / 量 {_format_value(last.get('down_bid1_size', ''))}",
+            f"- Down 卖一: {_format_value(last.get('down_ask1_price', ''))} / 量 {_format_value(last.get('down_ask1_size', ''))}",
+            "",
+        ])
+    else:
+        lines.extend([
+            "- 当前未记录盘口快照。",
+            "",
+        ])
+    lines.extend([
+        "## 告警视图",
+    ])
     if alerts:
         for alert in alerts:
             lines.append(f"- [{alert.severity}] {alert.title}: {alert.message}")

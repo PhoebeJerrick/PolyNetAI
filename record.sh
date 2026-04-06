@@ -31,6 +31,8 @@ fi
 DEFAULT_OVERRIDES="${RECORD_OVERRIDES:-}"
 DEFAULT_STARTING_CASH="${RECORD_STARTING_CASH:-100}"
 DEFAULT_PER_CYCLE_CASH="${RECORD_PER_CYCLE_CASH:-}"
+DEFAULT_RECORD_ORDERBOOK_TOP="${RECORD_RECORD_ORDERBOOK_TOP:-1}"
+DEFAULT_ORDERBOOK_REFRESH_SECONDS="${RECORD_ORDERBOOK_REFRESH_SECONDS:-0.5}"
 # ApiConfig.env：未设置 RECORD_ENV_FILE 时按顺序选用第一个存在的路径（与 resolve_default_api_config_env 一致）
 if [[ -n "${RECORD_ENV_FILE:-}" ]]; then
   DEFAULT_ENV_FILE="$RECORD_ENV_FILE"
@@ -74,7 +76,8 @@ print_help() {
     "  ./record.sh pm[LINES]        查看后台实盘验证（paper）状态与最近日志（默认 20 行）" \
     "  ./record.sh prm[LINES]       查看后台实盘真单（creb）状态与最近日志" \
     "  ./record.sh chart             打开 artifacts/charts/tracker_position_compare.html" \
-    "  ./record.sh excel-v5          生成 data/processed/..._with_accumulated_shares_v5.xlsx" \
+    "  ./record.sh excel-v5          生成 data/processed/..._with_accumulated_shares_v5.xlsx（若正式文件被占用则保留 tmp 并生成差异清单）" \
+    "  ./record.sh excel-v5-finalize 正式文件解锁后，把 tmp 结果落盘到正式文件并刷新差异清单" \
     "" \
     "  ./record.sh s<N>              后台开始抓未来 N 个完整 5m 周期" \
     "  ./record.sh r<N>              前台抓取并回放 N 个周期（直到生成业绩报告）" \
@@ -100,6 +103,8 @@ print_help() {
     "  RECORD_DASHBOARD_HOST=0.0.0.0  dashboard 监听地址（云服务器可设 0.0.0.0）" \
     "  RECORD_DASHBOARD_PORT=8765     dashboard 监听端口" \
     "  RECORD_PER_CYCLE_CASH=100      dm/dmb 默认每周期固定投注资金" \
+    "  RECORD_RECORD_ORDERBOOK_TOP=1  实盘验证/真单默认记录买一卖一快照（1 开启，0 关闭）" \
+    "  RECORD_ORDERBOOK_REFRESH_SECONDS=0.5  买一卖一快照最小刷新间隔（秒）" \
     "  RECORD_OUTPUT_DIR=...          批量任务默认数据流根目录（会拼接 /record_job_market）" \
     "  RECORD_INCLUDE_PERFORMANCE_REPORT=0  mstart replay 是否生成绩效 Excel（sim_batch_replay_performance_report）" \
     "  RECORD_INCLUDE_TRADE_PROCESS=0       mstart replay 是否生成交易过程 Excel（batch_replay_trade_process_zh）" \
@@ -262,6 +267,9 @@ poly_build_cycle_review_real_args() {
   fi
   if [[ "$PER_CYCLE_CASH_SET" == "true" && -n "$PER_CYCLE_CASH" ]]; then
     POLY_CRE_ARGS+=(--capital-reset-mode fixed --per-cycle-cash "$PER_CYCLE_CASH")
+  fi
+  if [[ "$DEFAULT_RECORD_ORDERBOOK_TOP" == "1" ]]; then
+    POLY_CRE_ARGS+=(--record-orderbook-top --orderbook-refresh-seconds "$DEFAULT_ORDERBOOK_REFRESH_SECONDS")
   fi
   if [[ -n "${POLY_CRE_RUN_SUBDIR:-}" ]]; then
     POLY_CRE_ARGS+=(--run-subdir "$POLY_CRE_RUN_SUBDIR")
@@ -543,6 +551,9 @@ except Exception:
     if [[ "$PER_CYCLE_CASH_SET" == "true" && -n "$DM_PER_CYCLE_CASH" ]]; then
       DM_ARGS+=(--per-cycle-cash "$DM_PER_CYCLE_CASH")
     fi
+    if [[ "$DEFAULT_RECORD_ORDERBOOK_TOP" == "1" ]]; then
+      DM_ARGS+=(--record-orderbook-top --orderbook-refresh-seconds "$DEFAULT_ORDERBOOK_REFRESH_SECONDS")
+    fi
 
     "$PYTHON_BIN" scripts/run_polymarket_live_paper.py "${DM_ARGS[@]}"
     ;;
@@ -582,7 +593,7 @@ except Exception:
       rm -f "$MARKET_PID_FILE"
     fi
 
-    nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_polymarket_live_paper.py --robot-mode --slug-prefix "$2" --max-cycles "$3" --config "$4" --output-dir "$5" --record-events-dir "$6" --dashboard-refresh-seconds 1 --starting-cash "$7" --env-file "$8" --account-index "$9"); if [[ -n "${10}" ]]; then cmd+=(--per-cycle-cash "${10}"); fi; exec "${cmd[@]}"' \
+    nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_polymarket_live_paper.py --robot-mode --slug-prefix "$2" --max-cycles "$3" --config "$4" --output-dir "$5" --record-events-dir "$6" --dashboard-refresh-seconds 1 --starting-cash "$7" --env-file "$8" --account-index "$9"); if [[ -n "${10}" ]]; then cmd+=(--per-cycle-cash "${10}"); fi; if [[ "${11}" == "1" ]]; then cmd+=(--record-orderbook-top --orderbook-refresh-seconds "${12}"); fi; exec "${cmd[@]}"' \
       "$MARKET_PID_FILE" \
       "$PYTHON_BIN" \
       "$SLUG_PREFIX" \
@@ -594,6 +605,8 @@ except Exception:
       "$DEFAULT_ENV_FILE" \
       "$DEFAULT_ACCOUNT_INDEX" \
       "$DM_PER_CYCLE_CASH" \
+      "$DEFAULT_RECORD_ORDERBOOK_TOP" \
+      "$DEFAULT_ORDERBOOK_REFRESH_SECONDS" \
       > "$MARKET_LOG" 2>&1 &
     disown 2>/dev/null || true
 
@@ -766,12 +779,70 @@ except Exception:
     ;;
   excel-v5)
     OUT_XLSX="data/processed/polymarket_tracker_collection_with_accumulated_shares_v5.xlsx"
+    TMP_XLSX="${OUT_XLSX%.xlsx}_tmp_regen.xlsx"
+    OLD_SNAPSHOT_XLSX="${OUT_XLSX%.xlsx}_old_snapshot.xlsx"
+    DIFF_MD="${OUT_XLSX%.xlsx}_old_vs_new_diff.md"
     mkdir -p "data/processed"
     "$PYTHON_BIN" analyze_polymarket_tracker.py \
       --input data/raw/polymarket_tracker_collection.xlsx \
-      --output "$OUT_XLSX" \
+      --output "$TMP_XLSX" \
       --position-value-denominator 1000
-    "$PYTHON_BIN" scripts/_update_floating_pnl_columns_in_xlsx.py --processed-v5 "$OUT_XLSX"
+    "$PYTHON_BIN" scripts/_update_floating_pnl_columns_in_xlsx.py --processed-v5 "$TMP_XLSX"
+
+    OLD_COMPARE_XLSX=""
+    if [[ -f "$OUT_XLSX" ]]; then
+      if cp -f "$OUT_XLSX" "$OLD_SNAPSHOT_XLSX" 2>/dev/null; then
+        OLD_COMPARE_XLSX="$OLD_SNAPSHOT_XLSX"
+      else
+        OLD_COMPARE_XLSX="$OUT_XLSX"
+      fi
+      "$PYTHON_BIN" scripts/compare_tracker_excel_versions.py \
+        --old "$OLD_COMPARE_XLSX" \
+        --new "$TMP_XLSX" \
+        --output "$DIFF_MD"
+    fi
+
+    if mv -f "$TMP_XLSX" "$OUT_XLSX"; then
+      echo "[excel-v5] 已更新正式文件: $OUT_XLSX"
+      if [[ -f "$DIFF_MD" ]]; then
+        echo "[excel-v5] 旧文件 vs 新文件差异清单: $DIFF_MD"
+      fi
+    else
+      echo "[excel-v5] 正式文件被占用，已保留新文件: $TMP_XLSX"
+      if [[ -f "$DIFF_MD" ]]; then
+        echo "[excel-v5] 旧文件 vs 新文件差异清单: $DIFF_MD"
+      fi
+      echo "[excel-v5] 关闭占用后执行: ./record.sh excel-v5-finalize"
+    fi
+    ;;
+  excel-v5-finalize)
+    OUT_XLSX="data/processed/polymarket_tracker_collection_with_accumulated_shares_v5.xlsx"
+    TMP_XLSX="${OUT_XLSX%.xlsx}_tmp_regen.xlsx"
+    OLD_SNAPSHOT_XLSX="${OUT_XLSX%.xlsx}_old_snapshot.xlsx"
+    DIFF_MD="${OUT_XLSX%.xlsx}_old_vs_new_diff.md"
+    if [[ ! -f "$TMP_XLSX" ]]; then
+      echo "错误: 未找到待落盘的新文件: $TMP_XLSX" >&2
+      exit 1
+    fi
+
+    OLD_COMPARE_XLSX=""
+    if [[ -f "$OUT_XLSX" ]]; then
+      if cp -f "$OUT_XLSX" "$OLD_SNAPSHOT_XLSX" 2>/dev/null; then
+        OLD_COMPARE_XLSX="$OLD_SNAPSHOT_XLSX"
+      else
+        OLD_COMPARE_XLSX="$OUT_XLSX"
+      fi
+      "$PYTHON_BIN" scripts/compare_tracker_excel_versions.py \
+        --old "$OLD_COMPARE_XLSX" \
+        --new "$TMP_XLSX" \
+        --output "$DIFF_MD"
+    fi
+
+    mv -f "$TMP_XLSX" "$OUT_XLSX"
+    echo "[excel-v5-finalize] 已落盘正式文件: $OUT_XLSX"
+    if [[ -f "$DIFF_MD" ]]; then
+      echo "[excel-v5-finalize] 旧文件 vs 新文件差异清单: $DIFF_MD"
+    fi
     ;;
   s|start)
     run_manage start \
@@ -953,7 +1024,7 @@ except Exception:
       fi
       if [[ "$job_type" == "live" ]]; then
         # 实盘验证：run_polymarket_live_paper.py
-        nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_polymarket_live_paper.py --robot-mode --slug-prefix "$2" --max-cycles "$3" --config "$4" --output-dir "$5" --record-events-dir "$6" --dashboard-refresh-seconds 1 --starting-cash "$7" --env-file "$8" --account-index "$9"); if [[ -n "${10}" ]]; then cmd+=(--per-cycle-cash "${10}"); fi; exec "${cmd[@]}"' \
+        nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_polymarket_live_paper.py --robot-mode --slug-prefix "$2" --max-cycles "$3" --config "$4" --output-dir "$5" --record-events-dir "$6" --dashboard-refresh-seconds 1 --starting-cash "$7" --env-file "$8" --account-index "$9"); if [[ -n "${10}" ]]; then cmd+=(--per-cycle-cash "${10}"); fi; if [[ "${11}" == "1" ]]; then cmd+=(--record-orderbook-top --orderbook-refresh-seconds "${12}"); fi; exec "${cmd[@]}"' \
           "$JOB_PID_FILE" \
           "$PYTHON_BIN" \
           "$SLUG_PREFIX" \
@@ -965,10 +1036,12 @@ except Exception:
           "$DEFAULT_ENV_FILE" \
           "$DEFAULT_ACCOUNT_INDEX" \
           "$job_per_cycle" \
+          "$DEFAULT_RECORD_ORDERBOOK_TOP" \
+          "$DEFAULT_ORDERBOOK_REFRESH_SECONDS" \
           > "$JOB_LOG" 2>&1 &
       elif [[ "$job_type" == "real" ]]; then
         # 实盘真单：run_polymarket_cycle_review.py（单进程多窗）
-        nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_polymarket_cycle_review.py --real-trading --max-cycles "$2" --config "$3" --output-dir "$4" --slug-prefix "$5" --starting-cash "$6" --env-file "$7" --account-index "$8" --signature-type "$9" --dashboard-refresh-seconds 1); if [[ -n "${10}" && "${10}" != "-" ]]; then cmd+=(--capital-reset-mode fixed --per-cycle-cash "${10}"); fi; exec "${cmd[@]}"' \
+        nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_polymarket_cycle_review.py --real-trading --max-cycles "$2" --config "$3" --output-dir "$4" --slug-prefix "$5" --starting-cash "$6" --env-file "$7" --account-index "$8" --signature-type "$9" --dashboard-refresh-seconds 1); if [[ -n "${10}" && "${10}" != "-" ]]; then cmd+=(--capital-reset-mode fixed --per-cycle-cash "${10}"); fi; if [[ "${11}" == "1" ]]; then cmd+=(--record-orderbook-top --orderbook-refresh-seconds "${12}"); fi; exec "${cmd[@]}"' \
           "$JOB_PID_FILE" \
           "$PYTHON_BIN" \
           "$job_cycles" \
@@ -980,6 +1053,8 @@ except Exception:
           "$DEFAULT_ACCOUNT_INDEX" \
           "$DEFAULT_SIGNATURE_TYPE" \
           "$job_per_cycle" \
+          "$DEFAULT_RECORD_ORDERBOOK_TOP" \
+          "$DEFAULT_ORDERBOOK_REFRESH_SECONDS" \
           > "$JOB_LOG" 2>&1 &
       else
         # 模拟下单测试：run_recorded_live_paper.py

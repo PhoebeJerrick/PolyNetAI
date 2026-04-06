@@ -32,7 +32,7 @@ def build_config() -> StrategyConfig:
 def test_live_runner_generates_snapshots_and_cycle_output() -> None:
     t0 = datetime(2026, 3, 20, 12, 0, 0)
     events = [
-        TradeEvent("BTC", "cycle-a", t0, price=0.45, shares=10, outcome="up", action="buy"),
+        TradeEvent("BTC", "cycle-a", t0, price=0.45, shares=10, outcome="up", action="buy", metadata={"up_bid1_price": 0.44, "down_ask1_price": 0.56}),
         TradeEvent("BTC", "cycle-a", t0 + timedelta(seconds=30), price=0.50, shares=8, outcome="up", action="buy"),
         TradeEvent("BTC", "cycle-a", t0 + timedelta(seconds=60), price=0.58, shares=7, outcome="up", action="buy"),
         TradeEvent("BTC", "cycle-b", t0 + timedelta(seconds=360), price=0.40, shares=6, outcome="down", action="buy"),
@@ -51,6 +51,9 @@ def test_live_runner_generates_snapshots_and_cycle_output() -> None:
     assert "account_cash" in result.snapshot_df.columns
     assert "up_last_price" in result.snapshot_df.columns
     assert "down_last_price" in result.snapshot_df.columns
+    assert "up_bid1_price" in result.snapshot_df.columns
+    assert result.snapshot_df.iloc[0]["up_bid1_price"] == 0.44
+    assert result.snapshot_df.iloc[0]["down_ask1_price"] == 0.56
     assert all(delay <= 0.01 for delay in sleeps)
 
 

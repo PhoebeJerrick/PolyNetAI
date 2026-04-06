@@ -5,7 +5,7 @@ import os
 import re
 import ssl
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -370,6 +370,75 @@ def fetch_market_spec(slug: str) -> PolymarketMarketSpec:
     return PolymarketMarketSpec.from_market_json(payload)
 
 
+def _best_price_size(levels: Iterable[Any], *, reverse: bool) -> tuple[float | None, float | None]:
+    ranked = sorted(
+        (item for item in levels if item is not None),
+        key=lambda item: float(getattr(item, "price", 0.0) or 0.0),
+        reverse=reverse,
+    )
+    for level in ranked:
+        price = float(getattr(level, "price", 0.0) or 0.0)
+        size = float(getattr(level, "size", 0.0) or 0.0)
+        if price > 0 and size > 0:
+            return price, size
+    return None, None
+
+
+def _top_of_book_metadata(prefix: str, book: Any) -> dict[str, Any]:
+    bid_price, bid_size = _best_price_size(getattr(book, "bids", ()) or (), reverse=True)
+    ask_price, ask_size = _best_price_size(getattr(book, "asks", ()) or (), reverse=False)
+    return {
+        f"{prefix}_bid1_price": bid_price,
+        f"{prefix}_bid1_size": bid_size,
+        f"{prefix}_ask1_price": ask_price,
+        f"{prefix}_ask1_size": ask_size,
+    }
+
+
+@dataclass(slots=True)
+class OrderBookTopSnapshotEnricher:
+    client: Any
+    refresh_interval_seconds: float = 0.5
+    log_fn: Callable[[str], None] | None = None
+    _cache: dict[str, tuple[float, dict[str, Any]]] = field(default_factory=dict, init=False)
+
+    def enrich(self, event: TradeEvent, spec: PolymarketMarketSpec) -> dict[str, Any]:
+        del event
+        now = time.monotonic()
+        refresh_interval = max(0.0, float(self.refresh_interval_seconds))
+        cached = self._cache.get(spec.slug)
+        if cached is not None and now - cached[0] < refresh_interval:
+            snapshot = dict(cached[1])
+            snapshot["orderbook_snapshot_age_ms"] = round((now - cached[0]) * 1000.0, 3)
+            return snapshot
+
+        try:
+            payload = self._fetch_snapshot(spec)
+        except Exception as exc:
+            if self.log_fn is not None:
+                self.log_fn(f"[polymarket] 拉取盘口快照失败 {spec.slug}: {_ws_error_detail(exc)}")
+            if cached is None:
+                return {}
+            snapshot = dict(cached[1])
+            snapshot["orderbook_snapshot_age_ms"] = round((now - cached[0]) * 1000.0, 3)
+            snapshot["orderbook_snapshot_stale"] = True
+            return snapshot
+
+        self._cache[spec.slug] = (now, payload)
+        snapshot = dict(payload)
+        snapshot["orderbook_snapshot_age_ms"] = 0.0
+        return snapshot
+
+    def _fetch_snapshot(self, spec: PolymarketMarketSpec) -> dict[str, Any]:
+        payload = {
+            "orderbook_snapshot_source": "clob_order_book",
+            "orderbook_snapshot_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+        }
+        payload.update(_top_of_book_metadata("up", self.client.get_order_book(spec.yes_token_id)))
+        payload.update(_top_of_book_metadata("down", self.client.get_order_book(spec.no_token_id)))
+        return payload
+
+
 def _discover_time_bucket_markets(slug_prefix: str, limit: int) -> list[PolymarketMarketSpec]:
     match = re.fullmatch(r"([a-z0-9-]+)-updown-(\d+)m-", slug_prefix)
     if match is None:
@@ -527,6 +596,7 @@ def ws_message_to_trade_event(message: dict[str, Any], spec: PolymarketMarketSpe
 def iter_polymarket_trade_events(
     market_specs: Iterable[PolymarketMarketSpec],
     *,
+    metadata_enricher: Callable[[TradeEvent, PolymarketMarketSpec], dict[str, Any]] | None = None,
     ping_interval_seconds: float = 10.0,
     receive_timeout_seconds: float = 1.0,
     cycle_grace_seconds: float = 20.0,
@@ -667,6 +737,8 @@ def iter_polymarket_trade_events(
 
                         event = ws_message_to_trade_event(message, spec)
                         if event is not None:
+                            if metadata_enricher is not None:
+                                event.metadata.update(metadata_enricher(event, spec) or {})
                             last_data_at = time.monotonic()
                             if eff_cutoff_naive is not None and event.timestamp < eff_cutoff_naive:
                                 continue
@@ -711,6 +783,7 @@ def iter_polymarket_trade_events_robot(
     *,
     slug_prefix: str,
     max_cycles: int,
+    metadata_enricher: Callable[[TradeEvent, PolymarketMarketSpec], dict[str, Any]] | None = None,
     poll_interval_seconds: float = 3.0,
     discover_limit: int = 12,
     ping_interval_seconds: float = 10.0,
@@ -756,6 +829,7 @@ def iter_polymarket_trade_events_robot(
                 log_fn(f"[polymarket] 机器人模式切换到窗口 {spec.slug} ({handled_cycles}/{max_cycles if max_cycles > 0 else 'inf'})")
             yield from iter_polymarket_trade_events(
                 [spec],
+                metadata_enricher=metadata_enricher,
                 ping_interval_seconds=ping_interval_seconds,
                 receive_timeout_seconds=receive_timeout_seconds,
                 cycle_grace_seconds=cycle_grace_seconds,

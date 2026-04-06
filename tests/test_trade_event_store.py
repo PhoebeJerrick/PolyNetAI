@@ -56,15 +56,23 @@ def test_export_recorded_trade_events_csv_writes_flat_file(tmp_path) -> None:
                 shares=10.0,
                 outcome="up",
                 action="buy",
-                metadata={"source_id": "abc"},
+                metadata={
+                    "source_id": "abc",
+                    "up_bid1_price": 0.44,
+                    "up_bid1_size": 12.0,
+                    "up_ask1_price": 0.45,
+                    "up_ask1_size": 8.0,
+                },
             )
         )
 
     output = export_recorded_trade_events_csv(ndjson_path, csv_path)
 
     text = output.read_text(encoding="utf-8-sig")
-    assert "market_id,cycle_id,timestamp,price,shares,outcome,action,source,metadata" in text
-    assert '{""source_id"": ""abc""}' in text
+    assert "up_bid1_price" in text
+    assert "up_bid1_size" in text
+    assert '""source_id"": ""abc""' in text
+    assert ",0.44,12.0,0.45,8.0" in text
 
 
 def test_cycle_trade_event_recorder_splits_by_cycle(tmp_path) -> None:
