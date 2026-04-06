@@ -11,6 +11,22 @@ import pandas as pd
 from polynet_ai.domain.models import TradeEvent
 
 
+ORDERBOOK_TOP_METADATA_FIELDS: tuple[str, ...] = (
+    "orderbook_snapshot_source",
+    "orderbook_snapshot_at",
+    "orderbook_snapshot_age_ms",
+    "orderbook_snapshot_stale",
+    "up_bid1_price",
+    "up_bid1_size",
+    "up_ask1_price",
+    "up_ask1_size",
+    "down_bid1_price",
+    "down_bid1_size",
+    "down_ask1_price",
+    "down_ask1_size",
+)
+
+
 def trade_event_to_record(event: TradeEvent) -> dict[str, Any]:
     return {
         "market_id": event.market_id,
@@ -22,6 +38,14 @@ def trade_event_to_record(event: TradeEvent) -> dict[str, Any]:
         "action": event.action,
         "source": event.source,
         "metadata": dict(event.metadata),
+    }
+
+
+def flatten_selected_event_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: metadata.get(key)
+        for key in ORDERBOOK_TOP_METADATA_FIELDS
+        if key in metadata
     }
 
 
@@ -116,6 +140,7 @@ def export_recorded_trade_events_csv(
     normalized_rows = []
     for row in rows:
         item = dict(row)
+        item.update(flatten_selected_event_metadata(item.get("metadata") or {}))
         item["metadata"] = json.dumps(item.get("metadata") or {}, ensure_ascii=False, sort_keys=True)
         normalized_rows.append(item)
     destination = Path(output_path)

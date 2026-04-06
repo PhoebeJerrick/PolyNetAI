@@ -129,3 +129,99 @@ def test_trend_rule_keeps_prior_feed_until_interval() -> None:
     )
     d3 = router.route(f3)
     assert any(c.category == "trend" for c in d3.candidates)
+
+
+def test_opening_rule_uses_live_quotes_inside_window() -> None:
+    cfg = StrategyConfig(
+        raw={
+            "cycle": {"cycle_seconds": 300, "last_minute_seconds": 30},
+            "priorities": {
+                "last_minute": 100,
+                "stop_loss": 100,
+                "hedge": 100,
+                "take_profit": 100,
+                "opening": 1,
+                "grid": 100,
+                "mean_reversion": 100,
+                "trend": 100,
+            },
+            "rule_price_feed": {
+                "last_minute": 0.0,
+                "entries": {
+                    "opening": 0.0,
+                    "hedge": 0.0,
+                    "grid": 0.0,
+                    "mean_reversion": 0.0,
+                    "trend": 0.0,
+                },
+                "exits": {
+                    "stop_loss": 0.0,
+                    "hedge": 0.0,
+                    "take_profit": 0.0,
+                    "grid": 0.0,
+                    "mean_reversion": 0.0,
+                },
+            },
+            "opening_entry": {
+                "enabled": True,
+                "window_seconds": 30.0,
+                "vwap_epsilon": 0.01,
+                "range_low_fraction": 0.35,
+                "min_range_width": 0.02,
+                "min_market_trades": 3,
+                "infer_missing_with_binary_complement": True,
+            },
+            "trend": {"min_trend_strength": 1.0, "trend_price_edge": 1.0, "trend_scale": 0.0},
+            "mean_reversion": {"enabled": False},
+            "order_sizing": {"base_order_size": 5.0, "volatility_order_scale": 0.0},
+        }
+    )
+    router = StrategyRouter(cfg)
+    t0 = datetime(2026, 1, 1, 12, 0, 25, 368000)
+
+    first = _feature_snapshot(
+        timestamp=t0,
+        price=0.63,
+        cycle_elapsed_seconds=25.368,
+        strategy_trades=0,
+        trend_bias=None,
+        trend_strength=0.0,
+        market_regime="range",
+        opening_vs_last_move=0.0,
+        up_last_price=0.63,
+        down_last_price=0.37,
+        up_market_vwap=0.63,
+        down_market_vwap=0.0,
+        up_market_n=1,
+        down_market_n=0,
+        up_market_high=0.63,
+        up_market_low=0.63,
+    )
+    second = _feature_snapshot(
+        timestamp=t0 + timedelta(milliseconds=63),
+        price=0.34,
+        cycle_elapsed_seconds=25.431,
+        strategy_trades=0,
+        trend_bias=None,
+        trend_strength=0.0,
+        market_regime="range",
+        opening_vs_last_move=-0.29,
+        up_last_price=0.66,
+        down_last_price=0.34,
+        up_market_vwap=(0.63 + 0.65 + 0.66) / 3,
+        down_market_vwap=(0.35 + 0.37 + 0.34) / 3,
+        up_market_n=3,
+        down_market_n=3,
+        up_market_high=0.66,
+        up_market_low=0.63,
+        down_market_high=0.37,
+        down_market_low=0.34,
+    )
+
+    assert router.route(first).selected is None
+
+    decision = router.route(second)
+
+    assert decision.selected is not None
+    assert decision.selected.category == "opening"
+    assert decision.selected.outcome == "down"

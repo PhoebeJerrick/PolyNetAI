@@ -19,6 +19,7 @@ def _router_config() -> StrategyConfig:
                 "vwap_epsilon": 0.01,
                 "range_low_fraction": 0.35,
                 "min_range_width": 0.02,
+                "min_market_trades": 1,
                 "infer_missing_with_binary_complement": True,
             },
             "order_sizing": {
@@ -28,7 +29,7 @@ def _router_config() -> StrategyConfig:
                 "volatility_order_scale": 5.0,
             },
             "trend": {"min_trend_strength": 0.5, "trend_price_edge": 0.03, "trend_scale": 0.05},
-            "exposure": {"hedge_trigger_value": 50.0, "max_grid_net_position": 20.0},
+            "exposure": {"hedge_trigger_value": 50.0},
             "grid": {"grid_low_percentile": 0.25, "grid_high_percentile": 0.75},
             "mean_reversion": {
                 "up_buy_deviation": 0.10,

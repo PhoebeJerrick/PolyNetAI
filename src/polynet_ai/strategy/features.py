@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from polynet_ai.domain.models import FeatureSnapshot, Outcome
 from polynet_ai.domain.settlement import settlement_summary
@@ -16,6 +16,14 @@ def _deviation(price: float, avg_price: float) -> float:
     if avg_price <= 1e-10:
         return 0.0
     return (price - avg_price) / avg_price
+
+
+def _signal_basis_price(avg_price: float, reentry_anchor_price: float) -> float:
+    if avg_price > 1e-10:
+        return avg_price
+    if reentry_anchor_price > 1e-10:
+        return reentry_anchor_price
+    return 0.0
 
 
 def _price_percentile(price: float, low: float, high: float) -> float:
@@ -141,8 +149,10 @@ def snapshot_with_effective_price(
             effective_price,
             infer_missing_with_binary_complement=True,
         )
-    up_deviation = _deviation(up_px, features.up_avg_price)
-    down_deviation = _deviation(down_px, features.down_avg_price)
+    up_basis = _signal_basis_price(features.up_avg_price, features.up_signal_basis_price)
+    down_basis = _signal_basis_price(features.down_avg_price, features.down_signal_basis_price)
+    up_deviation = _deviation(up_px, up_basis)
+    down_deviation = _deviation(down_px, down_basis)
     up_low, up_high = _implied_up_price_bounds(
         up_low=features.up_market_low,
         up_high=features.up_market_high,
@@ -154,7 +164,7 @@ def snapshot_with_effective_price(
     price_percentile = _price_percentile(up_px, up_low, up_high)
     market_regime = (
         "trend"
-        if features.trend_strength >= 0.35 or abs(price_move) > features.volatility * 0.5
+        if features.trend_strength >= 0.50 or abs(price_move) > features.volatility * 0.5
         else "range"
     )
     confidence_proxy = _confidence_proxy(features.cycle_net_profit, price_move, features.volatility)
@@ -200,8 +210,10 @@ def snapshot_with_effective_quotes(
 
     opening_level = features.price - features.opening_vs_last_move
     price_move = effective_price - opening_level
-    up_deviation = _deviation(up_px, features.up_avg_price)
-    down_deviation = _deviation(down_px, features.down_avg_price)
+    up_basis = _signal_basis_price(features.up_avg_price, features.up_signal_basis_price)
+    down_basis = _signal_basis_price(features.down_avg_price, features.down_signal_basis_price)
+    up_deviation = _deviation(up_px, up_basis)
+    down_deviation = _deviation(down_px, down_basis)
     up_low, up_high = _implied_up_price_bounds(
         up_low=features.up_market_low,
         up_high=features.up_market_high,
@@ -213,7 +225,7 @@ def snapshot_with_effective_quotes(
     price_percentile = _price_percentile(up_px, up_low, up_high)
     market_regime = (
         "trend"
-        if features.trend_strength >= 0.35 or abs(price_move) > features.volatility * 0.5
+        if features.trend_strength >= 0.50 or abs(price_move) > features.volatility * 0.5
         else "range"
     )
     confidence_proxy = _confidence_proxy(features.cycle_net_profit, price_move, features.volatility)
@@ -235,6 +247,8 @@ def build_feature_snapshot(
     engine: StateEngine,
     cycle_seconds: int,
     last_minute_seconds: int,
+    trend_window_secs: float = 6.0,
+    phase_3_end_seconds: float = 240.0,
 ) -> FeatureSnapshot:
     if engine.state is None or engine.state.last_event_timestamp is None:
         raise RuntimeError("state engine has no market context")
@@ -248,12 +262,33 @@ def build_feature_snapshot(
     opening = state.opening_price or state.last_price
     price_move = state.last_price - opening
     volatility_ratio = volatility / opening if opening > 1e-10 else 0.0
-    trend_bias = None
-    if state.consecutive_outcome_count >= 2:
-        trend_bias = state.consecutive_outcome
-    trend_strength = state.consecutive_outcome_count / max(1, state.market_trades + state.strategy_trades)
+
+    # ── 趋势强度重设计：基于最近 N 秒内市场成交的同向比例 ──────────────────────────────────
+    # 用时间窗口而非枚举数量，确保在不同成交频率下覆盖相同时段
+    _trend_window_secs = trend_window_secs
+    _tape_all = list(engine.market_tape)
+    _cutoff = timestamp - timedelta(seconds=_trend_window_secs)
+    _recent_tape = [t for t in _tape_all if t.timestamp >= _cutoff]
+    if len(_recent_tape) >= 3:
+        # 趋势强度：以“同向成交的失衡程度”度量，取值范围应在 [0, 1]。
+        # 旧实现使用了 dominant_count/total，导致 trend_strength 永远 >= 0.5，
+        # 从而几乎总将市场误判为 trend，禁用依赖 range 的网格进出逻辑。
+        _up_count = sum(1 for t in _recent_tape if t.outcome == "up")
+        _total = len(_recent_tape)
+        _down_count = _total - _up_count
+        if _up_count == _down_count:
+            trend_strength = 0.0
+            trend_bias = None
+        else:
+            trend_bias = "up" if _up_count > _down_count else "down"
+            # imbalance = (dominant - minor)/total, where dominant+minor=total
+            trend_strength = abs(_up_count - _down_count) / _total
+    else:
+        trend_strength = 0.0
+        trend_bias = None
+
     net_position_value = state.net_position_value()
-    market_regime = "trend" if trend_strength >= 0.35 or abs(price_move) > volatility * 0.5 else "range"
+    market_regime = "trend" if trend_strength >= 0.50 or abs(price_move) > volatility * 0.5 else "range"
     up_vwap = state.up_market_sum / state.up_market_n if state.up_market_n else 0.0
     down_vwap = state.down_market_sum / state.down_market_n if state.down_market_n else 0.0
     up_px, down_px = _resolve_outcome_prices(
@@ -262,6 +297,12 @@ def build_feature_snapshot(
         state.last_price,
         infer_missing_with_binary_complement=True,
     )
+    # ── 反向价格联动推断：基于最新市场成交方向实时更新另一方向的隐含价格 ────────────────
+    # 确保 UP 价格上涨时 DOWN 持仓的止损/止盈 能基于最新推断价格而非陈旧的历史成交价
+    if state.market_last_outcome == "up" and state.up_last_price > 1e-9:
+        down_px = _clamp_binary_price(1.0 - state.up_last_price)
+    elif state.market_last_outcome == "down" and state.down_last_price > 1e-9:
+        up_px = _clamp_binary_price(1.0 - state.down_last_price)
     up_low, up_high = _implied_up_price_bounds(
         up_low=state.up_market_low,
         up_high=state.up_market_high,
@@ -270,13 +311,44 @@ def build_feature_snapshot(
         down_high=state.down_market_high,
         down_n=state.down_market_n,
     )
+    # ── 浮动盈亏：尾盘用结算估值，非尾盘用市价估值 ──────────────────────────────────────
+    # 非尾盘阶段无法确认最终获胜方向（当前赔率不足以判断结算结果），
+    # 强制结算估值会把另一方向持仓计为全损，误触发熔断机制（机制1）。
+    # 进入 last_minute 后时间不够反转，才切换为结算价值做最终风控。
+    _is_last_minute = elapsed >= max(0, cycle_seconds - last_minute_seconds)
+    if _is_last_minute:
+        _unrealized_up   = summary.unrealized_up_pnl
+        _unrealized_down = summary.unrealized_down_pnl
+        _cycle_net       = summary.cycle_net_profit
+    else:
+        _u = (state.up_position.held * (up_px - state.up_position.avg_price)
+              if state.up_position.avg_price > 0 else 0.0)
+        _d = (state.down_position.held * (down_px - state.down_position.avg_price)
+              if state.down_position.avg_price > 0 else 0.0)
+        _unrealized_up   = round(_u, 3)
+        _unrealized_down = round(_d, 3)
+        _cycle_net       = round(
+            state.up_position.realized_pnl + state.down_position.realized_pnl + _u + _d, 3
+        )
+    # Re-entry 仅在 phase1~3 生效；phase4 不再使用清仓锚点恢复信号基准。
+    phase_4_started = elapsed > float(phase_3_end_seconds)
+    up_reentry_armed = (state.up_reentry_armed_at is not None) and (not phase_4_started)
+    down_reentry_armed = (state.down_reentry_armed_at is not None) and (not phase_4_started)
+    up_signal_basis = _signal_basis_price(
+        state.up_position.avg_price,
+        state.reentry_anchor_up_price if up_reentry_armed else 0.0,
+    )
+    down_signal_basis = _signal_basis_price(
+        state.down_position.avg_price,
+        state.reentry_anchor_down_price if down_reentry_armed else 0.0,
+    )
     return FeatureSnapshot(
         market_id=state.market_id,
         cycle_id=state.cycle_id,
         timestamp=timestamp,
         price=state.last_price,
         cycle_elapsed_seconds=elapsed,
-        is_last_minute=elapsed >= max(0, cycle_seconds - last_minute_seconds),
+        is_last_minute=_is_last_minute,
         trend_bias=trend_bias,
         trend_strength=trend_strength,
         net_direction=state.net_direction(),
@@ -286,17 +358,17 @@ def build_feature_snapshot(
         down_held=state.down_position.held,
         up_avg_price=state.up_position.avg_price,
         down_avg_price=state.down_position.avg_price,
-        up_deviation=_deviation(up_px, state.up_position.avg_price),
-        down_deviation=_deviation(down_px, state.down_position.avg_price),
+        up_deviation=_deviation(up_px, up_signal_basis),
+        down_deviation=_deviation(down_px, down_signal_basis),
         volatility=volatility,
         volatility_ratio=volatility_ratio,
         price_percentile=_price_percentile(up_px, up_low, up_high),
         realized_pnl=state.up_position.realized_pnl + state.down_position.realized_pnl,
-        unrealized_up_pnl=summary.unrealized_up_pnl,
-        unrealized_down_pnl=summary.unrealized_down_pnl,
-        cycle_net_profit=summary.cycle_net_profit,
+        unrealized_up_pnl=_unrealized_up,
+        unrealized_down_pnl=_unrealized_down,
+        cycle_net_profit=_cycle_net,
         opening_vs_last_move=price_move,
-        confidence_proxy=_confidence_proxy(summary.cycle_net_profit, price_move, volatility),
+        confidence_proxy=_confidence_proxy(_cycle_net, price_move, volatility),
         market_regime=market_regime,
         strategy_trades=state.strategy_trades,
         market_trades=state.market_trades,
@@ -312,4 +384,9 @@ def build_feature_snapshot(
         down_market_low=state.down_market_low,
         tape_low=state.low_price,
         tape_high=state.high_price,
+        up_signal_basis_price=up_signal_basis,
+        down_signal_basis_price=down_signal_basis,
+        reentry_armed=up_reentry_armed or down_reentry_armed,
+        up_reentry_armed=up_reentry_armed,
+        down_reentry_armed=down_reentry_armed,
     )

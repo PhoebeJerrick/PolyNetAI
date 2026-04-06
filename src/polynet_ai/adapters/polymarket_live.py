@@ -5,17 +5,33 @@ import os
 import re
 import ssl
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
+from polynet_ai.adapters.cycle_window_timing import (
+    DEFAULT_POST_WINDOW_START_DELAY_SECONDS,
+    effective_strategy_start_naive_utc,
+    naive_utc_to_aware_utc,
+    sleep_until_utc_instant,
+)
 from polynet_ai.domain.models import TradeEvent
 
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+
+
+def _ws_error_detail(exc: BaseException, *, max_len: int = 220) -> str:
+    """将 WebSocket 相关异常压缩为一行，便于日志区分网络/代理问题与程序错误。"""
+    text = f"{exc.__class__.__name__}: {exc}"
+    text = " ".join(text.split())
+    if len(text) > max_len:
+        return text[: max_len - 3] + "..."
+    return text
+
 
 _HTTP_HEADERS = {
     "User-Agent": "PolyNetAI/0.1 (+https://polymarket.com)",
@@ -126,28 +142,71 @@ def _fetch_json(url: str) -> Any:
         raise RuntimeError(hint) from (last if last is not None else urllib_exc)
 
 
+def default_api_config_env_candidates(root: Path) -> tuple[Path, ...]:
+    """相对仓库根目录 `root` 的 ApiConfig.env 默认搜索路径（按顺序）。
+
+    常见布局（与 `record.sh` 一致）：
+    1. ``<workspace>/APIs/ApiConfig.env`` — 与 ``PolyMkt`` 同级，例如 ``Projects/PolyMkt/PolyNetAI`` → ``Projects/APIs``；
+    2. ``<PolyMkt>/APIs/ApiConfig.env`` — 与仓库同在一级目录下；
+    3. ``<repo>/APIs/ApiConfig.env`` — 仅在本仓库内。
+    """
+    return (
+        root.parent.parent / "APIs" / "ApiConfig.env",
+        root.parent / "APIs" / "ApiConfig.env",
+        root / "APIs" / "ApiConfig.env",
+    )
+
+
+def resolve_default_api_config_env(root: Path) -> str:
+    """返回第一个存在的默认 ApiConfig.env 路径；均不存在时返回首选路径字符串。"""
+    for candidate in default_api_config_env_candidates(root):
+        if candidate.exists():
+            return str(candidate.resolve())
+    return str(default_api_config_env_candidates(root)[0].resolve())
+
+
 def load_api_env(path: str | Path) -> dict[str, str]:
+    """
+    解析 `ApiConfig.env` 类文件（KEY=value，一行一项）。
+
+    兼容常见写法：
+    - UTF-8 BOM（utf-8-sig）；
+    - shell 风格 `export KEY=value` / `export KEY = value`（会去掉前缀 export）。
+    """
     values: dict[str, str] = {}
     env_path = Path(path)
     if not env_path.exists():
         return values
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+    text = env_path.read_text(encoding="utf-8-sig")
+    for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
+        if line.lower().startswith("export "):
+            line = line[7:].lstrip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
         key, value = line.split("=", 1)
-        values[key.strip()] = value.strip()
+        key = key.strip()
+        if not key:
+            continue
+        values[key] = value.strip()
     return values
 
 
 def select_account_env(values: dict[str, str], account_index: int = 2) -> dict[str, str]:
     """
-    从 `ApiConfig.env` 中挑选指定账号的配置，并将 `FOO_2` 形式映射为无后缀键 `FOO`。
+    从 `ApiConfig.env` 中挑选指定账号的配置，并将 `FOO_<N>` 映射为无后缀键 `FOO`（供仍读裸键的下游使用）。
+
+    多账户实盘约定（默认 N=2）：
+    - CLOB/钱包：`PURSE_PRIVATE_KEY_2`、`PURSE_ADDRESS_2`、`POLY_DERIVE_API_KEY_2`、
+      `POLY_DERIVE_API_SECRET_2`、`POLY_DERIVE_API_PASSPHRASE_2`；
+    - 账号 1 则用 `_1` 后缀；`--account-index` 与后缀 N 一致。
 
     规则：
-    - 保留原始所有键，兼容旧逻辑；
-    - 若存在 `<KEY>_<account_index>`，则额外写入 `<KEY>`；
-    - 默认账号 2，便于双账号场景直接切换。
+    - 保留原始所有键；
+    - 若存在 `<KEY>_<account_index>`，则额外写入 `<KEY>`（覆盖同名裸键，以当前账号为准）；
+    - 默认账号 2，与 `get_account_env_value` 默认一致。
     """
     selected = dict(values)
     suffix = f"_{int(account_index)}"
@@ -164,12 +223,21 @@ def get_account_env_value(
     account_index: int = 2,
     default: str | None = None,
 ) -> str | None:
+    """
+    读取某配置项：优先 `<key>_<account_index>`（如 `PURSE_ADDRESS_2`），否则回退裸 `<key>`（兼容旧单账户文件）。
+    """
     suffix_key = f"{key}_{int(account_index)}"
     if suffix_key in values:
         return values[suffix_key]
     if key in values:
         return values[key]
     return default
+
+
+def account_env_keys_for_index(keys: Iterable[str], account_index: int) -> list[str]:
+    """将逻辑键名转为带账号后缀的 ApiConfig 键名列表（用于报错提示）。"""
+    n = int(account_index)
+    return [f"{k}_{n}" for k in keys]
 
 
 def _strip_env_value(raw: str) -> str:
@@ -300,6 +368,75 @@ def fetch_market_spec(slug: str) -> PolymarketMarketSpec:
     if not isinstance(payload, dict):
         raise ValueError(f"未获取到市场详情: {slug}")
     return PolymarketMarketSpec.from_market_json(payload)
+
+
+def _best_price_size(levels: Iterable[Any], *, reverse: bool) -> tuple[float | None, float | None]:
+    ranked = sorted(
+        (item for item in levels if item is not None),
+        key=lambda item: float(getattr(item, "price", 0.0) or 0.0),
+        reverse=reverse,
+    )
+    for level in ranked:
+        price = float(getattr(level, "price", 0.0) or 0.0)
+        size = float(getattr(level, "size", 0.0) or 0.0)
+        if price > 0 and size > 0:
+            return price, size
+    return None, None
+
+
+def _top_of_book_metadata(prefix: str, book: Any) -> dict[str, Any]:
+    bid_price, bid_size = _best_price_size(getattr(book, "bids", ()) or (), reverse=True)
+    ask_price, ask_size = _best_price_size(getattr(book, "asks", ()) or (), reverse=False)
+    return {
+        f"{prefix}_bid1_price": bid_price,
+        f"{prefix}_bid1_size": bid_size,
+        f"{prefix}_ask1_price": ask_price,
+        f"{prefix}_ask1_size": ask_size,
+    }
+
+
+@dataclass(slots=True)
+class OrderBookTopSnapshotEnricher:
+    client: Any
+    refresh_interval_seconds: float = 0.5
+    log_fn: Callable[[str], None] | None = None
+    _cache: dict[str, tuple[float, dict[str, Any]]] = field(default_factory=dict, init=False)
+
+    def enrich(self, event: TradeEvent, spec: PolymarketMarketSpec) -> dict[str, Any]:
+        del event
+        now = time.monotonic()
+        refresh_interval = max(0.0, float(self.refresh_interval_seconds))
+        cached = self._cache.get(spec.slug)
+        if cached is not None and now - cached[0] < refresh_interval:
+            snapshot = dict(cached[1])
+            snapshot["orderbook_snapshot_age_ms"] = round((now - cached[0]) * 1000.0, 3)
+            return snapshot
+
+        try:
+            payload = self._fetch_snapshot(spec)
+        except Exception as exc:
+            if self.log_fn is not None:
+                self.log_fn(f"[polymarket] 拉取盘口快照失败 {spec.slug}: {_ws_error_detail(exc)}")
+            if cached is None:
+                return {}
+            snapshot = dict(cached[1])
+            snapshot["orderbook_snapshot_age_ms"] = round((now - cached[0]) * 1000.0, 3)
+            snapshot["orderbook_snapshot_stale"] = True
+            return snapshot
+
+        self._cache[spec.slug] = (now, payload)
+        snapshot = dict(payload)
+        snapshot["orderbook_snapshot_age_ms"] = 0.0
+        return snapshot
+
+    def _fetch_snapshot(self, spec: PolymarketMarketSpec) -> dict[str, Any]:
+        payload = {
+            "orderbook_snapshot_source": "clob_order_book",
+            "orderbook_snapshot_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+        }
+        payload.update(_top_of_book_metadata("up", self.client.get_order_book(spec.yes_token_id)))
+        payload.update(_top_of_book_metadata("down", self.client.get_order_book(spec.no_token_id)))
+        return payload
 
 
 def _discover_time_bucket_markets(slug_prefix: str, limit: int) -> list[PolymarketMarketSpec]:
@@ -459,10 +596,14 @@ def ws_message_to_trade_event(message: dict[str, Any], spec: PolymarketMarketSpe
 def iter_polymarket_trade_events(
     market_specs: Iterable[PolymarketMarketSpec],
     *,
+    metadata_enricher: Callable[[TradeEvent, PolymarketMarketSpec], dict[str, Any]] | None = None,
     ping_interval_seconds: float = 10.0,
     receive_timeout_seconds: float = 1.0,
     cycle_grace_seconds: float = 20.0,
     reconnect_delay_seconds: float = 1.0,
+    reconnect_max_delay_seconds: float = 8.0,
+    data_silence_timeout_seconds: float = 45.0,
+    post_window_start_delay_seconds: float = DEFAULT_POST_WINDOW_START_DELAY_SECONDS,
     log_fn: Callable[[str], None] | None = None,
 ) -> Iterable[TradeEvent]:
     websocket = _import_websocket_module()
@@ -472,6 +613,18 @@ def iter_polymarket_trade_events(
     for spec in market_specs:
         if log_fn is not None:
             log_fn(f"[polymarket] 订阅周期 {spec.slug}")
+        eff_cutoff_naive = effective_strategy_start_naive_utc(
+            spec.slug, spec.start_time, post_window_start_delay_seconds
+        )
+        if post_window_start_delay_seconds > 0 and eff_cutoff_naive is not None:
+            eff_aware = naive_utc_to_aware_utc(eff_cutoff_naive)
+            if datetime.now(timezone.utc) < eff_aware:
+                if log_fn is not None:
+                    log_fn(
+                        f"[polymarket] {spec.slug} 策略生效时刻 "
+                        f"{eff_aware.strftime('%Y-%m-%d %H:%M:%S')}Z（窗起点+{post_window_start_delay_seconds:g}s），等待中..."
+                    )
+                sleep_until_utc_instant(eff_aware)
         close_after = None
         reconnect_attempt = 0
 
@@ -489,6 +642,7 @@ def iter_polymarket_trade_events(
             ws_kw.update(_websocket_proxy_kwargs())
             connection = None
             while True:
+                connect_err: BaseException | None = None
                 try:
                     connection = websocket.create_connection(MARKET_WS_URL, **ws_kw)
                     connection.settimeout(receive_timeout_seconds)
@@ -504,9 +658,11 @@ def iter_polymarket_trade_events(
                     reconnect_attempt = 0
                     last_ping = time.monotonic()
                     break
-                except closed_exc:
+                except closed_exc as e:
+                    connect_err = e
                     reconnect_attempt += 1
-                except Exception:
+                except Exception as e:
+                    connect_err = e
                     reconnect_attempt += 1
                 finally:
                     if connection is not None and reconnect_attempt > 0:
@@ -518,18 +674,44 @@ def iter_polymarket_trade_events(
 
                 if close_after is not None and time.monotonic() >= close_after:
                     break
+                # P2-fix: 指数退避重连
+                backoff_delay = min(reconnect_max_delay_seconds, reconnect_delay_seconds * (2 ** min(reconnect_attempt - 1, 5)))
                 if log_fn is not None:
-                    log_fn(f"[polymarket] 连接 {spec.slug} 失败，{reconnect_delay_seconds:.1f}s 后重试（第 {reconnect_attempt} 次）")
-                time.sleep(max(0.1, reconnect_delay_seconds))
+                    why = f" {_ws_error_detail(connect_err)}" if connect_err is not None else ""
+                    log_fn(
+                        f"[polymarket] 连接 {spec.slug} 失败{why}，"
+                        f"{backoff_delay:.1f}s 后重试（第 {reconnect_attempt} 次）"
+                    )
+                time.sleep(max(0.1, backoff_delay))
 
             if connection is None:
                 break
 
+            # P0-fix: 数据静默看门狗 — 记录最近一次收到有效 trade 事件的时间
+            last_data_at = time.monotonic()
+
             try:
                 while True:
                     now = time.monotonic()
+
+                    # P0-fix: 数据静默超时 — 连接存活但长时间无有效事件，强制断开重连
+                    if data_silence_timeout_seconds > 0 and now - last_data_at >= data_silence_timeout_seconds:
+                        if log_fn is not None:
+                            log_fn(
+                                f"[polymarket] {spec.slug} 数据静默超过 "
+                                f"{data_silence_timeout_seconds:.0f}s（silent freeze），强制重连"
+                            )
+                        break
+
+                    # P1-fix: 使用 RFC 6455 协议层 ping 帧代替文本 "PING"
                     if now - last_ping >= ping_interval_seconds:
-                        connection.send("PING")
+                        try:
+                            if hasattr(connection, "ping"):
+                                connection.ping()
+                            else:
+                                connection.send("PING")
+                        except Exception:
+                            break
                         last_ping = now
 
                     try:
@@ -555,12 +737,22 @@ def iter_polymarket_trade_events(
 
                         event = ws_message_to_trade_event(message, spec)
                         if event is not None:
+                            if metadata_enricher is not None:
+                                event.metadata.update(metadata_enricher(event, spec) or {})
+                            last_data_at = time.monotonic()
+                            if eff_cutoff_naive is not None and event.timestamp < eff_cutoff_naive:
+                                continue
                             yield event
-            except closed_exc:
+            except closed_exc as e:
                 reconnect_attempt += 1
+                # P2-fix: 指数退避重连
+                backoff_delay = min(reconnect_max_delay_seconds, reconnect_delay_seconds * (2 ** min(reconnect_attempt - 1, 5)))
                 if log_fn is not None:
-                    log_fn(f"[polymarket] 连接中断 {spec.slug}，{reconnect_delay_seconds:.1f}s 后重连（第 {reconnect_attempt} 次）")
-                time.sleep(max(0.1, reconnect_delay_seconds))
+                    log_fn(
+                        f"[polymarket] 连接中断 {spec.slug}（{_ws_error_detail(e)}），"
+                        f"{backoff_delay:.1f}s 后重连（第 {reconnect_attempt} 次）"
+                    )
+                time.sleep(max(0.1, backoff_delay))
                 continue
             finally:
                 try:
@@ -575,9 +767,12 @@ def iter_polymarket_trade_events(
                 if close_after is not None and time.monotonic() >= close_after:
                     break
             if close_after is None:
+                reconnect_attempt += 1
+                # P2-fix: 指数退避重连
+                backoff_delay = min(reconnect_max_delay_seconds, reconnect_delay_seconds * (2 ** min(reconnect_attempt - 1, 5)))
                 if log_fn is not None:
-                    log_fn(f"[polymarket] 连接结束但窗口未完结，{reconnect_delay_seconds:.1f}s 后重连 {spec.slug}")
-                time.sleep(max(0.1, reconnect_delay_seconds))
+                    log_fn(f"[polymarket] 连接结束但窗口未完结，{backoff_delay:.1f}s 后重连 {spec.slug}")
+                time.sleep(max(0.1, backoff_delay))
                 continue
 
             if close_after is not None and time.monotonic() >= close_after:
@@ -588,11 +783,14 @@ def iter_polymarket_trade_events_robot(
     *,
     slug_prefix: str,
     max_cycles: int,
+    metadata_enricher: Callable[[TradeEvent, PolymarketMarketSpec], dict[str, Any]] | None = None,
     poll_interval_seconds: float = 3.0,
     discover_limit: int = 12,
     ping_interval_seconds: float = 10.0,
     receive_timeout_seconds: float = 1.0,
     cycle_grace_seconds: float = 20.0,
+    data_silence_timeout_seconds: float = 45.0,
+    post_window_start_delay_seconds: float = DEFAULT_POST_WINDOW_START_DELAY_SECONDS,
     log_fn: Callable[[str], None] | None = None,
 ) -> Iterable[TradeEvent]:
     """
@@ -631,9 +829,12 @@ def iter_polymarket_trade_events_robot(
                 log_fn(f"[polymarket] 机器人模式切换到窗口 {spec.slug} ({handled_cycles}/{max_cycles if max_cycles > 0 else 'inf'})")
             yield from iter_polymarket_trade_events(
                 [spec],
+                metadata_enricher=metadata_enricher,
                 ping_interval_seconds=ping_interval_seconds,
                 receive_timeout_seconds=receive_timeout_seconds,
                 cycle_grace_seconds=cycle_grace_seconds,
+                data_silence_timeout_seconds=data_silence_timeout_seconds,
+                post_window_start_delay_seconds=post_window_start_delay_seconds,
                 log_fn=log_fn,
             )
 

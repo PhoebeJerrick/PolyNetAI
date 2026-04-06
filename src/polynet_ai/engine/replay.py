@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime
+import json
+import logging
+import os
 from pathlib import Path
+from collections import deque
 
 import pandas as pd
 
@@ -24,6 +28,36 @@ from polynet_ai.strategy.router import StrategyRouter
 from polynet_ai.strategy.spec import StrategyConfig, load_strategy_config
 
 
+# region agent log
+def _debug_log(
+    *,
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict[str, object],
+    run_id: str = "pre-fix",
+) -> None:
+    if os.getenv("POLYNET_DEBUG_LOG", "0") != "1":
+        return
+    payload = {
+        "sessionId": "4c25d8",
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(datetime.now().timestamp() * 1000),
+    }
+    try:
+        with open("debug-4c25d8.log", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+# endregion
+
+
 @dataclass(slots=True)
 class ReplayResult:
     cycle_df: pd.DataFrame
@@ -43,72 +77,80 @@ class ReplayEngine:
     def __init__(
         self,
         config: StrategyConfig,
-        starting_cash: float = 100.0,
+        starting_cash: float = 200.0,
         capital_reset_mode: str = "cumulative",
-        broker: object | None = None,
         per_cycle_cash: float | None = None,
+        broker: object | None = None,
     ) -> None:
         self.config = config
+        if capital_reset_mode not in {"fixed", "cumulative"}:
+            raise ValueError("capital_reset_mode must be 'fixed' or 'cumulative'")
+        self.capital_reset_mode = capital_reset_mode
+        self.per_cycle_cash = float(per_cycle_cash) if per_cycle_cash is not None else None
+        if self.per_cycle_cash is not None and self.per_cycle_cash <= 0:
+            self.per_cycle_cash = None
+        self._equity_curve_cash = float(starting_cash)
         # 优化 #1：缓存配置参数，避免每事件都做 dict lookup
         self.cycle_seconds = int(config.get("cycle.cycle_seconds", 300))
         self.last_minute_seconds = int(config.get("cycle.last_minute_seconds", 60))
-        # 优化 #2：缓存风控参数用于快速失败检查
-        self.min_seconds_between_orders = float(config.get("execution.min_seconds_between_orders", 2.0))
-        self.max_strategy_trades_per_cycle = int(config.get("exposure.max_strategy_trades_per_cycle", 40))
         self.state_engine = StateEngine()
         self.router = StrategyRouter(config)
-        self.capital_reset_mode = str(capital_reset_mode).strip().lower() or "cumulative"
-        if self.capital_reset_mode not in {"fixed", "cumulative"}:
-            raise ValueError("capital_reset_mode must be 'fixed' or 'cumulative'")
-        # fixed 模式下，_equity_baseline 是资金曲线的起始锚点（总权益基准）；
-        # _per_cycle_cash 是每周期分配给策略的实际投注资金（账户重置目标值）。
-        # cumulative 模式下两者设为相同值，account.cash 自然累积。
-        self._equity_baseline = float(starting_cash)
-        self._per_cycle_cash = float(per_cycle_cash) if per_cycle_cash is not None else float(starting_cash)
-        self.account = Account(starting_cash=self._per_cycle_cash)
-        self._closed_cycle_net_profit = 0.0
+        self.account = Account(starting_cash=starting_cash)
         self.broker = broker or PaperBroker(
             fee_rate=float(config.get("execution.fee_rate", 0.002)),
             slippage_bps=float(config.get("execution.slippage_bps", 10)),
         )
         self._last_strategy_fill_at: datetime | None = None
+        self._last_strategy_fill_at_up: datetime | None = None
+        self._last_strategy_fill_at_down: datetime | None = None
         self._last_strategy_fill_price_up: float | None = None
         self._last_strategy_fill_price_down: float | None = None
-        # 优化 #3：特征快照缓存
-        self._feature_cache: object | None = None
-        self._feature_cache_timestamp: datetime | None = None
-        self._feature_cache_ttl_seconds = 0.5  # 缓存0.5秒
+        self._recent_buy_fill_times_up: deque[datetime] = deque()
+        self._recent_buy_fill_times_down: deque[datetime] = deque()
+        # P0-fix: 提交即计时 — 记录最近一次订单提交时间（含尚未确认的）
+        self._last_order_submitted_at_up: datetime | None = None
+        self._last_order_submitted_at_down: datetime | None = None
+        # 卖出提交时间（用于卖出限频）
+        self._last_strategy_sell_submitted_at_up: datetime | None = None
+        self._last_strategy_sell_submitted_at_down: datetime | None = None
 
     def reset(self) -> None:
         self.state_engine = StateEngine()
-        self.account = Account(starting_cash=self._per_cycle_cash)
-        self._closed_cycle_net_profit = 0.0
+        self.account = Account(starting_cash=self.account.starting_cash)
+        self._equity_curve_cash = float(self.account.starting_cash)
         self._last_strategy_fill_at = None
+        self._last_strategy_fill_at_up = None
+        self._last_strategy_fill_at_down = None
         self._last_strategy_fill_price_up = None
         self._last_strategy_fill_price_down = None
-        # 优化 #3：重置缓存
-        self._feature_cache = None
-        self._feature_cache_timestamp = None
+        self._recent_buy_fill_times_up.clear()
+        self._recent_buy_fill_times_down.clear()
+        self._last_order_submitted_at_up = None
+        self._last_order_submitted_at_down = None
+        self._last_strategy_sell_submitted_at_up = None
+        self._last_strategy_sell_submitted_at_down = None
 
     @classmethod
     def from_yaml(
         cls,
         path: str | Path,
-        starting_cash: float = 100.0,
+        starting_cash: float = 200.0,
         capital_reset_mode: str = "cumulative",
         per_cycle_cash: float | None = None,
+        broker: object | None = None,
     ) -> "ReplayEngine":
         return cls(
             load_strategy_config(path),
             starting_cash=starting_cash,
             capital_reset_mode=capital_reset_mode,
             per_cycle_cash=per_cycle_cash,
+            broker=broker,
         )
 
-    def display_cash(self, current_cycle_net_profit: float = 0.0) -> float:
+    def display_cash(self, cycle_net_profit: float) -> float:
         if self.capital_reset_mode == "fixed":
-            return self._equity_baseline + self._closed_cycle_net_profit + float(current_cycle_net_profit)
-        return self.account.cash
+            return float(self._equity_curve_cash + float(cycle_net_profit))
+        return float(self.account.cash)
 
     def run(self, events: list[TradeEvent]) -> ReplayResult:
         cycle_rows: list[dict[str, object]] = []
@@ -137,98 +179,40 @@ class ReplayEngine:
             incoming_cycle_key = (event.market_id, event.cycle_id)
             if incoming_cycle_key != current_cycle_key:
                 finalized_cycle_row = self._finalize_cycle()
-                # 优化 #3：新周期开始时清除缓存
-                self._feature_cache = None
-                self._feature_cache_timestamp = None
 
         self.state_engine.apply_market_trade(event)
-
-        # 优化 #2：快速失败检查 - 在昂贵的特征计算和规则评估之前
-        # 检查下单间隔限制
-        if self.min_seconds_between_orders > 0 and self._last_strategy_fill_at is not None:
-            delta = (event.timestamp - self._last_strategy_fill_at).total_seconds()
-            if delta < self.min_seconds_between_orders:
-                # 间隔不足，跳过特征计算和规则评估
-                row: dict[str, object] = {
-                    "market_id": event.market_id,
-                    "cycle_id": event.cycle_id,
-                    "timestamp": event.timestamp,
-                    "market_price": event.price,
-                    "market_outcome": event.outcome,
-                    "selected_rule": "",
-                    "selected_action": "",
-                    "selected_outcome": "",
-                    "selected_shares": 0.0,
-                    "risk_status": "blocked_fast",
-                    "risk_reason": f"快速检查：下单间隔不足{self.min_seconds_between_orders:g}秒",
-                    "executed": False,
-                    "submitted": False,
-                    "confirmed": False,
-                    "broker_status": "",
-                    "broker_order_id": "",
-                    "fill_price": 0.0,
-                    "fill_fee": 0.0,
-                    "cycle_net_profit": 0.0,
-                    "account_cash": self.account.cash,
-                    "available_cash": self.account.available_cash,
-                }
-                snapshot = self.state_engine.snapshot()
-                return ReplayStepResult(
-                    decision_row=row,
-                    finalized_cycle_row=finalized_cycle_row,
-                    snapshot=snapshot,
-                )
-
-        # 检查周期成交次数限制
-        if self.state_engine.state.strategy_trades >= self.max_strategy_trades_per_cycle:
-            row: dict[str, object] = {
-                "market_id": event.market_id,
-                "cycle_id": event.cycle_id,
-                "timestamp": event.timestamp,
-                "market_price": event.price,
-                "market_outcome": event.outcome,
-                "selected_rule": "",
-                "selected_action": "",
-                "selected_outcome": "",
-                "selected_shares": 0.0,
-                "risk_status": "blocked_fast",
-                "risk_reason": "快速检查：本周期策略成交次数已达上限",
-                "executed": False,
-                "submitted": False,
-                "confirmed": False,
-                "broker_status": "",
-                "broker_order_id": "",
-                "fill_price": 0.0,
-                "fill_fee": 0.0,
-                "cycle_net_profit": 0.0,
-                "account_cash": self.account.cash,
-                "available_cash": self.account.available_cash,
-            }
-            snapshot = self.state_engine.snapshot()
-            return ReplayStepResult(
-                decision_row=row,
-                finalized_cycle_row=finalized_cycle_row,
-                snapshot=snapshot,
-            )
-
-        # 优化 #3：特征快照缓存 - 检查是否可以使用缓存
-        now = event.timestamp
-        if (self._feature_cache is not None and
-            self._feature_cache_timestamp is not None and
-            (now - self._feature_cache_timestamp).total_seconds() < self._feature_cache_ttl_seconds):
-            # 使用缓存的特征
-            features = self._feature_cache
-        else:
-            # 重新计算并缓存
-            features = build_feature_snapshot(
-                self.state_engine,
-                cycle_seconds=self.cycle_seconds,
-                last_minute_seconds=self.last_minute_seconds,
-            )
-            self._feature_cache = features
-            self._feature_cache_timestamp = now
-
+        features = build_feature_snapshot(
+            self.state_engine,
+            cycle_seconds=self.cycle_seconds,
+            last_minute_seconds=self.last_minute_seconds,
+            phase_3_end_seconds=float(self.config.get("cycle.phase_end_seconds_3", 240.0)),
+        )
         decision = self.router.route(features, strategy_trades=self.state_engine.state.strategy_trades)
+        candidates_for_exec = list(decision.candidates)
+        if decision.selected is not None and not candidates_for_exec:
+            candidates_for_exec = [decision.selected]
+        # region agent log
+        if (
+            features.cycle_elapsed_seconds <= 70.0
+            and decision.selected is None
+            and features.market_trades in {1, 50, 100, 200, 400, 800}
+        ):
+            _debug_log(
+                hypothesis_id="H1",
+                location="replay.py:process_event:no_signal_phase1",
+                message="Phase1 no signal checkpoint",
+                data={
+                    "cycle_id": event.cycle_id,
+                    "elapsed": round(float(features.cycle_elapsed_seconds), 6),
+                    "market_trades": int(features.market_trades),
+                    "strategy_trades": int(features.strategy_trades),
+                    "phase_candidate_count": len(decision.candidates),
+                    "up_price": float(features.up_last_price),
+                    "down_price": float(features.down_last_price),
+                    "trend_strength": float(features.trend_strength),
+                },
+            )
+        # endregion
         row: dict[str, object] = {
             "market_id": event.market_id,
             "cycle_id": event.cycle_id,
@@ -248,27 +232,79 @@ class ReplayEngine:
             "broker_order_id": "",
             "fill_price": 0.0,
             "fill_fee": 0.0,
+            "fill_source": "",
+            "fill_note": "",
             "cycle_net_profit": features.cycle_net_profit,
-            "account_cash": self.display_cash(features.cycle_net_profit),
+            "account_cash": self.account.cash,
             "available_cash": self.account.available_cash,
         }
-        if decision.selected is not None:
+        if candidates_for_exec:
+            # region agent log
+            if features.cycle_elapsed_seconds <= 70.0:
+                _debug_log(
+                    hypothesis_id="H2",
+                    location="replay.py:process_event:selected_phase1",
+                    message="Phase1 selected candidate before risk",
+                    data={
+                        "cycle_id": event.cycle_id,
+                        "elapsed": round(float(features.cycle_elapsed_seconds), 6),
+                        "selected_rule": decision.selected.category if decision.selected is not None else "",
+                        "action": decision.selected.action if decision.selected is not None else "",
+                        "outcome": decision.selected.outcome if decision.selected is not None else "",
+                        "shares": float(decision.selected.shares) if decision.selected is not None else 0.0,
+                        "strategy_trades": int(features.strategy_trades),
+                        "candidate_count": len(candidates_for_exec),
+                    },
+                )
+            # endregion
             pending_context = self._pending_context()
-            decision.selected.metadata["account_cash"] = self.account.cash
-            decision.selected.metadata["account_available_cash"] = self.account.available_cash
-            decision.selected.metadata["market_price"] = event.price
-            decision.selected.metadata.update(event.metadata)
-            decision.selected.metadata.update(pending_context)
-            decision.selected.metadata["last_strategy_fill_at"] = self._last_strategy_fill_at
-            decision.selected.metadata["last_strategy_fill_price_up"] = self._last_strategy_fill_price_up
-            decision.selected.metadata["last_strategy_fill_price_down"] = self._last_strategy_fill_price_down
-            row["selected_rule"] = decision.selected.category
-            row["selected_action"] = decision.selected.action
-            row["selected_outcome"] = decision.selected.outcome
-            row["selected_shares"] = decision.selected.shares
-            risk_decision = apply_risk_limits(features, decision.selected, self.config)
+            self._prune_recent_buy_fill_times(event.timestamp)
+            blocked_reasons: list[str] = []
+            selected_for_risk = candidates_for_exec[0]
+            self._populate_intent_metadata(intent=selected_for_risk, event=event, pending_context=pending_context)
+            risk_decision = apply_risk_limits(features, selected_for_risk, self.config)
+            if not risk_decision.accepted and len(candidates_for_exec) > 1:
+                blocked_reasons.append(
+                    f"{selected_for_risk.category}:{selected_for_risk.action}:{selected_for_risk.outcome}:{risk_decision.reason}"
+                )
+                for fallback in candidates_for_exec[1:]:
+                    self._populate_intent_metadata(intent=fallback, event=event, pending_context=pending_context)
+                    fallback_risk = apply_risk_limits(features, fallback, self.config)
+                    if fallback_risk.accepted:
+                        selected_for_risk = fallback
+                        risk_decision = fallback_risk
+                        break
+                    blocked_reasons.append(
+                        f"{fallback.category}:{fallback.action}:{fallback.outcome}:{fallback_risk.reason}"
+                    )
+
+            row["selected_rule"] = selected_for_risk.category
+            row["selected_action"] = selected_for_risk.action
+            row["selected_outcome"] = selected_for_risk.outcome
+            row["selected_shares"] = selected_for_risk.shares
             row["risk_status"] = "accepted" if risk_decision.accepted else "blocked"
             row["risk_reason"] = risk_decision.reason
+            if blocked_reasons:
+                row["risk_reason"] = f"{row['risk_reason']} | fallback尝试: {' || '.join(blocked_reasons)}"
+            # region agent log
+            if not risk_decision.accepted:
+                _debug_log(
+                    hypothesis_id="H3",
+                    location="replay.py:process_event:risk_blocked",
+                    message="Signal blocked by risk limits",
+                    data={
+                        "cycle_id": event.cycle_id,
+                        "elapsed": round(float(features.cycle_elapsed_seconds), 6),
+                        "selected_rule": selected_for_risk.category,
+                        "action": selected_for_risk.action,
+                        "outcome": selected_for_risk.outcome,
+                        "reason": risk_decision.reason,
+                        "ref_price": float(selected_for_risk.reference_price),
+                        "last_fill_up": self._last_strategy_fill_price_up,
+                        "last_fill_down": self._last_strategy_fill_price_down,
+                    },
+                )
+            # endregion
             if risk_decision.accepted and risk_decision.intent is not None:
                 row["selected_shares"] = risk_decision.intent.shares
                 try:
@@ -281,19 +317,47 @@ class ReplayEngine:
                     row["broker_order_id"] = execution.order_id
                     if execution.status == "submitted":
                         row["submitted"] = True
+                        # P0-fix: 提交即计时 — 更新方向节流时间戳
+                        self._record_order_submission(risk_decision.intent, event.timestamp)
                         self._sync_account_reservations()
                         row["risk_status"] = "submitted"
                         row["available_cash"] = self.account.available_cash
                     elif execution.fill is not None:
+                        # P0-fix: 即时成交也更新提交时间戳（PaperBroker 路径）
+                        self._record_order_submission(risk_decision.intent, event.timestamp)
                         self._apply_fill(execution.fill)
                         self._sync_account_reservations()
+                        # region agent log
+                        _debug_log(
+                            hypothesis_id="H2",
+                            location="replay.py:process_event:fill_executed",
+                            message="Signal executed",
+                            data={
+                                "cycle_id": event.cycle_id,
+                                "elapsed": round(float(features.cycle_elapsed_seconds), 6),
+                                "rule": risk_decision.intent.category,
+                                "action": risk_decision.intent.action,
+                                "outcome": risk_decision.intent.outcome,
+                                "shares": float(risk_decision.intent.shares),
+                                "fill_price": float(execution.fill.price),
+                            },
+                        )
+                        # endregion
                         row["executed"] = True
                         row["confirmed"] = True
                         row["fill_price"] = execution.fill.price
                         row["fill_fee"] = execution.fill.fee
-                        row["account_cash"] = self.display_cash(features.cycle_net_profit)
+                        row["fill_source"] = execution.fill.fill_source or ""
+                        row["fill_note"] = execution.fill.fill_note or ""
+                        if execution.fill.broker_order_id:
+                            row["broker_order_id"] = execution.fill.broker_order_id
+                        row["account_cash"] = self.account.cash
                         row["available_cash"] = self.account.available_cash
                     elif execution.status != "filled":
+                        # SELL 因链上余额不足被拒 → 用链上实际余额矫正引擎持仓
+                        correction = (execution.metadata or {}).get("chain_balance_correction")
+                        if correction and risk_decision.intent.action == "sell":
+                            self._correct_held_from_chain(correction)
                         self._sync_account_reservations()
                         row["risk_status"] = execution.status
                         row["risk_reason"] = execution.reason
@@ -340,9 +404,39 @@ class ReplayEngine:
         self.state_engine.apply_strategy_fill(fill)
         self._last_strategy_fill_at = fill.timestamp
         if fill.outcome == "up":
+            self._last_strategy_fill_at_up = fill.timestamp
             self._last_strategy_fill_price_up = fill.price
         else:
+            self._last_strategy_fill_at_down = fill.timestamp
             self._last_strategy_fill_price_down = fill.price
+        if fill.action == "buy":
+            self._record_buy_fill(fill.outcome, fill.timestamp)
+
+    def _record_buy_fill(self, outcome: str, timestamp: datetime) -> None:
+        queue = self._recent_buy_fill_times_up if outcome == "up" else self._recent_buy_fill_times_down
+        queue.append(timestamp)
+        self._prune_queue(queue, timestamp, window_seconds=1.0)
+
+    def _record_order_submission(self, intent, timestamp: datetime) -> None:
+        """P0-fix: 提交即计时 — 无论订单是否已确认成交，立即更新方向节流时间戳。"""
+        if intent.outcome == "up":
+            self._last_order_submitted_at_up = timestamp
+        else:
+            self._last_order_submitted_at_down = timestamp
+        if intent.action == "sell":
+            if intent.outcome == "up":
+                self._last_strategy_sell_submitted_at_up = timestamp
+            else:
+                self._last_strategy_sell_submitted_at_down = timestamp
+
+    def _prune_recent_buy_fill_times(self, now: datetime) -> None:
+        self._prune_queue(self._recent_buy_fill_times_up, now, window_seconds=1.0)
+        self._prune_queue(self._recent_buy_fill_times_down, now, window_seconds=1.0)
+
+    @staticmethod
+    def _prune_queue(queue: deque[datetime], now: datetime, *, window_seconds: float) -> None:
+        while queue and (now - queue[0]).total_seconds() > window_seconds:
+            queue.popleft()
 
     def _pending_context(self) -> dict[str, object]:
         if not hasattr(self.broker, "pending_context"):
@@ -353,9 +447,57 @@ class ReplayEngine:
         context["pending_down_sell_shares"] = float(context.get("pending_down_sell_shares", 0.0))
         return context
 
+    def _populate_intent_metadata(self, *, intent, event: TradeEvent, pending_context: dict[str, object]) -> None:
+        metadata = intent.metadata
+        metadata["account_cash"] = self.account.cash
+        metadata["account_available_cash"] = self.account.available_cash
+        metadata["market_price"] = event.price
+        metadata.update(event.metadata)
+        metadata.update(pending_context)
+        metadata["last_strategy_fill_at"] = self._last_strategy_fill_at
+        metadata["last_strategy_fill_at_up"] = self._last_strategy_fill_at_up
+        metadata["last_strategy_fill_at_down"] = self._last_strategy_fill_at_down
+        metadata["last_strategy_fill_price_up"] = self._last_strategy_fill_price_up
+        metadata["last_strategy_fill_price_down"] = self._last_strategy_fill_price_down
+        metadata["recent_buy_fill_count_1s_up"] = len(self._recent_buy_fill_times_up)
+        metadata["recent_buy_fill_count_1s_down"] = len(self._recent_buy_fill_times_down)
+        # P0-fix: 提交即计时
+        metadata["last_order_submitted_at_up"] = self._last_order_submitted_at_up
+        metadata["last_order_submitted_at_down"] = self._last_order_submitted_at_down
+        # 卖出限频
+        metadata["last_strategy_sell_submitted_at_up"] = self._last_strategy_sell_submitted_at_up
+        metadata["last_strategy_sell_submitted_at_down"] = self._last_strategy_sell_submitted_at_down
+
     def _sync_account_reservations(self) -> None:
         pending_context = self._pending_context()
         self.account.reserved_cash = float(pending_context.get("pending_buy_reserved_cash", 0.0))
+
+    def _correct_held_from_chain(self, correction: dict) -> None:
+        """SELL 被拒时，用链上实际余额矫正引擎 PositionBook.held。"""
+        state = self.state_engine.state
+        if state is None:
+            return
+        outcome = correction.get("outcome")
+        chain_bal = correction.get("chain_balance")
+        if outcome is None or chain_bal is None:
+            return
+        pos = state.up_position if outcome == "up" else state.down_position
+        old_held = pos.held
+        if chain_bal >= old_held:
+            return  # 链上余额不低于引擎记录，无需矫正
+        pos.held = chain_bal
+        if pos.held <= 1e-10:
+            pos.held = 0.0
+            pos.cost = 0.0
+            pos.avg_price = 0.0
+        else:
+            pos.cost = pos.held * pos.avg_price
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            "[持仓矫正] %s held: %.6f → %.6f（链上余额 %.6f，引擎偏高 %.4f%%）",
+            outcome, old_held, pos.held, chain_bal,
+            (old_held - chain_bal) / old_held * 100 if old_held > 0 else 0,
+        )
 
     def _build_result(
         self,
@@ -390,12 +532,22 @@ class ReplayEngine:
         elif summary.winner == "down":
             settlement_cash = state.down_position.held
         self.account.cash += settlement_cash
+
         if self.capital_reset_mode == "fixed":
-            self._closed_cycle_net_profit += float(summary.cycle_net_profit)
-        cycle_account_cash = self.display_cash()
+            self._equity_curve_cash += float(summary.cycle_net_profit)
+            account_cash_display = float(self._equity_curve_cash)
+            next_cycle_cash = self.per_cycle_cash if self.per_cycle_cash is not None else self.account.starting_cash
+            self.account.cash = float(next_cycle_cash)
+            pending_ctx = self._pending_context()
+            self.account.reserved_cash = float(pending_ctx.get("pending_buy_reserved_cash", 0.0))
+        else:
+            account_cash_display = float(self.account.cash)
+            self._equity_curve_cash = account_cash_display
+
         row = {
             "market_id": state.market_id,
             "cycle_id": state.cycle_id,
+            "condition_id": state.condition_id or "",
             "opening_price": state.opening_price,
             "last_price": state.last_price,
             "high_price": state.high_price,
@@ -416,15 +568,26 @@ class ReplayEngine:
             "market_trades": state.market_trades,
             "strategy_trades": state.strategy_trades,
             "max_abs_net_exposure": state.max_abs_net_exposure,
-            "account_cash": cycle_account_cash,
+            "account_cash": account_cash_display,
         }
+        # region agent log
+        elapsed_total = 0.0
+        if state.cycle_start is not None and state.last_event_timestamp is not None:
+            elapsed_total = max(0.0, (state.last_event_timestamp - state.cycle_start).total_seconds())
+        _debug_log(
+            hypothesis_id="H4",
+            location="replay.py:_finalize_cycle",
+            message="Cycle finalized timing/profile",
+            data={
+                "cycle_id": state.cycle_id,
+                "elapsed_total_seconds": round(float(elapsed_total), 6),
+                "market_trades": int(state.market_trades),
+                "strategy_trades": int(state.strategy_trades),
+                "cycle_net_profit": float(summary.cycle_net_profit),
+            },
+        )
+        # endregion
         self.state_engine.state = None
         self.state_engine.market_tape.clear()
         self.state_engine.strategy_fills.clear()
-        if self.capital_reset_mode == "fixed":
-            self.account.cash = self._per_cycle_cash
-            self.account.reserved_cash = 0.0
-            self._last_strategy_fill_at = None
-            self._last_strategy_fill_price_up = None
-            self._last_strategy_fill_price_down = None
         return row

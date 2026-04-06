@@ -3,7 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 
 from polynet_ai.domain.models import FeatureSnapshot
-from polynet_ai.strategy.cycle_windows import cycle_seconds_remaining, rule_disabled_in_cycle_tail
+from polynet_ai.strategy.cycle_windows import (
+    cycle_seconds_remaining,
+    determine_phase,
+    rule_disabled_in_cycle_tail,
+)
 from polynet_ai.strategy.entry_rules import grid_entries, mean_reversion_entries
 from polynet_ai.strategy.exit_rules import grid_exits, mean_reversion_exits, take_profit_exits
 from polynet_ai.strategy.spec import StrategyConfig
@@ -57,7 +61,7 @@ def _cfg() -> StrategyConfig:
         raw={
             "cycle": {"cycle_seconds": 300},
             "order_sizing": {"base_order_size": 5.0, "volatility_order_scale": 0.0},
-            "exposure": {"max_grid_net_position": 20.0},
+            "exposure": {},
             "opening_entry": {"infer_missing_with_binary_complement": True},
             "grid": {
                 "grid_low_percentile": 0.25,
@@ -151,6 +155,7 @@ def test_take_profit_down_sell_triggers_on_positive_deviation() -> None:
             "up_held": 0.0,
             "down_held": 10.0,
             "down_deviation": 0.25,
+            "down_last_price": 0.6,
             "unrealized_down_pnl": 1.0,
         }
     )
@@ -172,3 +177,36 @@ def test_take_profit_down_sell_not_triggered_on_negative_deviation() -> None:
     )
     intents = take_profit_exits(f, cfg)
     assert not any(intent.outcome == "down" and intent.action == "sell" for intent in intents)
+
+
+def test_determine_phase_defaults_match_legacy_boundaries() -> None:
+    cfg = StrategyConfig(raw={})
+    assert determine_phase(0.0, cfg) == 1
+    assert determine_phase(70.0, cfg) == 1
+    assert determine_phase(70.01, cfg) == 2
+    assert determine_phase(160.0, cfg) == 2
+    assert determine_phase(240.0, cfg) == 3
+    assert determine_phase(241.0, cfg) == 4
+
+
+def test_determine_phase_respects_yaml_style_overrides() -> None:
+    cfg = StrategyConfig(
+        raw={
+            "cycle": {
+                "phase_end_seconds_1": 10,
+                "phase_end_seconds_2": 20,
+                "phase_end_seconds_3": 30,
+            }
+        }
+    )
+    assert determine_phase(10.0, cfg) == 1
+    assert determine_phase(11.0, cfg) == 2
+    assert determine_phase(30.0, cfg) == 3
+    assert determine_phase(31.0, cfg) == 4
+
+
+def test_determine_phase_invalid_triplet_falls_back_to_defaults() -> None:
+    cfg = StrategyConfig(
+        raw={"cycle": {"phase_end_seconds_1": 200, "phase_end_seconds_2": 50, "phase_end_seconds_3": 240}}
+    )
+    assert determine_phase(100.0, cfg) == 2

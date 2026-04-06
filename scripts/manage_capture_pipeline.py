@@ -9,11 +9,17 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from polynet_ai.adapters.polymarket_live import resolve_default_api_config_env  # noqa: E402
 
 
 def _is_process_running(pid: int) -> bool:
@@ -206,6 +212,35 @@ def _load_manifest_rows(output_dir: Path) -> list[dict[str, object]]:
     return []
 
 
+def _disk_btc_recording_stats(output_dir: Path) -> dict[str, object]:
+    """扫描 output_dir 下各 btc-updown-5m-* 目录中的 ws_trade_events.ndjson（与抓取产物布局一致）。"""
+    ndjson_paths = sorted(
+        p
+        for p in output_dir.rglob("ws_trade_events.ndjson")
+        if p.is_file() and "btc-updown-5m-" in p.parent.name
+    )
+    if not ndjson_paths:
+        return {"cycle_ndjson_count": 0, "event_lines": 0, "newest_cycle_id": "", "newest_mtime": ""}
+
+    total_lines = 0
+    for path in ndjson_paths:
+        try:
+            with path.open("rb") as handle:
+                total_lines += sum(1 for _ in handle)
+        except OSError:
+            pass
+
+    by_mtime = sorted(ndjson_paths, key=lambda p: p.stat().st_mtime)
+    newest = by_mtime[-1]
+    mtime_s = datetime.fromtimestamp(newest.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+    return {
+        "cycle_ndjson_count": len(ndjson_paths),
+        "event_lines": total_lines,
+        "newest_cycle_id": newest.parent.name,
+        "newest_mtime": mtime_s,
+    }
+
+
 def _latest_matching_file(directory: Path, pattern: str) -> Path | None:
     matches = [path for path in directory.glob(pattern) if path.is_file()]
     if not matches:
@@ -245,21 +280,42 @@ def _print_status(args: argparse.Namespace) -> int:
     elif isinstance(capture_meta, dict):
         target_cycles = capture_meta.get("max_cycles")
 
+    manifest_path = output_dir / "capture_manifest.json"
     print("")
-    print("## 抓取进度")
+    print("## 抓取进度（capture_manifest.json）")
+    print(
+        "- 说明: 此段是**上次 WebSocket 后台抓取**（如 ./record.sh s）写入的快照；"
+        "未再次抓取时数字不会变。Dashboard「模拟下单」只读磁盘 ndjson，**不会**更新该文件。"
+    )
+    if manifest_path.exists():
+        m_written = datetime.fromtimestamp(manifest_path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"- capture_manifest.json 最后写入: {m_written}")
+    else:
+        print("- capture_manifest.json: 不存在（尚未跑过抓取或已删除）")
     print(f"- 已完成周期数: {completed_cycles}" + (f" / {target_cycles}" if target_cycles is not None else ""))
     print(f"- 已记录事件数: {total_events}")
     if last_cycle is not None:
         print(
-            f"- 最近完成周期: {last_cycle.get('cycle_id')} | "
+            f"- manifest 中最近一条周期: {last_cycle.get('cycle_id')} | "
             f"events={last_cycle.get('event_count')} | "
             f"{last_cycle.get('first_timestamp')} -> {last_cycle.get('last_timestamp')}"
+        )
+
+    disk = _disk_btc_recording_stats(output_dir)
+    print("")
+    print("## 本地录制数据（扫描磁盘，随你拷贝/抓取结果变化）")
+    print(f"- 含 ws_trade_events.ndjson 的 btc-updown-5m-* 目录数: {disk['cycle_ndjson_count']}")
+    print(f"- 上述 ndjson 事件总行数: {disk['event_lines']}")
+    if disk.get("newest_cycle_id"):
+        print(
+            f"- 按文件修改时间最新周期目录: {disk['newest_cycle_id']} "
+            f"(mtime={disk['newest_mtime']})"
         )
 
     batch_dir = output_dir / "batch_replay_outputs"
     summary_csv = batch_dir / "batch_replay_summary.csv"
     report_md = batch_dir / "batch_replay_performance_report_zh.md"
-    report_xlsx = _latest_matching_file(batch_dir, "batch_replay_performance_report_zh*.xlsx")
+    report_xlsx = _latest_matching_file(batch_dir, "*batch_replay_performance_report*.xlsx")
     trade_md = batch_dir / "batch_replay_trade_process_zh.md"
     trade_xlsx = _latest_matching_file(batch_dir, "batch_replay_trade_process_zh*.xlsx")
     report_ready = bool(report_xlsx is not None) or report_md.exists()
@@ -395,7 +451,7 @@ def build_parser() -> argparse.ArgumentParser:
         target.add_argument("--start-buffer-seconds", type=float, default=2.0)
         target.add_argument("--market-slugs", nargs="*", default=None)
         target.add_argument("--market-slugs-file", default=None)
-        target.add_argument("--env-file", default=str(ROOT.parent / "APIs" / "ApiConfig.env"))
+        target.add_argument("--env-file", default=resolve_default_api_config_env(ROOT))
         target.add_argument("--account-index", type=int, default=2)
 
     start_parser = subparsers.add_parser("start", help="后台开始抓数据")
@@ -415,7 +471,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_capture_args(run_full_parser)
     run_full_parser.add_argument("--config", default="configs/strategy.yaml")
     run_full_parser.add_argument("--overrides", default=None)
-    run_full_parser.add_argument("--starting-cash", type=float, default=100.0)
+    run_full_parser.add_argument("--starting-cash", type=float, default=200.0)
     run_full_parser.add_argument("--batch-output-dir", default=None)
     run_full_parser.add_argument("--daemonize", action="store_true", help="将整条流水线放到后台运行")
     run_full_parser.add_argument("--log-file", default=None, help="后台流水线日志文件，默认 <output-dir>/pipeline.log")
@@ -448,4 +504,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("\n已中断（KeyboardInterrupt）。", file=sys.stderr)
+        raise SystemExit(130)

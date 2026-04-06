@@ -21,7 +21,7 @@ REQUIRED_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
     "Down加权均价": ("Down加权均价", "Down的加权均价"),
     "当前总持仓份数": ("当前总持仓份数", "当前总持有份数"),
     "净持仓份数": ("净持仓份数",),
-    "净持仓价值": ("净持仓价值",),
+    "净持仓成本差额": ("净持仓成本差额", "净持仓价值"),
     "时间周期": ("时间周期", "市场周期", "周期", "结算周期", "轮次", "场次", "market_cycle", "cycle", "event_start_time", "开始时间"),
 }
 
@@ -153,9 +153,9 @@ def _build_cycle_payload(cycle_df: pd.DataFrame, cols: dict[str, str]) -> dict[s
         ("Up方向投注总价值", "__up_total_value__"),
         ("Down方向投注总价值", "__down_total_value__"),
         ("当前持仓投注总价值", "__holding_total_value__"),
-        ("净持仓价值", cols["净持仓价值"]),
+        ("净持仓成本差额", cols["净持仓成本差额"]),
     ]
-    metric_cols = [qty_col, up_qty_col, down_qty_col, cols["当前总持仓份数"], cols["净持仓份数"], cols["净持仓价值"], up_avg_col, down_avg_col]
+    metric_cols = [qty_col, up_qty_col, down_qty_col, cols["当前总持仓份数"], cols["净持仓份数"], cols["净持仓成本差额"], up_avg_col, down_avg_col]
 
     work = remove_subtotal_rows(cycle_df)
     work = to_numeric_columns(work, metric_cols)
@@ -167,7 +167,7 @@ def _build_cycle_payload(cycle_df: pd.DataFrame, cols: dict[str, str]) -> dict[s
     down_points = work[work["_direction"] == "down"]
     up_x_values = choose_cycle_seconds_x(up_points) if not up_points.empty else []
     down_x_values = choose_cycle_seconds_x(down_points) if not down_points.empty else []
-    metric_hover = [cols["Up积累份数"], cols["Down积累份数"], cols["当前总持仓份数"], cols["净持仓份数"], cols["净持仓价值"]]
+    metric_hover = [cols["Up积累份数"], cols["Down积累份数"], cols["当前总持仓份数"], cols["净持仓份数"], cols["净持仓成本差额"]]
     up_custom = up_points[metric_hover].where(pd.notna(up_points[metric_hover]), None).values.tolist()
     down_custom = down_points[metric_hover].where(pd.notna(down_points[metric_hover]), None).values.tolist()
 
@@ -199,7 +199,7 @@ def _build_cycle_payload(cycle_df: pd.DataFrame, cols: dict[str, str]) -> dict[s
         "Up方向投注总价值": "#17becf",
         "Down方向投注总价值": "#bcbd22",
         "当前持仓投注总价值": "#1a9850",
-        "净持仓价值": "#7f7f7f",
+        "净持仓成本差额": "#7f7f7f",
     }
 
     position_traces: list[dict[str, object]] = []
@@ -236,7 +236,7 @@ def _build_cycle_payload(cycle_df: pd.DataFrame, cols: dict[str, str]) -> dict[s
                 "Down积累份数: %{customdata[1]}<br>"
                 "当前总持仓份数: %{customdata[2]}<br>"
                 "净持仓份数: %{customdata[3]}<br>"
-                "净持仓价值: %{customdata[4]}<extra></extra>"
+                "净持仓成本差额: %{customdata[4]}<extra></extra>"
             ),
         }
     )
@@ -257,7 +257,7 @@ def _build_cycle_payload(cycle_df: pd.DataFrame, cols: dict[str, str]) -> dict[s
                 "Down积累份数: %{customdata[1]}<br>"
                 "当前总持仓份数: %{customdata[2]}<br>"
                 "净持仓份数: %{customdata[3]}<br>"
-                "净持仓价值: %{customdata[4]}<extra></extra>"
+                "净持仓成本差额: %{customdata[4]}<extra></extra>"
             ),
         }
     )
@@ -369,7 +369,7 @@ def build_dropdown_chart(df: pd.DataFrame, cols: dict[str, str], output_file: Pa
         "        'Up方向投注总价值': '#17becf',\n"
         "        'Down方向投注总价值': '#bcbd22',\n"
         "        '当前持仓投注总价值': '#1a9850',\n"
-        "        '净持仓价值': '#7f7f7f',\n"
+        "        '净持仓成本差额': '#7f7f7f',\n"
         "        '投注份数(Up点)': '#2ca02c',\n"
         "        '投注份数(Down点)': '#d62728'\n"
         "      };\n"

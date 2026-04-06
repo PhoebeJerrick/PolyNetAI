@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--event-file-name", default="ws_trade_events.ndjson")
     parser.add_argument("--max-cycles", type=int, default=10)
     parser.add_argument("--config", default="configs/strategy.yaml")
-    parser.add_argument("--starting-cash", type=float, default=100.0)
+    parser.add_argument("--starting-cash", type=float, default=200.0)
     parser.add_argument("--output-dir", default="artifacts/live/record_job/tuning_runs")
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--relax-seconds-values", default="1.5,2.0,2.5")

@@ -20,7 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sheet", default=None)
     parser.add_argument("--config", default="configs/strategy.yaml")
     parser.add_argument("--output", default="artifacts/replays/paper_replay_report.xlsx")
-    parser.add_argument("--starting-cash", type=float, default=100.0)
+    parser.add_argument("--starting-cash", type=float, default=200.0)
     return parser.parse_args()
 
 

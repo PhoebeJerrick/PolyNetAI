@@ -50,6 +50,10 @@ class FillEvent:
     slippage: float = 0.0
     reason: str = ""
     reserved_cash: float = 0.0
+    # 实盘对账：exchange_get_order / data_api_trades / timeout_estimate 等
+    fill_source: str = ""
+    fill_note: str = ""
+    broker_order_id: str = ""
 
     @property
     def signed_shares(self) -> float:
@@ -141,6 +145,8 @@ class CycleState:
     market_id: str
     cycle_id: str
     cycle_start: datetime | None = None
+    # Gamma conditionId（0x…），来自 WS 成交 metadata；用于结算后 redeem。
+    condition_id: str | None = None
     cycle_end: datetime | None = None
     up_balance: float = 0.0
     down_balance: float = 0.0
@@ -170,6 +176,10 @@ class CycleState:
     consecutive_action_count: int = 0
     last_event_timestamp: datetime | None = None
     max_abs_net_exposure: float = 0.0
+    reentry_anchor_up_price: float = 0.0
+    reentry_anchor_down_price: float = 0.0
+    up_reentry_armed_at: datetime | None = None
+    down_reentry_armed_at: datetime | None = None
 
     def price_range(self) -> float:
         if self.market_trades == 0:
@@ -192,13 +202,8 @@ class CycleState:
         return "Up" if up > down else "Down"
 
     def net_position_value(self) -> float:
-        direction = self.net_direction()
-        net_shares = self.net_position()
-        if direction in {"空仓", "平衡"}:
-            return 0.0
-        if direction == "Up":
-            return net_shares * self.up_position.avg_price
-        return net_shares * self.down_position.avg_price
+        return (self.up_balance * self.up_position.avg_price
+                - self.down_balance * self.down_position.avg_price)
 
 
 @dataclass(slots=True)
@@ -244,6 +249,11 @@ class FeatureSnapshot:
     down_market_low: float
     tape_low: float
     tape_high: float
+    up_signal_basis_price: float = 0.0
+    down_signal_basis_price: float = 0.0
+    reentry_armed: bool = False
+    up_reentry_armed: bool = False
+    down_reentry_armed: bool = False
 
 
 @dataclass(slots=True)

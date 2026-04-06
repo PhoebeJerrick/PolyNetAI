@@ -7,6 +7,7 @@ from openpyxl import load_workbook
 from polynet_ai.domain.models import FillEvent, TradeEvent
 from polynet_ai.engine.live import LivePaperRunner, export_live_result
 from polynet_ai.engine.replay import ReplayEngine
+from polynet_ai.reporting.excel_export import get_version_tag
 from polynet_ai.strategy.spec import StrategyConfig
 
 
@@ -15,7 +16,7 @@ def build_config() -> StrategyConfig:
         raw={
             "cycle": {"cycle_seconds": 300, "last_minute_seconds": 60},
             "order_sizing": {"base_order_size": 8.0, "min_order_size": 2.0, "max_order_size": 60.0, "volatility_order_scale": 20.0},
-            "exposure": {"max_abs_exposure_value": 200.0, "hedge_trigger_value": 50.0, "hedge_scale": 0.15, "max_grid_net_position": 20.0, "max_strategy_trades_per_cycle": 12},
+            "exposure": {"max_abs_exposure_value": 200.0, "hedge_trigger_value": 50.0, "hedge_scale": 0.15, "max_strategy_trades_per_cycle": 12},
             "trend": {"min_trend_strength": 0.35, "trend_price_edge": 0.03, "trend_scale": 0.15},
             "grid": {"grid_low_percentile": 0.25, "grid_high_percentile": 0.75},
             "mean_reversion": {"up_buy_deviation": 0.10, "down_buy_deviation": 0.10, "mean_reversion_sell_up_deviation": 0.20, "mean_reversion_sell_down_deviation": 0.20, "deviation_scale": 45.0},
@@ -31,7 +32,7 @@ def build_config() -> StrategyConfig:
 def test_live_runner_generates_snapshots_and_cycle_output() -> None:
     t0 = datetime(2026, 3, 20, 12, 0, 0)
     events = [
-        TradeEvent("BTC", "cycle-a", t0, price=0.45, shares=10, outcome="up", action="buy"),
+        TradeEvent("BTC", "cycle-a", t0, price=0.45, shares=10, outcome="up", action="buy", metadata={"up_bid1_price": 0.44, "down_ask1_price": 0.56}),
         TradeEvent("BTC", "cycle-a", t0 + timedelta(seconds=30), price=0.50, shares=8, outcome="up", action="buy"),
         TradeEvent("BTC", "cycle-a", t0 + timedelta(seconds=60), price=0.58, shares=7, outcome="up", action="buy"),
         TradeEvent("BTC", "cycle-b", t0 + timedelta(seconds=360), price=0.40, shares=6, outcome="down", action="buy"),
@@ -50,6 +51,9 @@ def test_live_runner_generates_snapshots_and_cycle_output() -> None:
     assert "account_cash" in result.snapshot_df.columns
     assert "up_last_price" in result.snapshot_df.columns
     assert "down_last_price" in result.snapshot_df.columns
+    assert "up_bid1_price" in result.snapshot_df.columns
+    assert result.snapshot_df.iloc[0]["up_bid1_price"] == 0.44
+    assert result.snapshot_df.iloc[0]["down_ask1_price"] == 0.56
     assert all(delay <= 0.01 for delay in sleeps)
 
 
@@ -162,7 +166,7 @@ def test_export_live_result_writes_trade_ledger_excel(tmp_path) -> None:
         ),
         output_dir=tmp_path,
     )
-    workbook = load_workbook(result / "trade_ledger.xlsx", read_only=True)
+    workbook = load_workbook(result / f"trade_ledger_{get_version_tag()}.xlsx", read_only=True)
     assert workbook.sheetnames == ["BTC"]
     rows = list(workbook["BTC"].iter_rows(values_only=True))
     assert rows[0][0] == "下注时间距开盘差(分，秒)"

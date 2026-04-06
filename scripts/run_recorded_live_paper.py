@@ -15,6 +15,10 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from polynet_ai.adapters.cycle_window_timing import filter_trade_events_after_post_window_delay
+from polynet_ai.adapters.polymarket_live import load_api_env, select_account_env
+from polynet_ai.execution.paper_broker import paper_broker_for_config
+from polynet_ai.strategy.spec import load_strategy_config, resolve_post_window_start_delay_seconds
 from polynet_ai.adapters.trade_event_store import load_recorded_trade_events
 from polynet_ai.engine.live import LivePaperRunner, LiveRunnerResult, export_live_result
 from polynet_ai.engine.replay import ReplayEngine
@@ -23,6 +27,7 @@ try:
     from scripts.build_batch_replay_performance_report import (
         _cleanup_batch_replay_markdown,
         build_performance_report_zh,
+        DEFAULT_PHASE_END_SECONDS,
         write_batch_trade_process_zh,
     )
 except ModuleNotFoundError:
@@ -30,8 +35,28 @@ except ModuleNotFoundError:
     from build_batch_replay_performance_report import (
         _cleanup_batch_replay_markdown,
         build_performance_report_zh,
+        DEFAULT_PHASE_END_SECONDS,
         write_batch_trade_process_zh,
     )
+
+
+def resolve_position_value_denominator_from_config(config) -> float:
+    value = float(config.get("position.max_position_value", 85.0))
+    if value <= 1e-12:
+        value = 85.0
+    return value
+
+
+def resolve_phase_end_seconds_from_config(config) -> tuple[float, float, float]:
+    try:
+        e1 = float(config.get("cycle.phase_end_seconds_1", DEFAULT_PHASE_END_SECONDS[0]))
+        e2 = float(config.get("cycle.phase_end_seconds_2", DEFAULT_PHASE_END_SECONDS[1]))
+        e3 = float(config.get("cycle.phase_end_seconds_3", DEFAULT_PHASE_END_SECONDS[2]))
+    except (TypeError, ValueError):
+        return DEFAULT_PHASE_END_SECONDS
+    if not (0.0 < e1 < e2 < e3):
+        return DEFAULT_PHASE_END_SECONDS
+    return (e1, e2, e3)
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,7 +72,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-cycles", type=int, default=10)
     parser.add_argument("--config", default="configs/strategy.yaml")
     parser.add_argument("--output-dir", default="artifacts/live/record_job/batch_replay_outputs")
-    parser.add_argument("--starting-cash", type=float, default=100.0)
+    parser.add_argument("--starting-cash", type=float, default=200.0)
     parser.add_argument("--per-cycle-cash", type=float, default=None,
                         help="固定模式下每周期实际投注资金；不设置则与 --starting-cash 相同")
     parser.add_argument(
@@ -62,8 +87,89 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--status-every", type=int, default=100)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--dashboard-refresh-seconds", type=float, default=1.0)
-    parser.add_argument("--include-trade-process", action="store_true", default=False, help="是否生成交易过程详细 Excel")
+    parser.add_argument(
+        "--dashboard-refresh-every-cycles",
+        type=int,
+        default=5,
+        help="per-cycle 模式下每处理多少个周期才同步一次 dashboard；<=0 表示仅在结束时同步。",
+    )
+    parser.add_argument(
+        "--include-performance-report",
+        action="store_true",
+        default=False,
+        help="是否生成绩效汇总 Excel（sim_batch_replay_performance_report_*.xlsx）。",
+    )
+    parser.add_argument(
+        "--include-trade-process",
+        action="store_true",
+        default=False,
+        help="是否生成交易过程详细 Excel（batch_replay_trade_process_zh_*.xlsx）；依赖 --include-performance-report。",
+    )
+    parser.add_argument(
+        "--post-window-start-delay-seconds",
+        type=float,
+        default=None,
+        help="若指定则覆盖 strategy.yaml 的 cycle.post_window_start_delay_seconds。",
+    )
+    parser.add_argument(
+        "--processing-mode",
+        type=str,
+        choices=["per-cycle", "merged"],
+        default=None,
+        help="处理模式：per-cycle=逐周期独立回放（默认，亦可由 strategy.yaml 的 batch_replay.processing_mode 控制）；merged=合并事件流回放。",
+    )
+    parser.add_argument(
+        "--progress-file",
+        default="",
+        help="可选：每完成一个周期写入一次轻量进度文件（用于 record.sh ms 快速读取进度）。",
+    )
+    parser.add_argument(
+        "--env-file",
+        default="",
+        help="CLOB 凭证（与实盘相同）；空则 paper 退回 legacy 滑点（auto 模式）。",
+    )
+    parser.add_argument("--account-index", type=int, default=2)
+    parser.add_argument(
+        "--paper-execution",
+        type=str,
+        choices=["auto", "orderbook", "legacy"],
+        default="auto",
+        help="auto=有凭证则订单簿 FOK；orderbook=必须凭证；legacy=参考价滑点。",
+    )
     return parser.parse_args()
+
+
+def _resolve_env_file_for_recorded(args: argparse.Namespace) -> Path | None:
+    raw = str(getattr(args, "env_file", "") or "").strip()
+    if not raw:
+        return None
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        p = ROOT / p
+    return p.resolve() if p.exists() else None
+
+
+def build_replay_engine_for_recorded(args: argparse.Namespace, config_path: str | Path) -> ReplayEngine:
+    cfg = load_strategy_config(config_path)
+    env_path = _resolve_env_file_for_recorded(args)
+    env_values: dict[str, str] | None = None
+    if env_path is not None:
+        env_values = select_account_env(load_api_env(str(env_path)), account_index=args.account_index)
+    mode = str(getattr(args, "paper_execution", "auto"))
+    broker = paper_broker_for_config(
+        cfg,
+        env_values=env_values,
+        account_index=args.account_index,
+        force_legacy_slippage=mode == "legacy",
+        require_orderbook_client=mode == "orderbook",
+    )
+    return ReplayEngine(
+        cfg,
+        starting_cash=args.starting_cash,
+        capital_reset_mode=args.capital_reset_mode,
+        per_cycle_cash=args.per_cycle_cash,
+        broker=broker,
+    )
 
 
 def _cycle_sort_key(path: Path) -> tuple[int, str]:
@@ -89,6 +195,48 @@ def _resolve_input_dir(root: Path, raw_dir: str) -> Path:
     if not p.is_absolute():
         p = root / p
     return p.resolve()
+
+
+def _resolve_processing_mode(config, cli_mode: str | None) -> str:
+    raw = cli_mode if cli_mode is not None else config.get("batch_replay.processing_mode", "per-cycle")
+    mode = str(raw).strip().lower()
+    aliases = {
+        "per-cycle": "per-cycle",
+        "per_cycle": "per-cycle",
+        "streaming": "per-cycle",
+        "merged": "merged",
+        "merge": "merged",
+    }
+    return aliases.get(mode, "per-cycle")
+
+
+def recording_slug_for_path(cycle_dir: Path, *, root: Path | None = None) -> str:
+    """周期录制目录相对项目根的路径（posix），用作流式 CSV / 绩效表中的 cycle_slug。
+
+    当 ``--input-dirs`` 同时包含 ``record_job`` 与 ``record_job/More_RawData`` 等根目录时，
+    不同根下可能出现**同名** ``btc-updown-5m-*`` 文件夹；仅用 ``Path.name`` 会在「分周期累计盈亏」里撞名。
+    """
+    base = (root or ROOT).resolve()
+    resolved = cycle_dir.resolve()
+    try:
+        return resolved.relative_to(base).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
+def clear_streaming_csv_cache(output_dir: str | Path) -> int:
+    """删除输出目录下 ``streaming_*.csv``（流式回放中间结果）。每次新跑流式回放前应调用，避免与上次运行追加/错位混用。"""
+    d = Path(output_dir)
+    if not d.is_dir():
+        return 0
+    removed = 0
+    for path in sorted(d.glob("streaming_*.csv")):
+        try:
+            path.unlink(missing_ok=True)
+            removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 def _load_cycle_dirs_from_input_dirs(
@@ -161,39 +309,105 @@ class StreamingAggregator:
         return self.win_count / self.total_cycles
 
 
+def _append_dataframe_to_csv(path: Path, df: pd.DataFrame) -> None:
+    """追加 DataFrame 到 CSV，列顺序与已有表头严格一致。
+
+    若直接用 ``DataFrame([row_dict]).to_csv(append)`` 而各 row 的 dict 键顺序不同，后续物理行的列会
+    与首行表头错位，read_csv 后 ``cycle_slug`` 等字段会读错（常见症状：多行 slug 完全相同）。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists() or path.stat().st_size == 0:
+        df.to_csv(path, mode="w", header=True, index=False)
+        return
+    header = pd.read_csv(path, nrows=0)
+    cols = list(header.columns)
+    extra = [c for c in df.columns if c not in cols]
+    if extra:
+        old = pd.read_csv(path)
+        all_cols = list(dict.fromkeys(list(old.columns) + list(df.columns)))
+        old = old.reindex(columns=all_cols)
+        df = df.reindex(columns=all_cols)
+        pd.concat([old, df], ignore_index=True).to_csv(path, index=False)
+        return
+    aligned = df.reindex(columns=cols)
+    aligned.to_csv(path, mode="a", header=False, index=False)
+
+
+def _repair_duplicate_streaming_slugs(
+    cycle_df: pd.DataFrame, decision_df: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """若周期表中同一 cycle_slug 出现多行（多为历史错位 CSV），用 cycle_index 后缀区分并同步决策表。"""
+    if cycle_df.empty or "cycle_slug" not in cycle_df.columns or "cycle_index" not in cycle_df.columns:
+        return cycle_df, decision_df
+    dup_slugs = cycle_df.groupby("cycle_slug").size()
+    bad = set(dup_slugs[dup_slugs > 1].index.astype(str))
+    if not bad:
+        return cycle_df, decision_df
+
+    cycle_df = cycle_df.copy()
+    decision_df = decision_df.copy() if not decision_df.empty else decision_df
+
+    def _suffix_idx(val: object) -> str:
+        if pd.isna(val):
+            return "na"
+        try:
+            return str(int(float(val)))
+        except (TypeError, ValueError):
+            return str(val)
+
+    def _fix_cycle_row(r: pd.Series) -> str:
+        s = str(r["cycle_slug"])
+        if s in bad:
+            return f"{s}__i{_suffix_idx(r['cycle_index'])}"
+        return s
+
+    cycle_df["cycle_slug"] = cycle_df.apply(_fix_cycle_row, axis=1)
+
+    if not decision_df.empty and "cycle_slug" in decision_df.columns and "cycle_index" in decision_df.columns:
+        def _fix_dec_row(r: pd.Series) -> str:
+            s = str(r["cycle_slug"])
+            if s in bad:
+                return f"{s}__i{_suffix_idx(r['cycle_index'])}"
+            return s
+
+        decision_df["cycle_slug"] = decision_df.apply(_fix_dec_row, axis=1)
+
+    return cycle_df, decision_df
+
+
 def write_cycle_results_incremental(
     output_dir: Path,
     cycle_idx: int,
     cycle_row: dict,
     decision_rows: list[dict],
     snapshot_rows: list[dict],
+    *,
+    recording_slug: str | None = None,
 ) -> None:
-    """将单个周期的结果增量写入CSV文件"""
+    """将单个周期的结果增量写入CSV文件。
+
+    recording_slug: 唯一标识本段回放的数据源路径（推荐 ``recording_slug_for_path(cycle_dir)``）。
+    多 input 根目录下同名 ``btc-updown-5m-*`` 时，仅用目录 basename 会撞名，导致「分周期累计盈亏」重复 slug。
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    row_out = dict(cycle_row)
+    slug = (recording_slug or "").strip() or str(row_out.get("cycle_slug") or row_out.get("cycle_id") or "")
+    row_out["cycle_slug"] = slug
 
     # 写入周期结果
     cycle_csv = output_dir / "streaming_cycle_results.csv"
-    cycle_df = pd.DataFrame([cycle_row])
-    cycle_slug = str(cycle_row.get("cycle_slug") or cycle_row.get("cycle_id") or "")
-    cycle_df['cycle_index'] = cycle_idx
-    if "cycle_slug" not in cycle_df.columns:
-        cycle_df['cycle_slug'] = cycle_slug
-    if cycle_csv.exists():
-        cycle_df.to_csv(cycle_csv, mode='a', header=False, index=False)
-    else:
-        cycle_df.to_csv(cycle_csv, mode='w', header=True, index=False)
+    cycle_df = pd.DataFrame([row_out])
+    cycle_df["cycle_index"] = cycle_idx
+    _append_dataframe_to_csv(cycle_csv, cycle_df)
 
     # 写入决策结果
     if decision_rows:
         decision_csv = output_dir / "streaming_decision_results.csv"
         decision_df = pd.DataFrame(decision_rows)
-        decision_df['cycle_index'] = cycle_idx
-        if "cycle_slug" not in decision_df.columns:
-            decision_df['cycle_slug'] = cycle_slug
-        if decision_csv.exists():
-            decision_df.to_csv(decision_csv, mode='a', header=False, index=False)
-        else:
-            decision_df.to_csv(decision_csv, mode='w', header=True, index=False)
+        decision_df["cycle_index"] = cycle_idx
+        decision_df["cycle_slug"] = slug
+        _append_dataframe_to_csv(decision_csv, decision_df)
 
     # 写入快照结果（可选，数据量大）
     # if snapshot_rows:
@@ -206,13 +420,18 @@ def write_cycle_results_incremental(
     #         snapshot_df.to_csv(snapshot_csv, mode='w', header=True, index=False)
 
 
+def write_progress_file(progress_file: Path, *, completed: int, total: int) -> None:
+    progress_file.parent.mkdir(parents=True, exist_ok=True)
+    progress_file.write_text(f"{int(completed)},{int(total)}\n", encoding="utf-8")
+
+
 def _build_summary_df(cycle_df: pd.DataFrame, decision_df: pd.DataFrame) -> pd.DataFrame:
     if cycle_df.empty:
         return pd.DataFrame(columns=["cycle_slug", "executed_trades", "accepted_signals", "blocked_signals", "total_net_profit", "total_fees", "winner", "account_cash"])
 
     decisions = decision_df.copy()
     if decisions.empty:
-        decisions = pd.DataFrame(columns=["cycle_id", "risk_status", "executed", "fill_fee"])
+        decisions = pd.DataFrame(columns=["cycle_id", "risk_status", "executed", "fill_fee", "cycle_index"])
     if "cycle_id" not in decisions.columns and "cycle_slug" in decisions.columns:
         decisions["cycle_id"] = decisions["cycle_slug"]
     if "cycle_id" not in decisions.columns:
@@ -222,6 +441,11 @@ def _build_summary_df(cycle_df: pd.DataFrame, decision_df: pd.DataFrame) -> pd.D
     decisions["executed"] = decisions.get("executed", False).fillna(False).astype(bool)
     decisions["fill_fee"] = pd.to_numeric(decisions.get("fill_fee", 0.0), errors="coerce").fillna(0.0)
 
+    use_cycle_index = (
+        "cycle_index" in cycle_df.columns
+        and not decisions.empty
+        and "cycle_index" in decisions.columns
+    )
     grouped = decisions.groupby("cycle_id", dropna=False)
     accepted_counts = grouped.apply(lambda frame: int((frame["risk_status"] == "accepted").sum()) if not frame.empty else 0)
     blocked_counts = grouped.apply(lambda frame: int((frame["risk_status"] == "blocked").sum()) if not frame.empty else 0)
@@ -230,15 +454,35 @@ def _build_summary_df(cycle_df: pd.DataFrame, decision_df: pd.DataFrame) -> pd.D
 
     rows: list[dict[str, object]] = []
     for _, row in cycle_df.iterrows():
+        slug = str(row.get("cycle_slug") or row.get("cycle_id") or "")
         cycle_id = str(row.get("cycle_id", ""))
+
+        if use_cycle_index:
+            cidx = row.get("cycle_index")
+            if pd.notna(cidx):
+                ci = int(float(cidx))
+                idx_match = pd.to_numeric(decisions["cycle_index"], errors="coerce") == float(ci)
+                sub = decisions.loc[idx_match]
+            else:
+                sub = decisions.iloc[0:0]
+            executed_trades = int(sub["executed"].sum()) if not sub.empty else 0
+            accepted_signals = int((sub["risk_status"] == "accepted").sum()) if not sub.empty else 0
+            blocked_signals = int((sub["risk_status"] == "blocked").sum()) if not sub.empty else 0
+            fees_sum = float(sub["fill_fee"].sum()) if not sub.empty else 0.0
+        else:
+            executed_trades = int(executed_counts.get(cycle_id, 0))
+            accepted_signals = int(accepted_counts.get(cycle_id, 0))
+            blocked_signals = int(blocked_counts.get(cycle_id, 0))
+            fees_sum = float(total_fees.get(cycle_id, 0.0))
+
         rows.append(
             {
-                "cycle_slug": cycle_id,
-                "executed_trades": int(executed_counts.get(cycle_id, 0)),
-                "accepted_signals": int(accepted_counts.get(cycle_id, 0)),
-                "blocked_signals": int(blocked_counts.get(cycle_id, 0)),
+                "cycle_slug": slug,
+                "executed_trades": executed_trades,
+                "accepted_signals": accepted_signals,
+                "blocked_signals": blocked_signals,
                 "total_net_profit": float(pd.to_numeric(row.get("cycle_net_profit", 0.0), errors="coerce")),
-                "total_fees": float(total_fees.get(cycle_id, 0.0)),
+                "total_fees": fees_sum,
                 "winner": row.get("winner", ""),
                 "account_cash": row.get("account_cash", None),
             }
@@ -252,7 +496,11 @@ def _write_sim_batch_reports(
     *,
     capital_reset_mode: str,
     starting_cash: float,
-) -> tuple[Path, Path]:
+    position_value_denominator: float = 1000.0,
+    phase_end_seconds: tuple[float, float, float] = DEFAULT_PHASE_END_SECONDS,
+    include_performance_report: bool = True,
+    include_trade_process: bool = True,
+) -> tuple[Path | None, Path | None]:
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -264,31 +512,89 @@ def _write_sim_batch_reports(
         decision_df["cycle_slug"] = decision_df["cycle_id"].astype(str)
 
     summary_df = _build_summary_df(cycle_df, decision_df)
-    trade_xlsx = write_batch_trade_process_zh(
-        input_dir=out_dir,
-        cycle_df=cycle_df,
-        decision_df=decision_df,
-        output_path=out_dir,
-    )
-    perf_xlsx = build_performance_report_zh(
-        resolved_batch_dir=out_dir,
-        summary_df=summary_df,
-        cycle_df=cycle_df,
-        decision_df=decision_df,
-        output_path=out_dir,
-        display_batch_dir=out_dir,
-        report_source="模拟下单测试",
-        report_name_prefix="simulation",
-        capital_reset_mode=capital_reset_mode,
-        starting_cash=starting_cash,
-    )
-    _cleanup_batch_replay_markdown(out_dir)
+    perf_xlsx: Path | None = None
+    trade_xlsx: Path | None = None
+    if include_trade_process:
+        trade_xlsx = write_batch_trade_process_zh(
+            input_dir=out_dir,
+            cycle_df=cycle_df,
+            decision_df=decision_df,
+            output_path=out_dir,
+        )
+    if include_performance_report:
+        perf_xlsx = build_performance_report_zh(
+            resolved_batch_dir=out_dir,
+            summary_df=summary_df,
+            cycle_df=cycle_df,
+            decision_df=decision_df,
+            output_path=out_dir,
+            display_batch_dir=out_dir,
+            report_source="模拟下单测试",
+            report_name_prefix="simulation",
+            capital_reset_mode=capital_reset_mode,
+            starting_cash=starting_cash,
+            position_value_denominator=position_value_denominator,
+            phase_end_seconds=phase_end_seconds,
+        )
+        _cleanup_batch_replay_markdown(out_dir)
     return perf_xlsx, trade_xlsx
 
 
-def main_streaming() -> int:
+def _df_rows_for_engine(df: pd.DataFrame) -> list[dict[str, object]]:
+    if df.empty:
+        return []
+    filled = df.replace({np.nan: None})
+    return [dict(row) for row in filled.to_dict(orient="records")]
+
+
+def _export_dashboard_from_streaming(
+    *,
+    engine: ReplayEngine,
+    output_dir: Path,
+    snapshot_rows: list[dict[str, object]],
+    refresh_seconds: float,
+    write_excel: bool,
+    position_value_denominator: float | None,
+) -> bool:
+    """从 streaming_*.csv 与当前 engine 状态重建指标并写 dashboard 产物（cycles.csv 等）。"""
+    cycle_csv = output_dir / "streaming_cycle_results.csv"
+    decision_csv = output_dir / "streaming_decision_results.csv"
+    if not cycle_csv.exists():
+        return False
+    cycle_df = pd.read_csv(cycle_csv)
+    if cycle_df.empty:
+        return False
+    decision_df = pd.read_csv(decision_csv) if decision_csv.exists() else pd.DataFrame()
+
+    if not cycle_df.empty and "cycle_slug" not in cycle_df.columns and "cycle_id" in cycle_df.columns:
+        cycle_df = cycle_df.copy()
+        cycle_df["cycle_slug"] = cycle_df["cycle_id"].astype(str)
+    if not decision_df.empty and "cycle_slug" not in decision_df.columns and "cycle_id" in decision_df.columns:
+        decision_df = decision_df.copy()
+        decision_df["cycle_slug"] = decision_df["cycle_id"].astype(str)
+
+    cycle_df, decision_df = _repair_duplicate_streaming_slugs(cycle_df, decision_df)
+
+    cycle_rows = _df_rows_for_engine(cycle_df)
+    decision_rows = _df_rows_for_engine(decision_df)
+    replay_result = engine._build_result(cycle_rows, decision_rows)
+    snapshot_df = pd.DataFrame(snapshot_rows) if snapshot_rows else pd.DataFrame()
+    live_result = LiveRunnerResult(replay_result=replay_result, snapshot_df=snapshot_df)
+    rs = refresh_seconds if refresh_seconds > 0 else 1.0
+    export_live_result(
+        live_result,
+        output_dir,
+        title="Polynet AI Monitoring Dashboard",
+        refresh_seconds=max(1.0, rs),
+        write_excel=write_excel,
+        position_value_denominator=position_value_denominator,
+    )
+    return True
+
+
+def main_streaming(args: argparse.Namespace | None = None) -> int:
     """流式处理版本：逐周期加载和处理，避免内存累积"""
-    args = parse_args()
+    args = args or parse_args()
     start_time = datetime.now()
     print("\n" + "="*70)
     print(f"[模拟下单测试 - 流式处理] 开始于 {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -309,36 +615,61 @@ def main_streaming() -> int:
     max_cycles = args.max_cycles if args.max_cycles and args.max_cycles > 0 else None
 
     cycle_dirs = sorted(_load_cycle_dirs_from_input_dirs(input_dirs, args.cycle_glob), key=_cycle_sort_key)
+    seen_resolved: set[Path] = set()
+    deduped_cycle_dirs: list[Path] = []
+    for _cd in cycle_dirs:
+        _key = _cd.resolve()
+        if _key in seen_resolved:
+            continue
+        seen_resolved.add(_key)
+        deduped_cycle_dirs.append(_cd)
+    cycle_dirs = deduped_cycle_dirs
     if max_cycles is not None and max_cycles > 0:
         cycle_dirs = cycle_dirs[:max_cycles]
     print(f"  ✓ 发现 {len(cycle_dirs)} 个周期目录")
 
     print(f"\n[2/5] 初始化回放引擎...")
-    engine = ReplayEngine.from_yaml(
-        args.config,
-        starting_cash=args.starting_cash,
-        capital_reset_mode=args.capital_reset_mode,
-        per_cycle_cash=args.per_cycle_cash,
-    )
+    engine = build_replay_engine_for_recorded(args, args.config)
     runner = LivePaperRunner(engine)
+    _pb = engine.broker
+    _pm = "orderbook_fok" if getattr(_pb, "clob_client", None) is not None else "legacy_slippage"
     print(
         f"  ✓ 引擎已初始化，初始资金: {args.starting_cash} USDT | "
-        f"资金模式: {args.capital_reset_mode}"
+        f"资金模式: {args.capital_reset_mode} | paper: {_pm}"
     )
 
     # 初始化流式聚合器
     aggregator = StreamingAggregator()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    progress_file: Path | None = None
+    if str(args.progress_file).strip():
+        progress_file = Path(args.progress_file)
+        if not progress_file.is_absolute():
+            progress_file = (ROOT / progress_file).resolve()
 
-    # 清理上次运行残留的流式 CSV，避免追加导致列数不一致
-    for _stale in ("streaming_cycle_results.csv", "streaming_decision_results.csv"):
-        _stale_path = output_dir / _stale
-        if _stale_path.exists():
-            _stale_path.unlink()
+    _rm_stream = clear_streaming_csv_cache(output_dir)
+    if _rm_stream:
+        print(f"  ✓ 已清理流式缓存: {_rm_stream} 个 streaming_*.csv")
+    if progress_file is not None:
+        write_progress_file(progress_file, completed=0, total=len(cycle_dirs))
 
     print(f"\n[3/5] 开始逐周期流式处理（共 {len(cycle_dirs)} 个周期）...")
+    _cfg = load_strategy_config(args.config)
+    position_value_denominator = resolve_position_value_denominator_from_config(_cfg)
+    phase_end_seconds = resolve_phase_end_seconds_from_config(_cfg)
+    _pwd = resolve_post_window_start_delay_seconds(
+        config=_cfg,
+        cli_seconds=args.post_window_start_delay_seconds,
+    )
+    _pwd_src = (
+        "命令行"
+        if args.post_window_start_delay_seconds is not None
+        else "strategy.yaml"
+    )
+    print(f"  ℹ 窗起点后策略推迟: {_pwd:g}s（来源: {_pwd_src}）")
     run_start_time = datetime.now()
+    accumulated_snapshot_rows: list[dict[str, object]] = []
 
     for cycle_idx, cycle_dir in enumerate(cycle_dirs, 1):
         cycle_start = datetime.now()
@@ -353,6 +684,15 @@ def main_streaming() -> int:
         sorted_events = sorted(cycle_events, key=lambda e: e.timestamp)
         if args.limit is not None:
             sorted_events = sorted_events[:args.limit]
+        raw_n = len(sorted_events)
+        sorted_events = filter_trade_events_after_post_window_delay(
+            sorted_events,
+            post_window_start_delay_seconds=_pwd,
+        )
+        if _pwd > 0 and len(sorted_events) != raw_n:
+            print(
+                f"  ℹ 周期 {cycle_idx}: 推迟 {_pwd:g}s 后参与策略的事件 {len(sorted_events)}/{raw_n} 条"
+            )
 
         # 处理单个周期
         event_stream = iter_events_with_pacing(
@@ -380,7 +720,8 @@ def main_streaming() -> int:
                 cycle_idx,
                 cycle_row,
                 decision_rows,
-                snapshot_rows
+                snapshot_rows,
+                recording_slug=recording_slug_for_path(cycle_dir),
             )
 
             # 更新聚合指标
@@ -389,17 +730,54 @@ def main_streaming() -> int:
             cycle_elapsed = (datetime.now() - cycle_start).total_seconds()
             profit = cycle_row.get('cycle_net_profit', 0.0)
             print(f"  ✓ 周期 {cycle_idx}/{len(cycle_dirs)} ({cycle_dir.name}): "
-                  f"{len(cycle_events)} 事件, 盈亏 {profit:.2f}, 耗时 {cycle_elapsed:.1f}s")
+                  f"{len(sorted_events)}/{len(cycle_events)} 事件, 盈亏 {profit:.2f}, 耗时 {cycle_elapsed:.1f}s")
+            if progress_file is not None:
+                write_progress_file(progress_file, completed=cycle_idx, total=len(cycle_dirs))
+
+            accumulated_snapshot_rows.extend(result.snapshot_df.to_dict(orient="records"))
+            should_refresh_dashboard = False
+            if args.dashboard_refresh_seconds > 0:
+                if args.dashboard_refresh_every_cycles <= 0:
+                    should_refresh_dashboard = False
+                else:
+                    should_refresh_dashboard = (cycle_idx % args.dashboard_refresh_every_cycles == 0)
+            if should_refresh_dashboard:
+                _export_dashboard_from_streaming(
+                    engine=engine,
+                    output_dir=output_dir,
+                    snapshot_rows=accumulated_snapshot_rows,
+                    refresh_seconds=args.dashboard_refresh_seconds,
+                    write_excel=False,
+                    position_value_denominator=position_value_denominator,
+                )
 
         # 释放内存
         del cycle_events, sorted_events, result
 
     run_elapsed = (datetime.now() - run_start_time).total_seconds()
+    if progress_file is not None:
+        write_progress_file(progress_file, completed=aggregator.total_cycles, total=len(cycle_dirs))
     print(f"  ✓ 流式处理完成 (总耗时 {run_elapsed:.1f}s)")
 
+    cycle_csv = output_dir / "streaming_cycle_results.csv"
+    if cycle_csv.exists():
+        did_export = _export_dashboard_from_streaming(
+            engine=engine,
+            output_dir=output_dir,
+            snapshot_rows=accumulated_snapshot_rows,
+            refresh_seconds=args.dashboard_refresh_seconds,
+            write_excel=False,
+            position_value_denominator=position_value_denominator,
+        )
+        if did_export:
+            print(f"  ✓ Dashboard 数据已同步至: {output_dir}")
+
+    include_trade_process = bool(args.include_trade_process)
+    include_performance_report = bool(args.include_performance_report or include_trade_process)
+    if include_trade_process and not args.include_performance_report:
+        print("  ℹ 已自动启用绩效报告：--include-trade-process 依赖 --include-performance-report")
     print(f"\n[4/5] 从流式输出生成最终报告...")
     # 读取流式输出文件
-    cycle_csv = output_dir / "streaming_cycle_results.csv"
     decision_csv = output_dir / "streaming_decision_results.csv"
 
     if cycle_csv.exists():
@@ -412,17 +790,21 @@ def main_streaming() -> int:
         if not decision_df.empty and "cycle_slug" not in decision_df.columns and "cycle_id" in decision_df.columns:
             decision_df["cycle_slug"] = decision_df["cycle_id"].astype(str)
 
+        cycle_df, decision_df = _repair_duplicate_streaming_slugs(cycle_df, decision_df)
+
         # 构建汇总数据
         summary_df = _build_summary_df(cycle_df, decision_df)
 
         # 生成报告
-        if args.include_trade_process:
+        if include_trade_process:
             trade_xlsx = write_batch_trade_process_zh(
                 input_dir=output_dir,
                 cycle_df=cycle_df,
                 decision_df=decision_df,
                 output_path=output_dir,
             )
+            print(f"  ✓ 交易过程 (Excel): {trade_xlsx}")
+        if include_performance_report:
             perf_xlsx = build_performance_report_zh(
                 resolved_batch_dir=output_dir,
                 summary_df=summary_df,
@@ -434,11 +816,12 @@ def main_streaming() -> int:
                 report_name_prefix="simulation_streaming",
                 capital_reset_mode=args.capital_reset_mode,
                 starting_cash=args.starting_cash,
+                position_value_denominator=position_value_denominator,
+                phase_end_seconds=phase_end_seconds,
             )
             _cleanup_batch_replay_markdown(output_dir)
             print(f"  ✓ 总绩效报告 (Excel): {perf_xlsx}")
-            print(f"  ✓ 交易过程 (Excel): {trade_xlsx}")
-        else:
+        if not include_trade_process and not include_performance_report:
             print(f"  ✓ 流式输出文件已生成在: {output_dir}")
 
     print(f"\n[5/5] 性能统计...")
@@ -456,8 +839,8 @@ def main_streaming() -> int:
     return 0
 
 
-def main() -> int:
-    args = parse_args()
+def main(args: argparse.Namespace | None = None) -> int:
+    args = args or parse_args()
     start_time = datetime.now()
     print("\n" + "="*70)
     print(f"[模拟下单测试] 开始于 {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -489,6 +872,18 @@ def main() -> int:
         if cycle_events:
             events.extend(cycle_events)
     events = sorted(events, key=lambda item: item.timestamp)
+    _cfg = load_strategy_config(args.config)
+    _pwd = resolve_post_window_start_delay_seconds(
+        config=_cfg,
+        cli_seconds=args.post_window_start_delay_seconds,
+    )
+    if _pwd > 0:
+        raw_total = len(events)
+        events = filter_trade_events_after_post_window_delay(
+            events,
+            post_window_start_delay_seconds=_pwd,
+        )
+        print(f"  ℹ 窗起点后策略推迟 {_pwd:g}s：合并流使用 {len(events)}/{raw_total} 条事件")
     if not events:
         raise RuntimeError(
             "未找到成交流文件，无法启动准实时回放。"
@@ -502,18 +897,18 @@ def main() -> int:
         print(f"  ✓ 事件限制: 使用前 {len(events)} 条")
 
     print(f"\n[2/5] 初始化回放引擎...")
-    engine = ReplayEngine.from_yaml(
-        args.config,
-        starting_cash=args.starting_cash,
-        capital_reset_mode=args.capital_reset_mode,
-        per_cycle_cash=args.per_cycle_cash,
-    )
+    engine = build_replay_engine_for_recorded(args, args.config)
+    _cfg = engine.config
+    position_value_denominator = resolve_position_value_denominator_from_config(_cfg)
+    phase_end_seconds = resolve_phase_end_seconds_from_config(_cfg)
     runner = LivePaperRunner(engine)
+    _pb = engine.broker
+    _pm = "orderbook_fok" if getattr(_pb, "clob_client", None) is not None else "legacy_slippage"
     print(
         f"  ✓ 引擎已初始化，初始资金: {args.starting_cash} USDT | "
-        f"资金模式: {args.capital_reset_mode}"
+        f"资金模式: {args.capital_reset_mode} | paper: {_pm}"
     )
-    
+
     event_stream = iter_events_with_pacing(
         events,
         pace_factor=args.pace_factor,
@@ -529,6 +924,7 @@ def main() -> int:
                 args.output_dir,
                 refresh_seconds=args.dashboard_refresh_seconds,
                 write_excel=False,
+                position_value_denominator=position_value_denominator,
             )
 
         progress_callback = _flush_progress
@@ -549,18 +945,29 @@ def main() -> int:
         result,
         args.output_dir,
         refresh_seconds=max(1.0, args.dashboard_refresh_seconds) if args.dashboard_refresh_seconds > 0 else 1.0,
+        position_value_denominator=position_value_denominator,
     )
     print(f"  ✓ 数据已导出到: {args.output_dir}")
+    include_trade_process = bool(args.include_trade_process)
+    include_performance_report = bool(args.include_performance_report or include_trade_process)
+    if include_trade_process and not args.include_performance_report:
+        print("  ℹ 已自动启用绩效报告：--include-trade-process 依赖 --include-performance-report")
     print(f"\n[5/5] 生成总绩效报告...")
-    if args.include_trade_process:
+    if include_trade_process or include_performance_report:
         performance_xlsx, trade_process_xlsx = _write_sim_batch_reports(
             args.output_dir,
             result,
             capital_reset_mode=args.capital_reset_mode,
             starting_cash=args.starting_cash,
+            position_value_denominator=position_value_denominator,
+            phase_end_seconds=phase_end_seconds,
+            include_performance_report=include_performance_report,
+            include_trade_process=include_trade_process,
         )
-        print(f"  ✓ 总绩效报告 (Excel): {performance_xlsx}")
-        print(f"  ✓ 交易过程 (Excel): {trade_process_xlsx}")
+        if performance_xlsx is not None:
+            print(f"  ✓ 总绩效报告 (Excel): {performance_xlsx}")
+        if trade_process_xlsx is not None:
+            print(f"  ✓ 交易过程 (Excel): {trade_process_xlsx}")
     else:
         print(f"  ✓ 报告文件已生成在: {args.output_dir}")
     
@@ -577,5 +984,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    # 默认使用流式处理版本以优化内存占用和性能
-    raise SystemExit(main_streaming())
+    _args = parse_args()
+    _cfg = load_strategy_config(_args.config)
+    _mode = _resolve_processing_mode(_cfg, _args.processing_mode)
+    if _mode == "merged":
+        print("  ℹ 处理模式: merged（合并事件流）")
+        raise SystemExit(main(_args))
+    print("  ℹ 处理模式: per-cycle（逐周期独立回放）")
+    raise SystemExit(main_streaming(_args))

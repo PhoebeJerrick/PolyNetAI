@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "polynet-ai"
-version = "0.1.10"
+version = "0.1.67"
 description = "Polymarket 5-minute paper trading research framework."
 readme = "docs/strategy_spec.md"
 requires-python = ">=3.11"
@@ -13,9 +13,17 @@ dependencies = [
     "pandas>=2.2",
     "plotly>=5.0",
     "PyYAML>=6.0",
+    "ruamel.yaml>=0.18",
     "websocket-client>=1.8",
     "requests>=2.28.0",
     "py-clob-client>=0.34.6",
+]
+
+[project.optional-dependencies]
+redeem = [
+    "web3>=6.0.0",
+    "py-builder-relayer-client>=0.0.1",
+    "py-builder-signing-sdk>=0.0.1",
 ]
 
 [tool.setuptools]
@@ -23,3 +31,7 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+# 使用项目内临时目录，避免 Windows 系统 Temp 权限问题
+addopts = "--basetemp=artifacts/pytest_tmp"

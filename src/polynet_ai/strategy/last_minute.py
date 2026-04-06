@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from polynet_ai.domain.models import FeatureSnapshot, OrderIntent
+from polynet_ai.strategy.cycle_windows import determine_phase
 from polynet_ai.strategy.spec import StrategyConfig
 from polynet_ai.strategy.price_reference import outcome_reference_price
 
@@ -18,11 +19,43 @@ def _favored_outcome_by_unrealized(features: FeatureSnapshot) -> str:
     return "down"
 
 
+def determine_winning_direction(
+    features: FeatureSnapshot, config: StrategyConfig
+) -> tuple[str, float]:
+    """
+    第四阶段 / 文档第六节 Last Minute：优势侧（满足其一即可）
+
+    - 该侧份额 ≥ 另一侧 × preferred_leg_min_ratio
+    - 否则：UP/DOWN 市价较高者为优势侧（双侧无仓或接近平衡时亦用市价决胜，便于尾部建仓）
+
+    Returns:
+        (direction, confidence) — direction 为 "up" / "down"
+    """
+    ratio = max(1.0, float(config.get("last_minute.preferred_leg_min_ratio", 1.2)))
+    up_h = float(features.up_held)
+    down_h = float(features.down_held)
+    up_p = float(features.up_last_price)
+    down_p = float(features.down_last_price)
+
+    if down_h > 1e-12 and up_h >= ratio * down_h:
+        return ("up", 0.85)
+    if up_h > 1e-12 and down_h >= ratio * up_h:
+        return ("down", 0.85)
+    if up_h <= 1e-12 and down_h <= 1e-12:
+        return ("up", 0.7) if up_p >= down_p else ("down", 0.7)
+    if down_h <= 1e-12:
+        return ("up", 0.8)
+    if up_h <= 1e-12:
+        return ("down", 0.8)
+    return ("up", 0.75) if up_p >= down_p else ("down", 0.75)
+
+
 def build_last_minute_candidate(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
     if not features.is_last_minute:
         return []
 
-    priority = int(config.priorities.get("last_minute", 20))
+    phase = determine_phase(features.cycle_elapsed_seconds, config)
+    priority = int(config.priority_for("last_minute", phase))
     infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
     up_ref = outcome_reference_price(features, "up", infer_missing_with_binary_complement=infer_missing)
     down_ref = outcome_reference_price(features, "down", infer_missing_with_binary_complement=infer_missing)
@@ -58,16 +91,14 @@ def build_last_minute_candidate(features: FeatureSnapshot, config: StrategyConfi
     if intents:
         return intents
 
+    winning_dir, _confidence = determine_winning_direction(features, config)
+
     min_conf = float(config.get("last_minute.last_minute_min_confidence", 0.85))
     if features.confidence_proxy < min_conf:
         return []
 
-    if features.cycle_net_profit >= 0 and features.net_direction in {"Up", "Down"}:
-        target_outcome = "up" if features.net_direction == "Up" else "down"
-    elif features.unrealized_up_pnl < features.unrealized_down_pnl:
-        target_outcome = "down"
-    else:
-        target_outcome = "up"
+    # 使用确认的获胜方向（替代原有的方向选择逻辑）
+    target_outcome = winning_dir
 
     max_exp = float(config.get("last_minute.max_tail_exposure", 40.0))
     tail_formula = min(

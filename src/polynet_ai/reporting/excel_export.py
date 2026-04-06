@@ -5,7 +5,20 @@ from typing import Iterable
 
 import pandas as pd
 
+from polynet_ai.adapters.cycle_window_timing import window_start_naive_utc_from_slug
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def absolute_cycle_open_timestamp_utc_for_cycle_id(cycle_id: object) -> pd.Timestamp:
+    """Polymarket 时间桶的 cycle_id/slug 对应绝对开盘（UTC）；无法从 slug 解析则 NaT。
+
+    报表「下注时间距开盘差」、尾盘窗口按秒切分等应与 ``window_start_naive_utc_from_slug`` 一致。
+    """
+    naive = window_start_naive_utc_from_slug(str(cycle_id).strip())
+    if naive is None:
+        return pd.NaT
+    return pd.Timestamp(naive).tz_localize("UTC")
 
 # 与 analyze_polymarket_tracker / 批量绩效报告交易流水表一致，置于「成交价格」右侧
 SAME_OUTCOME_PRICE_MOVE_COL = "同向成交价波动幅度(%)"
@@ -171,6 +184,9 @@ def export_trade_ledger_to_excel(
     decision_df: pd.DataFrame,
     snapshot_df: pd.DataFrame,
     output_path: str | Path,
+    *,
+    position_value_denominator: float | None = None,
+    redeem_audit_df: pd.DataFrame | None = None,
 ) -> Path:
     output = Path(output_path)
     columns = [
@@ -189,8 +205,9 @@ def export_trade_ledger_to_excel(
         "Down积累份数",
         "Down加权均价",
         "当前总持仓份数",
+        "持仓价值占比",
         "净持仓份数",
-        "净持仓价值",
+        "净持仓成本差额",
         "净持仓方向",
         "Up已成交差价盈亏",
         "Down已成交差价盈亏",
@@ -205,6 +222,8 @@ def export_trade_ledger_to_excel(
     if executed.empty:
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
             pd.DataFrame(columns=columns).to_excel(writer, sheet_name=EXECUTION_LEDGER_SHEET_NAME, index=False)
+            if redeem_audit_df is not None and not redeem_audit_df.empty:
+                redeem_audit_df.to_excel(writer, sheet_name="redeem_audit", index=False)
         return output
 
     snapshots = snapshot_df.copy()
@@ -213,9 +232,15 @@ def export_trade_ledger_to_excel(
     if "event_index" not in snapshots.columns:
         snapshots["event_index"] = range(1, len(snapshots) + 1)
 
-    executed["timestamp"] = pd.to_datetime(executed.get("timestamp"), errors="coerce")
-    snapshots["timestamp"] = pd.to_datetime(snapshots.get("timestamp"), errors="coerce")
-    cycle_starts = snapshots.groupby("cycle_id", dropna=False)["timestamp"].min().rename("cycle_start").reset_index()
+    executed["timestamp"] = pd.to_datetime(executed.get("timestamp"), errors="coerce", utc=True)
+    snapshots["timestamp"] = pd.to_datetime(snapshots.get("timestamp"), errors="coerce", utc=True)
+    cycle_starts_fb = snapshots.groupby("cycle_id", dropna=False)["timestamp"].min().rename("cycle_start_fb").reset_index()
+    cycle_starts_fb["cycle_start"] = pd.to_datetime(
+        cycle_starts_fb["cycle_id"].map(absolute_cycle_open_timestamp_utc_for_cycle_id), utc=True
+    )
+    miss = cycle_starts_fb["cycle_start"].isna() & cycle_starts_fb["cycle_start_fb"].notna()
+    cycle_starts_fb.loc[miss, "cycle_start"] = cycle_starts_fb.loc[miss, "cycle_start_fb"]
+    cycle_starts = cycle_starts_fb.drop(columns=["cycle_start_fb"])
     merged = executed.merge(
         snapshots,
         on="event_index",
@@ -237,11 +262,38 @@ def export_trade_ledger_to_excel(
         timestamp_col=ts_for_move,
     )
 
+    ts_ledger = "timestamp_decision" if "timestamp_decision" in merged.columns else "timestamp"
+    up_balance = pd.to_numeric(merged.get("up_balance"), errors="coerce").fillna(0.0)
+    down_balance = pd.to_numeric(merged.get("down_balance"), errors="coerce").fillna(0.0)
+    up_avg_price = pd.to_numeric(merged.get("up_avg_price"), errors="coerce").fillna(0.0)
+    down_avg_price = pd.to_numeric(merged.get("down_avg_price"), errors="coerce").fillna(0.0)
+    total_position_cost_value = up_balance * up_avg_price + down_balance * down_avg_price
+
+    if position_value_denominator is not None and float(position_value_denominator) > 1e-12:
+        # 与策略内部仓位占比口径对齐：总持仓成本 / position.max_position_value。
+        cycle_budget = float(position_value_denominator)
+        position_value_ratio = total_position_cost_value / cycle_budget
+    else:
+        # 兼容旧口径：分母按“每周期投注总资金”近似（周期首条 available_cash/account_cash）。
+        cycle_budget_source = pd.to_numeric(
+            merged.get("available_cash", pd.Series(index=merged.index, dtype=float)),
+            errors="coerce",
+        )
+        if cycle_budget_source.isna().all():
+            cycle_budget_source = pd.to_numeric(
+                merged.get("account_cash", pd.Series(index=merged.index, dtype=float)),
+                errors="coerce",
+            )
+        cycle_budget = cycle_budget_source.groupby(merged.get("cycle_id")).transform("first")
+        cycle_budget = pd.to_numeric(cycle_budget, errors="coerce").fillna(100.0)
+        cycle_budget = cycle_budget.where(cycle_budget > 1e-12, 100.0)
+        position_value_ratio = total_position_cost_value / cycle_budget
+
     ledger = pd.DataFrame(
         {
             "下注时间距开盘差(分，秒)": [
                 _format_elapsed(ts, start)
-                for ts, start in zip(merged["timestamp"], merged["cycle_start"])
+                for ts, start in zip(merged[ts_ledger], merged["cycle_start"])
             ],
             "市场标题": merged.get("market_id", pd.Series(dtype=object)).fillna(""),
             "时间周期": merged.get("cycle_id", pd.Series(dtype=object)).fillna(""),
@@ -255,16 +307,14 @@ def export_trade_ledger_to_excel(
             ),
             "成交价格": pd.to_numeric(merged.get("fill_price"), errors="coerce").fillna(0.0),
             SAME_OUTCOME_PRICE_MOVE_COL: move_pct,
-            "Up积累份数": pd.to_numeric(merged.get("up_balance"), errors="coerce").fillna(0.0),
-            "Up加权均价": pd.to_numeric(merged.get("up_avg_price"), errors="coerce").fillna(0.0),
-            "Down积累份数": pd.to_numeric(merged.get("down_balance"), errors="coerce").fillna(0.0),
-            "Down加权均价": pd.to_numeric(merged.get("down_avg_price"), errors="coerce").fillna(0.0),
-            "当前总持仓份数": (
-                pd.to_numeric(merged.get("up_balance"), errors="coerce").fillna(0.0)
-                + pd.to_numeric(merged.get("down_balance"), errors="coerce").fillna(0.0)
-            ),
+            "Up积累份数": up_balance,
+            "Up加权均价": up_avg_price,
+            "Down积累份数": down_balance,
+            "Down加权均价": down_avg_price,
+            "当前总持仓份数": (up_balance + down_balance),
+            "持仓价值占比": position_value_ratio,
             "净持仓份数": pd.to_numeric(merged.get("net_position"), errors="coerce").fillna(0.0),
-            "净持仓价值": pd.to_numeric(merged.get("net_position_value"), errors="coerce").fillna(0.0),
+            "净持仓成本差额": pd.to_numeric(merged.get("net_position_value"), errors="coerce").fillna(0.0),
             "净持仓方向": merged.get("net_direction", pd.Series(dtype=object)).fillna(""),
             "Up已成交差价盈亏": pd.to_numeric(merged.get("up_realized_pnl"), errors="coerce").fillna(0.0),
             "Down已成交差价盈亏": pd.to_numeric(merged.get("down_realized_pnl"), errors="coerce").fillna(0.0),
@@ -275,5 +325,12 @@ def export_trade_ledger_to_excel(
         }
     )
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        ledger.to_excel(writer, sheet_name=_build_sheet_name(merged.get("market_id", [])), index=False)
+        sheet_name = _build_sheet_name(merged.get("market_id", []))
+        ledger.to_excel(writer, sheet_name=sheet_name, index=False)
+        ws = writer.book[sheet_name]
+        ratio_col_idx = ledger.columns.get_loc("持仓价值占比") + 1  # openpyxl is 1-based
+        for row in range(2, ws.max_row + 1):
+            ws.cell(row=row, column=ratio_col_idx).number_format = "0.0%"
+        if redeem_audit_df is not None and not redeem_audit_df.empty:
+            redeem_audit_df.to_excel(writer, sheet_name="redeem_audit", index=False)
     return output

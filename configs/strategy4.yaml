@@ -1,0 +1,326 @@
+# =============================================================================
+# 1) 生命周期与回放 — cycle, batch_replay
+# =============================================================================
+cycle:
+  cycle_seconds: 300                      # 周期时间300秒
+  last_minute_seconds: 30                 # 尾盘时间30秒
+  # 阶段性时间划分（秒，已过周期时间）：阶段1≤第1边界；阶段2∈(1,2]；阶段3∈(2,3]；阶段4>第3边界。须严格递增。
+  phase_end_seconds_1: 70                  # 第一阶段结束时间70秒
+  phase_end_seconds_2: 160                 # 第二阶段结束时间160秒
+  phase_end_seconds_3: 240                 # 第三阶段结束时间240秒
+  # 每个时间桶（如 btc-updown-5m-<unix>）绝对开始后，推迟多少秒再把成交流喂给策略/规则。
+  # 模拟下单、实盘验证、批量回放、单周期复盘均读取此项；命令行传参可覆盖。
+  post_window_start_delay_seconds: 1.0    # 后窗口开始延迟10秒
+batch_replay:
+  # 处理模式：per-cycle（逐周期独立回放，默认）| merged（合并事件流回放）
+  processing_mode: per-cycle                # 逐周期独立回放
+# =============================================================================
+# 2) 仓位与风险上限 — position, capital, exposure, daily_limits
+# =============================================================================
+position:
+  max_position_value: 85.0           # 目标总仓位价值（USDT）
+# =============================================================================
+# 3) 规则仲裁 — dynamic_priority（在分阶段优先级上的动态微调）, priorities.by_phase
+# =============================================================================
+dynamic_priority:
+  # 阶段性动态优先级调整参数（A+C联合方案 — 方案C）
+  phase_1_position_threshold: 0.65   # 第一阶段仓位 < 此值时提升加仓优先级
+  phase_1_boost: 15                  # 优先级提升幅度
+  phase_2_position_threshold: 0.40   # 第二阶段仓位 > 此值时提升减仓优先级
+  phase_2_low_position_threshold: 0.25   # 第二阶段仓位 < 此值时提升加仓优先级（与 phase_2_boost 共用幅度）
+  phase_2_boost: 15 
+  phase_3_position_threshold: 0.75   # 第三阶段仓位 < 此值时提升加仓优先级
+  phase_3_trend_boost: 25            # 趋势加仓优先级提升幅度
+  phase_3_grid_boost: 15             # 网格加仓优先级提升幅度
+  phase_3_hedge_boost: 18            # 对冲加仓优先级提升幅度
+  phase_3_take_profit_sell_deboost: 2   # 第三阶段仓位未达阈值时，止盈卖出轻度降权
+  phase_3_grid_sell_deboost: 1          # 第三阶段仓位未达阈值时，网格卖出轻度降权
+  phase_3_buy_deboost_when_full: 16     # 第三阶段仓位达到阈值后，买入规则降权幅度
+  phase_3_take_profit_sell_boost_when_full: 10  # 第三阶段仓位达到阈值后，止盈卖出提权
+  phase_3_grid_sell_boost_when_full: 7          # 第三阶段仓位达到阈值后，网格卖出提权
+# =============================================================================
+# 4) 规则使能与参数 — rule_enablement, 各策略块, execution, rule_price_feed
+# =============================================================================
+rule_enablement:
+  entries:
+    opening:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
+    hedge:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
+    grid:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
+    mean_reversion:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
+    trend:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
+  exits:
+    stop_loss:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
+    hedge:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
+    take_profit:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
+    grid:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
+    mean_reversion:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
+  last_minute:
+    last_minute:
+      enabled: true
+      phase_1: true
+      phase_2: true
+      phase_3: true
+      phase_4: true
+opening_entry:
+  enabled: true
+  window_seconds: 50             # 周期前30秒进入开仓入场逻辑
+  min_market_trades: 1           # 最小市场成交量（笔），低于此值不触发开仓入场
+  vwap_epsilon: 0.01             # 价格边界容忍度：入场价格必须优于（上涨）或劣于（下跌）vwap ± vwap_epsilon
+  range_low_fraction: 0.35       # 价格范围下边界位置：入场价格必须优于 vwap - (vwap - low) * range_low_fraction
+  min_range_width: 0.02          # 最小价格范围：入场价格必须优于 vwap - max((vwap - low) * range_low_fraction, vwap * min_range_width)
+  infer_missing_with_binary_complement: true      # 是否启用缺失数据推断：当市场成交量为0时，仍允许入场决策；通过二元互补推断价格位置（上涨或下跌）
+order_sizing:
+  # 兼容旧版键：base_order_size/min_order_size/max_order_size/volatility_order_scale
+  buy:
+    base_order_size: 6.0
+    min_order_size: 5.0
+    max_order_size: 45.0
+    volatility_order_scale: 5
+  sell:
+    min_order_size: 5.0
+    max_order_size: 45.0
+    # 仅当可卖剩余仓位本身低于最小下单量时，允许低于最小值强制平仓
+    allow_close_below_min_order_size: true
+capital:
+  max_cash_utilization: 0.90                    # 最大现金利用率0.90
+  min_cash_buffer: 1.0                          # 最小现金缓冲0.0
+exposure:
+  max_abs_exposure_value: 40.0                  # 最大绝对敞口价值40.0 与账户币种一致
+  # Phase 4（尾盘最后阶段）专用净敞口上限——方向明确时放宽加仓空间
+  # 注意：尾盘价格波动剧烈，亏损风险同步放大，建议先回测再调整此值
+  phase_4_max_abs_exposure_value: 60.0          # Phase 4（尾盘最后阶段）专用净敞口上限——方向明确时放宽加仓空间
+  hedge_trigger_value: 12.0                     # 净敞口超过12.0时开始考虑对冲单
+  hedge_scale: 0.05                             # 超额敞口的一半换算为对冲目标量
+  max_strategy_trades_per_cycle: 80             # 单个5分钟周期内策略成交不超过80次
+trend:
+  min_trend_strength: 0.5                       # 趋势强度0.5 用于确认方向 ，其中一边（up 或 down）至少占最近(trend_window)成交的 75%.
+  trend_price_edge: 0.03                        # 趋势价格边缘0.03 用于确认趋势
+  trend_scale: 0.1                              # 趋势规模0.1 用于调整下单量
+  max_trend_order_size: 80.0                    # 最大趋势下单量80.0
+  trend_window: 6                               # 趋势窗口：过去 N 秒内的市场成交（按时间过滤，非笔数）
+grid:
+  grid_low_percentile: 0.25                     # 网格低位分位数0.25 用于确认网格低位
+  grid_high_percentile: 0.75                    # 网格高位分位数0.75 用于确认网格高位
+  # 分阶段阈值（未配置时自动回退到全局 grid_low/high_percentile）
+  phase_1_low_percentile: 0.25
+  phase_1_high_percentile: 0.75
+  phase_2_low_percentile: 0.25
+  phase_2_high_percentile: 0.75
+  phase_3_low_percentile: 0.25
+  phase_3_high_percentile: 0.75
+  phase_4_low_percentile: 0.01
+  phase_4_high_percentile: 0.75
+  grid_exit_fraction: 0.20                      # 网格退出比例0.25 用于确认网格退出
+  # 周期剩余时间（秒）<= 该值时禁用网格买卖；不配置则仅受 is_last_minute 等对入场的限制
+  disable_within_seconds_before_end: 50          # 周期剩余时间（秒）<= 该值时禁用网格买卖；不配置则仅受 is_last_minute 等对入场的限制
+mean_reversion:
+  enabled: true                                # 均值回归启用
+  up_buy_deviation: 0.1                         # 上买偏离0.1 用于确认均值回归
+  down_buy_deviation: 0.1                       # 下买偏离0.1 用于确认均值回归
+  mean_reversion_sell_up_deviation: 0.2        # 上卖偏离0.2 用于确认均值回归
+  mean_reversion_sell_down_deviation: 0.2      # 下卖偏离0.2 用于确认均值回归
+  mean_reversion_sell_fraction: 0.40           # 均值回归卖出比例0.40 用于确认均值回归
+  deviation_scale: 45                           # 偏离规模45 用于调整下单量
+  # 周期剩余时间（秒）<= 该值时禁用均值回归买卖（80 即最后一分 20 秒起停止）
+  disable_within_seconds_before_end: 80         # 周期剩余时间（秒）<= 该值时禁用均值回归买卖（80 即最后一分 20 秒起停止）
+profit_taking:
+  take_profit_up_deviation: 0.2                 # 上止盈偏离0.2 用于确认止盈
+  take_profit_down_deviation: 0.2               # 下止盈偏离0.2 用于确认止盈
+  take_profit_fraction: 0.3                     # 止盈比例0.3 用于确认止盈
+stop_loss:
+  # ── 触发1：周期累计亏损熔断（全阶段统一） ───────────────────────────────────
+  # 单周期亏损 > stop_loss_cycle_loss → 对亏损仓位按 stop_loss_fraction 强制平仓
+  stop_loss_cycle_loss: 18.0       # 周期累计亏损触发额（USDT）
+  stop_loss_fraction: 0.5          # 触发1 平仓比例（50%） 用于确认止损
+  # 第四阶段以前禁止一次性全平；当减仓意图过大时，至少保留一小笔仓位给后续再评估。
+  pre_phase_4_max_exit_fraction: 0.95     # 第四阶段以前禁止一次性全平；当减仓意图过大时，至少保留一小笔仓位给后续再评估。
+  pre_phase_4_min_remaining_shares: 0.25  # 第四阶段以前禁止一次性全平；当减仓意图过大时，至少保留一小笔仓位给后续再评估。
+
+  # ── 触发2：单仓止损（按周期阶段独立配置，双条件） ────────────────────────────
+  # 条件A：当前价格 ≤ near_zero_price → 立即全平（无时间门槛）
+  # 条件B：浮亏% ≥ stop_loss_pct AND 本阶段内已过秒数 ≥ min_hold_seconds → 全平（本阶段 = 周期已过 − 当前阶段起点）
+
+  # 阶段1（0–70s）：建仓阶段，容忍最大波动，但要防近零价死亡
+  phase_1_near_zero_price: 0.06               # 条件A 绝对价格阈值
+  phase_1_stop_loss_pct: 0.15                 # 条件B 浮亏%阈值（15%）
+  phase_1_min_hold_seconds: 60                # 条件B：进入阶段1 后至少经过秒数（阶段1 起点=周期起点）
+  phase_1_stop_loss_action_fraction: 0.50     # phase 1 只部分止损，避免过早出清
+
+  # 阶段2（70–160s）：减仓阶段，提升保护力度
+  phase_2_near_zero_price: 0.06
+  phase_2_stop_loss_pct: 0.12                 # 条件B 浮亏%阈值（12%）
+  phase_2_min_hold_seconds: 0                # 条件B：进入阶段2 后至少经过秒数（跨过 phase_end_seconds_1 起算）
+  phase_2_stop_loss_action_fraction: 0.65     # phase 2 部分止损
+
+  # 阶段3（160–240s）：顺势加仓，保持一定容忍度
+  phase_3_near_zero_price: 0.06               # 条件A 绝对价格阈值
+  phase_3_stop_loss_pct: 0.12                 # 条件B 浮亏%阈值（12%）
+  phase_3_min_hold_seconds: 40                # 条件B：进入阶段3 后至少经过秒数
+  phase_3_stop_loss_action_fraction: 0.80     # phase 3 部分止损
+
+  # 阶段4（240–290s）：临近结束，更激进止损
+  phase_4_near_zero_price: 0.1               # 条件A 提高阈值（允许更早识别失败方向）
+  phase_4_stop_loss_pct: 0.08                 # 条件B 浮亏%阈值（8%，更激进）
+  phase_4_min_hold_seconds: 0                # 条件B：进入阶段4 后至少经过秒数
+  phase_4_stop_loss_action_fraction: 1.0      # phase 4 全平
+
+  # ── 触发3：高波动绝对价格止损（按周期阶段独立配置） ─────────────────────────
+  # volatility_ratio > high_vol_trigger_ratio AND 当前价格 ≤ high_vol_price_threshold → 全平
+  # 仅在触发2未触发时执行，避免对同一仓位重复止损
+
+  # 阶段1（0–70s）
+  phase_1_high_vol_trigger_ratio: 1.5         # 波动率比率触发门槛
+  phase_1_high_vol_price_threshold: 0.15      # 绝对价格阈值（价格≤此值时止损）
+  phase_1_high_vol_action_fraction: 0.50      # phase 1 部分止损
+
+  # 阶段2（70–160s）
+  phase_2_high_vol_trigger_ratio: 1.5         # 波动率比率触发门槛
+  phase_2_high_vol_price_threshold: 0.12      # 阶段2更严，价格需更低才触发
+  phase_2_high_vol_action_fraction: 0.65      # phase 2 部分止损
+
+  # 阶段3（160–240s）
+  phase_3_high_vol_trigger_ratio: 1.5         # 波动率比率触发门槛
+  phase_3_high_vol_price_threshold: 0.12      # 绝对价格阈值（价格≤此值时止损）
+  phase_3_high_vol_action_fraction: 0.80      # phase 3 部分止损
+
+  # 阶段4（240–290s）：临近结束对高波动更敏感
+  phase_4_high_vol_trigger_ratio: 1.3         # 触发门槛降低（更敏感）
+  phase_4_high_vol_price_threshold: 0.15      # 末期放宽价格阈值，快速识别失败方向
+  phase_4_high_vol_action_fraction: 1.0       # phase 4 全平
+
+  # ── 兼容 fallback（当阶段性配置缺失时使用） ─────────────────────────────────
+  stop_loss_pct: 0.12              # 全局止损%兜底（替代旧值 0.02）
+  high_vol_stop_loss_pct: 0.01    # 旧版高波动%阈值（保留供其他引用处使用）
+last_minute:
+  # 与文档第四阶段/第六节一致：方向 = 份额≥另一侧×ratio，否则用市价较高侧；与 tail 目标仓位的浮盈比例调整配合
+  last_minute_min_confidence: 0.85           # 略低于 0.9 可减少误拒；仍高于一般入场
+  tail_profit_scale: 0.35                    # 尾盘利润比例0.35
+  tail_volatility_scale: 14                  # 尾盘波动率比例14
+  max_tail_exposure: 25.0                    # 尾盘最大敞口25.0
+  preferred_leg_min_ratio: 1.2                # 优势侧份额 ≥ 另一侧×此值即定方向；否则按市价决胜
+execution:
+  fee_rate: 0.002                               # 手续费率，默认0.2%
+  slippage_bps: 5                               # 滑点bps，默认5bps
+  min_seconds_between_orders: 2.0               # 两次下单至少间隔2秒（按UP/DOWN方向独立计时）
+  max_same_direction_buy_fills_per_second: 0    # 同1秒内同方向买入成交次数上限（UP/DOWN分别统计），为0，不限制
+  min_same_outcome_price_move_ratio: 0.007      # 同一方向连续下单的价格必须移动至少0.5%，避免超频下单
+
+# 【新增】每日风险管理参数
+daily_limits:
+  daily_loss_limit: 50.0          # 单日亏损限制：$50
+  daily_loss_pause_trading: true  # 达到每日限额时暂停交易
+  warning_threshold_ratio: 0.7    # 达到限额70%时警告
+  market_limits:
+    # 优先使用 orderbook.min_order_size 作为市场硬约束；无该字段时回退 fallback
+    use_orderbook_min_order_size: true     # 使用盘口最小下单量约束，默认true
+    fallback_min_order_size: 5.0           # 当盘口未返回最小下单量时，使用5手作为兜底值
+    # 卖单也按市场最小下单量约束（建议保持 true，避免实盘拒单）
+    enforce_sell_min_order_size: true      # 卖单也按市场最小下单量约束，默认true
+# 各买入/卖出规则单独喂价：间隔内沿用上次刷新时的「最近价」；0 表示每 tick 用最新价（与旧行为一致）
+rule_price_feed:
+  last_minute:  2                           # 尾盘规则喂价间隔2秒
+  entries:
+    opening: 2                              # 入场opening规则价格缓存间隔2秒
+    hedge: 2                                # 入场hedge规则价格缓存间隔2秒
+    grid: 2                                # 入场grid规则价格缓存间隔2秒
+    mean_reversion: 2                       # 入场mean_reversion规则价格缓存间隔2秒
+    trend: 2                                # 入场trend规则价格缓存间隔2秒
+  exits:
+    stop_loss: 2                            # 退出stop_loss规则价格缓存间隔2秒
+    hedge: 2                                # 退出hedge规则价格缓存间隔2秒
+    take_profit: 2                          # 退出take_profit规则价格缓存间隔2秒
+    grid: 2                                 # 退出grid规则价格缓存间隔2秒
+    mean_reversion: 2                       # 退出mean_reversion规则价格缓存间隔2秒
+priorities:
+  # 各周期阶段独立基础优先级（数值越小越优先）。可按阶段改写；未单独列出的规则可后续在对应 phase_N 下补键。
+  by_phase:
+    phase_1:
+      risk: 10
+      last_minute: 20
+      stop_loss: 40
+      take_profit: 40
+      hedge: 50
+      opening: 52
+      mean_reversion: 51
+      grid: 70
+      trend: 80
+    phase_2:
+      risk: 10
+      last_minute: 20
+      take_profit: 40
+      stop_loss: 40
+      hedge: 50
+      opening: 52
+      grid: 60
+      mean_reversion: 70
+      trend: 80
+    phase_3:
+      risk: 10
+      last_minute: 20
+      stop_loss: 40
+      hedge: 38
+      take_profit: 44
+      opening: 52
+      grid: 58
+      mean_reversion: 70
+      trend: 42
+    phase_4:
+      risk: 10
+      last_minute: 20
+      stop_loss: 30
+      opening: 52
+      trend: 50
+      take_profit: 55
+      grid: 60
+      hedge: 70
+      mean_reversion: 80

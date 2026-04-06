@@ -5,10 +5,18 @@ from pathlib import Path
 import pandas as pd
 
 from polynet_ai.reporting.dashboard import (
+    _sanitize_json_for_html_script,
     generate_dashboard_bundle,
     generate_dashboard_from_directory,
     refresh_dashboard_html_shell,
 )
+
+
+def test_sanitize_json_for_html_script_avoids_closing_tag() -> None:
+    raw = '{"note":"x</script>y"}'
+    out = _sanitize_json_for_html_script(raw)
+    assert "</script>" not in out
+    assert r"<\/script" in out
 
 
 def build_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -48,7 +56,7 @@ def build_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFra
     snapshots_df = pd.DataFrame(
         [
             {"timestamp": "2026-01-01 00:00:01", "market_id": "BTC", "cycle_id": "c1", "net_position": 3.0, "cycle_net_profit": 1.0, "account_cash": 1001.0, "up_last_price": 0.52, "down_last_price": 0.48},
-            {"timestamp": "2026-01-01 00:00:02", "market_id": "BTC", "cycle_id": "c2", "net_position": 1.0, "cycle_net_profit": 12.5, "account_cash": 1012.5, "up_last_price": 0.55, "down_last_price": 0.45},
+            {"timestamp": "2026-01-01 00:00:02", "market_id": "BTC", "cycle_id": "c2", "net_position": 1.0, "cycle_net_profit": 12.5, "account_cash": 1012.5, "up_last_price": 0.55, "down_last_price": 0.45, "up_bid1_price": 0.54, "up_bid1_size": 18.0, "up_ask1_price": 0.55, "up_ask1_size": 9.0, "down_bid1_price": 0.44, "down_bid1_size": 15.0, "down_ask1_price": 0.45, "down_ask1_size": 7.0, "orderbook_snapshot_at": "2026-01-01T00:00:02", "orderbook_snapshot_age_ms": 0.0},
         ]
     )
     return metrics_df, cycles_df, decisions_df, snapshots_df
@@ -71,15 +79,16 @@ def test_generate_dashboard_bundle_writes_expected_files(tmp_path: Path) -> None
     html_text = artifacts.html_path.read_text(encoding="utf-8")
     assert "Demo Dashboard" in html_text
     assert "dashboard_state.js" in html_text
-    assert "config-file-input" in html_text
+    assert "config-file-select" in html_text
     assert "/api/configs" in html_text
-    assert "cycle（周期）" in html_text
-    assert "capital（资金）" in html_text
-    assert "priorities（优先级）" in html_text
+    assert "cycle / batch_replay（生命周期与回放）" in html_text
+    assert "position / capital / exposure（仓位与敞口）" in html_text
+    assert "priorities（扁平回退，可选）" in html_text
     assert "readConfigFormWithValidation" in html_text
     assert "config-field-error" in html_text
     assert "config-invalid" in html_text
     assert "Up / Down 实时价格曲线" in html_text
+    assert "最近盘口快照" in html_text
     assert "运行控制台" in html_text
     assert "launcher-profiles" in html_text
     assert "initializeRunConsole()" in html_text
@@ -95,6 +104,7 @@ def test_generate_dashboard_bundle_writes_expected_files(tmp_path: Path) -> None
     assert "<select class=\"config-select\"" in html_text
     assert "window.__POLYNET_DASHBOARD_STATE__" in artifacts.state_script_path.read_text(encoding="utf-8")
     assert "核心指标" in artifacts.markdown_path.read_text(encoding="utf-8")
+    assert "最近盘口快照" in artifacts.markdown_path.read_text(encoding="utf-8")
     summary_text = artifacts.summary_csv_path.read_text(encoding="utf-8-sig")
     assert "alert_count" in summary_text
 

@@ -90,13 +90,12 @@ market_regime = "trend" if (trend_strength >= 0.35 OR abs(price_move) > 0.5 * vo
 
 **触发条件**：
 ```
-is_range_mode = (trend_strength < min_trend_strength(0.35)) AND 
-                (abs(net_position) <= max_grid_net_position)
+is_range_mode = (trend_strength < min_trend_strength(0.35))
 ```
 
 **含义**：
 - 趋势强度不足
-- 净持仓不过大，仍有对冲与加仓空间
+- 市场进入震荡模式（不再用网格净仓位做过滤）
 
 ### 均价偏离
 
@@ -353,7 +352,6 @@ size = base_order_size + excess * hedge_scale
 - `not rule_disabled_in_cycle_tail(config)`（可通过配置禁用尾盘）
 - `not features.is_last_minute`
 - `features.market_regime == "range"`
-- `abs(net_position) <= max_grid_net_position`（默认20.0）
 - 价格在低位或高位：
   - `price_percentile <= grid_low_percentile`（默认0.25）→ 买入Up
   - `price_percentile >= grid_high_percentile`（默认0.75）→ 买入Down
@@ -938,7 +936,6 @@ trend:
 exposure:
   hedge_trigger_value: 50.0
   hedge_scale: 0.15
-  max_grid_net_position: 20.0
   max_abs_exposure_value: 200.0
 
 # 网格规则

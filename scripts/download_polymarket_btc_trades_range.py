@@ -42,6 +42,7 @@ from polynet_ai.adapters.polymarket_live import (
     apply_proxy_env_from_dict,
     fetch_market_spec,
     load_api_env,
+    resolve_default_api_config_env,
 )
 from polynet_ai.reporting.excel_export import get_version_tag
 
@@ -486,7 +487,7 @@ def load_resume_state(progress_path: Path, csv_path: Path, resume: bool) -> tupl
 
 def main() -> int:
     args = parse_args()
-    api_env = ROOT.parent / "APIs" / "ApiConfig.env"
+    api_env = Path(resolve_default_api_config_env(ROOT))
     if api_env.exists():
         apply_proxy_env_from_dict(load_api_env(api_env))
 

@@ -4,20 +4,64 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-PYTHON_BIN="${PYTHON:-python}"
+export PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}"
+
+PROJECTS_VENV_PY="$ROOT_DIR/../../.projects-venv/Scripts/python.exe"
+if [[ -n "${PYTHON:-}" ]]; then
+  PYTHON_BIN="$PYTHON"
+elif [[ -f "$PROJECTS_VENV_PY" ]]; then
+  # 在 Windows + bash 下，优先使用 .projects-venv，避免命中 WindowsApps 的 python shim。
+  PYTHON_BIN="$PROJECTS_VENV_PY"
+elif [[ -n "${VIRTUAL_ENV:-}" && -f "${VIRTUAL_ENV}/Scripts/python.exe" ]]; then
+  PYTHON_BIN="${VIRTUAL_ENV}/Scripts/python.exe"
+else
+  PYTHON_BIN="python"
+fi
 DEFAULT_OUTPUT_DIR="${RECORD_OUTPUT_DIR:-artifacts/live/record_job}"
 DEFAULT_SLUG_PREFIX="${RECORD_SLUG_PREFIX:-btc-updown-5m-}"
-DEFAULT_CONFIG="${RECORD_CONFIG:-configs/strategy.yaml}"
-DEFAULT_OVERRIDES="${RECORD_OVERRIDES:-artifacts/trial_022/overrides.json}"
+if [[ -z "${RECORD_CONFIG:-}" ]]; then
+  if [[ -f "configs/strategy_update.yaml" ]]; then
+    DEFAULT_CONFIG="configs/strategy_update.yaml"
+  else
+    DEFAULT_CONFIG="configs/strategy.yaml"
+  fi
+else
+  DEFAULT_CONFIG="$RECORD_CONFIG"
+fi
+DEFAULT_OVERRIDES="${RECORD_OVERRIDES:-}"
 DEFAULT_STARTING_CASH="${RECORD_STARTING_CASH:-100}"
 DEFAULT_PER_CYCLE_CASH="${RECORD_PER_CYCLE_CASH:-}"
-DEFAULT_ENV_FILE="${RECORD_ENV_FILE:-../APIs/ApiConfig.env}"
+DEFAULT_RECORD_ORDERBOOK_TOP="${RECORD_RECORD_ORDERBOOK_TOP:-1}"
+DEFAULT_ORDERBOOK_REFRESH_SECONDS="${RECORD_ORDERBOOK_REFRESH_SECONDS:-0.5}"
+# ApiConfig.env：未设置 RECORD_ENV_FILE 时按顺序选用第一个存在的路径（与 resolve_default_api_config_env 一致）
+if [[ -n "${RECORD_ENV_FILE:-}" ]]; then
+  DEFAULT_ENV_FILE="$RECORD_ENV_FILE"
+else
+  DEFAULT_ENV_FILE=""
+  for _env_cand in \
+    "$ROOT_DIR/../../APIs/ApiConfig.env" \
+    "$ROOT_DIR/../APIs/ApiConfig.env" \
+    "$ROOT_DIR/APIs/ApiConfig.env"; do
+    if [[ -f "$_env_cand" ]]; then
+      DEFAULT_ENV_FILE="$_env_cand"
+      break
+    fi
+  done
+  if [[ -z "${DEFAULT_ENV_FILE}" ]]; then
+    DEFAULT_ENV_FILE="$ROOT_DIR/../../APIs/ApiConfig.env"
+  fi
+fi
 DEFAULT_ACCOUNT_INDEX="${RECORD_ACCOUNT_INDEX:-2}"
 DEFAULT_START_BUFFER_SECONDS="${RECORD_START_BUFFER_SECONDS:-2}"
 OPEN_EDGE_ON_DASHBOARD="${RECORD_OPEN_DASHBOARD_EDGE:-1}"
 DEFAULT_BATCH_FILE="${RECORD_BATCH_FILE:-configs/batch.conf}"
 BATCH_REGISTRY="${RECORD_BATCH_REGISTRY:-artifacts/live/.batch_registry}"
 BATCH_BASE_DIR="${RECORD_BATCH_BASE_DIR:-artifacts/live/batch_jobs}"
+DEFAULT_INCLUDE_PERFORMANCE_REPORT="${RECORD_INCLUDE_PERFORMANCE_REPORT:-1}"
+DEFAULT_INCLUDE_TRADE_PROCESS="${RECORD_INCLUDE_TRADE_PROCESS:-0}"
+DEFAULT_DASHBOARD_REFRESH_EVERY_CYCLES="${RECORD_DASHBOARD_REFRESH_EVERY_CYCLES:-6}"
+DEFAULT_SIGNATURE_TYPE="${RECORD_SIGNATURE_TYPE:-2}"
+PRM_TAIL_LINES="20"
 
 print_help() {
   printf "%s\n" \
@@ -26,16 +70,21 @@ print_help() {
     "  ./record.sh ds<N>            dashboard + 模拟下单回放 N 个 5m 周期" \
     "  ./record.sh dm<N>            dashboard + 实盘行情验证 N 个 5m 周期（paper）" \
     "  ./record.sh dmb<N>           dashboard + 实盘行情验证 N 个 5m 周期（paper，后台）" \
-    "  ./record.sh pm[LINES]        查看后台实盘验证状态与最近日志（默认 20 行）" \
+    "  ./record.sh cre<N>|cre       实盘真单：单进程 --max-cycles N（默认 N=1），连续多窗同 dm 的 robot 连续感" \
+    "  ./record.sh creb<N>|creb     同上后台（PID: market_real.pid）" \
+    "  ./record.sh dcre<N>|dcre     dashboard + 实盘真单（--run-subdir current）" \
+    "  ./record.sh pm[LINES]        查看后台实盘验证（paper）状态与最近日志（默认 20 行）" \
+    "  ./record.sh prm[LINES]       查看后台实盘真单（creb）状态与最近日志" \
     "  ./record.sh chart             打开 artifacts/charts/tracker_position_compare.html" \
-    "  ./record.sh excel-v5          生成 data/processed/..._with_accumulated_shares_v5.xlsx" \
+    "  ./record.sh excel-v5          生成 data/processed/..._with_accumulated_shares_v5.xlsx（若正式文件被占用则保留 tmp 并生成差异清单）" \
+    "  ./record.sh excel-v5-finalize 正式文件解锁后，把 tmp 结果落盘到正式文件并刷新差异清单" \
     "" \
     "  ./record.sh s<N>              后台开始抓未来 N 个完整 5m 周期" \
     "  ./record.sh r<N>              前台抓取并回放 N 个周期（直到生成业绩报告）" \
     "  ./record.sh rb<N>             后台抓取并回放 N 个周期（直到生成业绩报告）" \
     "  ./record.sh p                查看后台状态和进度" \
-    "  ./record.sh x                一键停止后台任务（含后台实盘验证）" \
-    "  ./record.sh mstart [-b FILE] 后台批量启动多个任务（replay模拟下单/live实盘验证，默认读 configs/batch.conf）" \
+    "  ./record.sh x                一键停止后台任务（含后台实盘验证 paper 与 creb 真单）" \
+    "  ./record.sh mstart [-b FILE] 后台批量（replay / live paper / real 真单，默认 configs/batch.conf）" \
     "  ./record.sh ms[LINES]        查看所有批量任务状态（可附 LINES 显示最近 N 行日志）" \
     "  ./record.sh mstop            停止所有批量任务并清除注册表" \
     "" \
@@ -54,7 +103,16 @@ print_help() {
     "  RECORD_DASHBOARD_HOST=0.0.0.0  dashboard 监听地址（云服务器可设 0.0.0.0）" \
     "  RECORD_DASHBOARD_PORT=8765     dashboard 监听端口" \
     "  RECORD_PER_CYCLE_CASH=100      dm/dmb 默认每周期固定投注资金" \
+    "  RECORD_RECORD_ORDERBOOK_TOP=1  实盘验证/真单默认记录买一卖一快照（1 开启，0 关闭）" \
+    "  RECORD_ORDERBOOK_REFRESH_SECONDS=0.5  买一卖一快照最小刷新间隔（秒）" \
     "  RECORD_OUTPUT_DIR=...          批量任务默认数据流根目录（会拼接 /record_job_market）" \
+    "  RECORD_INCLUDE_PERFORMANCE_REPORT=0  mstart replay 是否生成绩效 Excel（sim_batch_replay_performance_report）" \
+    "  RECORD_INCLUDE_TRADE_PROCESS=0       mstart replay 是否生成交易过程 Excel（batch_replay_trade_process_zh）" \
+    "  RECORD_DASHBOARD_REFRESH_EVERY_CYCLES=6  mstart replay 每 N 个周期刷新一次中途 dashboard（默认 6）" \
+    "  RECORD_REAL_CYCLE_DIR=...    cre/creb/dcre 的 --output-dir（默认 \$OUTPUT_DIR/polymarket_cycle_review）" \
+    "  RECORD_SIGNATURE_TYPE=2      Polymarket CLOB signature type（默认 2）" \
+    "  RECORD_ACCOUNT_INDEX=2       ApiConfig 多账户后缀 N（默认 2：读取 PURSE_PRIVATE_KEY_2、POLY_DERIVE_API_*_2 等）" \
+    "  RECORD_ENV_FILE=PATH         显式指定 ApiConfig.env；未设置时自动选 ../../APIs（与 PolyMkt 同级的 APIs）、../APIs、./APIs 中第一个存在的文件" \
     "" \
     "Linux 云服务器推荐：" \
     "  RECORD_DASHBOARD_HOST=0.0.0.0 ./record.sh dmb10" \
@@ -62,11 +120,18 @@ print_help() {
 }
 
 COMMAND="${1:-h}"
+RAW_FIRST_ARG="${1:-}"
 if [[ $# -gt 0 ]]; then
   shift
 fi
 
+EXPLICIT_CRE_CYCLES=0
+if [[ "$RAW_FIRST_ARG" =~ ^dcre[0-9]+$ || "$RAW_FIRST_ARG" =~ ^creb[0-9]+$ || "$RAW_FIRST_ARG" =~ ^cre[0-9]+$ ]]; then
+  EXPLICIT_CRE_CYCLES=1
+fi
+
 CYCLES=""
+CRE_CYCLE_ARG_SET="false"
 OUTPUT_DIR="$DEFAULT_OUTPUT_DIR"
 SLUG_PREFIX="$DEFAULT_SLUG_PREFIX"
 CONFIG_PATH="$DEFAULT_CONFIG"
@@ -100,6 +165,18 @@ elif [[ "$COMMAND" =~ ^(dm|dashboard-market)([0-9]+)$ ]]; then
 elif [[ "$COMMAND" =~ ^pm([0-9]+)$ ]]; then
   COMMAND="pm"
   PM_TAIL_LINES="${BASH_REMATCH[1]}"
+elif [[ "$COMMAND" =~ ^prm([0-9]+)$ ]]; then
+  COMMAND="prm"
+  PRM_TAIL_LINES="${BASH_REMATCH[1]}"
+elif [[ "$COMMAND" =~ ^dcre([0-9]+)$ ]]; then
+  COMMAND="dcre"
+  CYCLES="${BASH_REMATCH[1]}"
+elif [[ "$COMMAND" =~ ^creb([0-9]+)$ ]]; then
+  COMMAND="creb"
+  CYCLES="${BASH_REMATCH[1]}"
+elif [[ "$COMMAND" =~ ^cre([0-9]+)$ ]]; then
+  COMMAND="cre"
+  CYCLES="${BASH_REMATCH[1]}"
 elif [[ "$COMMAND" =~ ^ms([0-9]+)$ ]]; then
   COMMAND="ms"
   MS_TAIL_LINES="${BASH_REMATCH[1]}"
@@ -110,8 +187,11 @@ while [[ $# -gt 0 ]]; do
     -[0-9]*)
       if [[ "$COMMAND" == "pm" ]]; then
         PM_TAIL_LINES="${1#-}"
+      elif [[ "$COMMAND" == "prm" ]]; then
+        PRM_TAIL_LINES="${1#-}"
       else
         CYCLES="${1#-}"
+        CRE_CYCLE_ARG_SET="true"
       fi
       shift
       ;;
@@ -162,6 +242,40 @@ if [[ -z "$CYCLES" ]]; then
   CYCLES="10"
 fi
 
+if [[ "$COMMAND" == "cre" || "$COMMAND" == "creb" || "$COMMAND" == "dcre" ]]; then
+  if [[ "$CRE_CYCLE_ARG_SET" != "true" && "$EXPLICIT_CRE_CYCLES" != "1" ]]; then
+    CYCLES="1"
+  fi
+fi
+
+poly_build_cycle_review_real_args() {
+  POLY_CRE_ARGS=(
+    scripts/run_polymarket_cycle_review.py
+    --real-trading
+    --max-cycles "$CYCLES"
+    --config "$CONFIG_PATH"
+    --output-dir "$REAL_CYCLE_OUT"
+    --slug-prefix "$SLUG_PREFIX"
+    --starting-cash "$STARTING_CASH"
+    --env-file "$DEFAULT_ENV_FILE"
+    --account-index "$DEFAULT_ACCOUNT_INDEX"
+    --signature-type "$DEFAULT_SIGNATURE_TYPE"
+    --dashboard-refresh-seconds 1
+  )
+  if [[ -n "$OVERRIDES_PATH" ]]; then
+    POLY_CRE_ARGS+=(--overrides "$OVERRIDES_PATH")
+  fi
+  if [[ "$PER_CYCLE_CASH_SET" == "true" && -n "$PER_CYCLE_CASH" ]]; then
+    POLY_CRE_ARGS+=(--capital-reset-mode fixed --per-cycle-cash "$PER_CYCLE_CASH")
+  fi
+  if [[ "$DEFAULT_RECORD_ORDERBOOK_TOP" == "1" ]]; then
+    POLY_CRE_ARGS+=(--record-orderbook-top --orderbook-refresh-seconds "$DEFAULT_ORDERBOOK_REFRESH_SECONDS")
+  fi
+  if [[ -n "${POLY_CRE_RUN_SUBDIR:-}" ]]; then
+    POLY_CRE_ARGS+=(--run-subdir "$POLY_CRE_RUN_SUBDIR")
+  fi
+}
+
 run_manage() {
   "$PYTHON_BIN" scripts/manage_capture_pipeline.py "$@"
 }
@@ -191,6 +305,24 @@ trim_trailing_cr() {
   printf '%s' "${s//$'\r'/}"
 }
 
+read_progress_from_file() {
+  local progress_file="$1"
+  if [[ ! -f "$progress_file" ]]; then
+    return 1
+  fi
+  local progress_raw
+  progress_raw="$(tr -d '\r' < "$progress_file" 2>/dev/null | tr -d '\n')"
+  if [[ ! "$progress_raw" =~ ^[[:space:]]*[0-9]+[[:space:]]*,[[:space:]]*[0-9]+[[:space:]]*$ ]]; then
+    return 1
+  fi
+  local completed="${progress_raw%%,*}"
+  local total="${progress_raw##*,}"
+  completed="$(printf '%s' "$completed" | tr -d '[:space:]')"
+  total="$(printf '%s' "$total" | tr -d '[:space:]')"
+  printf '%s,%s\n' "$completed" "$total"
+  return 0
+}
+
 normalize_path_separators() {
   local s="$1"
   # 兼容 Windows 风格路径，统一使用 / 便于在 Linux 上判定目录存在性。
@@ -211,6 +343,8 @@ is_batch_job_process_alive() {
   local expected_script="run_recorded_live_paper.py"
   if [[ "$job_type" == "live" ]]; then
     expected_script="run_polymarket_live_paper.py"
+  elif [[ "$job_type" == "real" ]]; then
+    expected_script="run_polymarket_cycle_review.py"
   fi
   local cmdline
   cmdline="$(ps -p "$pid" -o args= 2>/dev/null | head -n 1 || true)"
@@ -417,6 +551,9 @@ except Exception:
     if [[ "$PER_CYCLE_CASH_SET" == "true" && -n "$DM_PER_CYCLE_CASH" ]]; then
       DM_ARGS+=(--per-cycle-cash "$DM_PER_CYCLE_CASH")
     fi
+    if [[ "$DEFAULT_RECORD_ORDERBOOK_TOP" == "1" ]]; then
+      DM_ARGS+=(--record-orderbook-top --orderbook-refresh-seconds "$DEFAULT_ORDERBOOK_REFRESH_SECONDS")
+    fi
 
     "$PYTHON_BIN" scripts/run_polymarket_live_paper.py "${DM_ARGS[@]}"
     ;;
@@ -456,7 +593,7 @@ except Exception:
       rm -f "$MARKET_PID_FILE"
     fi
 
-    nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_polymarket_live_paper.py --robot-mode --slug-prefix "$2" --max-cycles "$3" --config "$4" --output-dir "$5" --record-events-dir "$6" --dashboard-refresh-seconds 1 --starting-cash "$7" --env-file "$8" --account-index "$9"); if [[ -n "${10}" ]]; then cmd+=(--per-cycle-cash "${10}"); fi; exec "${cmd[@]}"' \
+    nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_polymarket_live_paper.py --robot-mode --slug-prefix "$2" --max-cycles "$3" --config "$4" --output-dir "$5" --record-events-dir "$6" --dashboard-refresh-seconds 1 --starting-cash "$7" --env-file "$8" --account-index "$9"); if [[ -n "${10}" ]]; then cmd+=(--per-cycle-cash "${10}"); fi; if [[ "${11}" == "1" ]]; then cmd+=(--record-orderbook-top --orderbook-refresh-seconds "${12}"); fi; exec "${cmd[@]}"' \
       "$MARKET_PID_FILE" \
       "$PYTHON_BIN" \
       "$SLUG_PREFIX" \
@@ -468,6 +605,8 @@ except Exception:
       "$DEFAULT_ENV_FILE" \
       "$DEFAULT_ACCOUNT_INDEX" \
       "$DM_PER_CYCLE_CASH" \
+      "$DEFAULT_RECORD_ORDERBOOK_TOP" \
+      "$DEFAULT_ORDERBOOK_REFRESH_SECONDS" \
       > "$MARKET_LOG" 2>&1 &
     disown 2>/dev/null || true
 
@@ -540,6 +679,97 @@ except Exception:
       tail -n "$PM_TAIL_LINES" "$DASHBOARD_LOG" || true
     fi
     ;;
+  prm|real-cycle-real-status)
+    MARKET_REAL_PID_FILE="$OUTPUT_DIR/market_real.pid"
+    MARKET_REAL_LOG="$OUTPUT_DIR/market_real_cycle.log"
+    DASHBOARD_HOST="${RECORD_DASHBOARD_HOST:-127.0.0.1}"
+    DASHBOARD_PORT="${RECORD_DASHBOARD_PORT:-8765}"
+    REAL_CYCLE_OUT="${RECORD_REAL_CYCLE_DIR:-$OUTPUT_DIR/polymarket_cycle_review}"
+    DASHBOARD_DIR="$REAL_CYCLE_OUT/account_${DEFAULT_ACCOUNT_INDEX}/current"
+
+    echo "## 后台实盘真单（creb / dcre 共用 current 目录时）"
+    echo "- 输出根目录: $REAL_CYCLE_OUT"
+    echo "- 固定盯盘子目录: $DASHBOARD_DIR（需使用 dcre 或手动 --run-subdir current）"
+
+    if [[ -f "$MARKET_REAL_PID_FILE" ]]; then
+      MARKET_R_PID=$(cat "$MARKET_REAL_PID_FILE" 2>/dev/null | tr -d '[:space:]')
+      if [[ -n "$MARKET_R_PID" ]] && kill -0 "$MARKET_R_PID" 2>/dev/null; then
+        echo "- creb 后台任务: 运行中 (pid=$MARKET_R_PID)"
+      else
+        echo "- creb 后台任务: 未运行"
+      fi
+    else
+      echo "- creb 后台任务: 未运行"
+    fi
+
+    if [[ -f "$MARKET_REAL_LOG" ]]; then
+      echo "- 真单后台日志: $MARKET_REAL_LOG"
+    fi
+
+    if [[ -f "$MARKET_REAL_LOG" ]]; then
+      echo ""
+      echo "## 实盘真单最近日志 (tail ${PRM_TAIL_LINES})"
+      tail -n "$PRM_TAIL_LINES" "$MARKET_REAL_LOG" || true
+    fi
+    ;;
+  cre)
+    REAL_CYCLE_OUT="${RECORD_REAL_CYCLE_DIR:-$OUTPUT_DIR/polymarket_cycle_review}"
+    unset POLY_CRE_RUN_SUBDIR 2>/dev/null || true
+    poly_build_cycle_review_real_args
+    echo "[cre] 实盘真单（Polymarket CLOB）单进程 --max-cycles=${CYCLES}；每窗仍等待 UTC 桶切换。"
+    echo "[cre] --output-dir=$REAL_CYCLE_OUT  账号 account-index=$DEFAULT_ACCOUNT_INDEX  env=$DEFAULT_ENV_FILE"
+    "$PYTHON_BIN" "${POLY_CRE_ARGS[@]}"
+    ;;
+  creb)
+    REAL_CYCLE_OUT="${RECORD_REAL_CYCLE_DIR:-$OUTPUT_DIR/polymarket_cycle_review}"
+    unset POLY_CRE_RUN_SUBDIR 2>/dev/null || true
+    poly_build_cycle_review_real_args
+    MARKET_REAL_PID_FILE="$OUTPUT_DIR/market_real.pid"
+    MARKET_REAL_LOG="$OUTPUT_DIR/market_real_cycle.log"
+    if [[ -f "$MARKET_REAL_PID_FILE" ]]; then
+      OLD_MR_PID=$(cat "$MARKET_REAL_PID_FILE" 2>/dev/null | tr -d '[:space:]')
+      if [[ -n "$OLD_MR_PID" ]] && kill -0 "$OLD_MR_PID" 2>/dev/null; then
+        echo "检测到已有后台实盘真单任务 (pid=$OLD_MR_PID)，请先执行 ./record.sh x 或手动停止。"
+        exit 1
+      fi
+      rm -f "$MARKET_REAL_PID_FILE"
+    fi
+    (
+      set -euo pipefail
+      cd "$ROOT_DIR"
+      "$PYTHON_BIN" "${POLY_CRE_ARGS[@]}"
+    ) > "$MARKET_REAL_LOG" 2>&1 &
+    echo $! > "$MARKET_REAL_PID_FILE"
+    echo "[creb] 已后台启动（单进程 max-cycles=${CYCLES}）；pid=$(cat "$MARKET_REAL_PID_FILE" 2>/dev/null)"
+    echo "[creb] 日志: $MARKET_REAL_LOG"
+    ;;
+  dcre)
+    REAL_CYCLE_OUT="${RECORD_REAL_CYCLE_DIR:-$OUTPUT_DIR/polymarket_cycle_review}"
+    POLY_CRE_RUN_SUBDIR="current"
+    export POLY_CRE_RUN_SUBDIR
+    DASHBOARD_DIR="$REAL_CYCLE_OUT/account_${DEFAULT_ACCOUNT_INDEX}/current"
+    mkdir -p "$DASHBOARD_DIR"
+    "$PYTHON_BIN" scripts/run_dashboard_report.py --html-only --output-dir "$DASHBOARD_DIR" --title "PolyNet AI Real Cycle (live)"
+
+    DASHBOARD_LOG="$DASHBOARD_DIR/dashboard_console.log"
+    DASHBOARD_HOST="${RECORD_DASHBOARD_HOST:-127.0.0.1}"
+    DASHBOARD_PORT="${RECORD_DASHBOARD_PORT:-8765}"
+    DASHBOARD_URL="http://$DASHBOARD_HOST:$DASHBOARD_PORT/dashboard.html"
+    DASHBOARD_PID_FILE="$OUTPUT_DIR/dashboard_console.pid"
+    DASHBOARD_ALIVE="0"
+    if "$PYTHON_BIN" -c "import urllib.request; urllib.request.urlopen('$DASHBOARD_URL', timeout=1).read(1)" >/dev/null 2>&1; then
+      DASHBOARD_ALIVE="1"
+    fi
+    if [[ "$DASHBOARD_ALIVE" != "1" ]]; then
+      nohup "$PYTHON_BIN" scripts/run_dashboard_console.py --dashboard-dir "$DASHBOARD_DIR" --host "$DASHBOARD_HOST" --port "$DASHBOARD_PORT" --pid-file "$DASHBOARD_PID_FILE" > "$DASHBOARD_LOG" 2>&1 &
+      disown 2>/dev/null || true
+    fi
+
+    poly_build_cycle_review_real_args
+    echo "[dcre] Dashboard: $DASHBOARD_URL（目录 $DASHBOARD_DIR ，--run-subdir current）"
+    echo "[dcre] 实盘真单单进程 max-cycles=${CYCLES}；账号 account-index=$DEFAULT_ACCOUNT_INDEX"
+    "$PYTHON_BIN" "${POLY_CRE_ARGS[@]}"
+    ;;
   chart)
     DASHBOARD_CHART_PATH="artifacts/charts/tracker_position_compare.html"
     if [[ ! -f "$DASHBOARD_CHART_PATH" ]]; then
@@ -549,11 +779,70 @@ except Exception:
     ;;
   excel-v5)
     OUT_XLSX="data/processed/polymarket_tracker_collection_with_accumulated_shares_v5.xlsx"
+    TMP_XLSX="${OUT_XLSX%.xlsx}_tmp_regen.xlsx"
+    OLD_SNAPSHOT_XLSX="${OUT_XLSX%.xlsx}_old_snapshot.xlsx"
+    DIFF_MD="${OUT_XLSX%.xlsx}_old_vs_new_diff.md"
     mkdir -p "data/processed"
     "$PYTHON_BIN" analyze_polymarket_tracker.py \
       --input data/raw/polymarket_tracker_collection.xlsx \
-      --output "$OUT_XLSX"
-    "$PYTHON_BIN" scripts/_update_floating_pnl_columns_in_xlsx.py --processed-v5 "$OUT_XLSX"
+      --output "$TMP_XLSX" \
+      --position-value-denominator 1000
+    "$PYTHON_BIN" scripts/_update_floating_pnl_columns_in_xlsx.py --processed-v5 "$TMP_XLSX"
+
+    OLD_COMPARE_XLSX=""
+    if [[ -f "$OUT_XLSX" ]]; then
+      if cp -f "$OUT_XLSX" "$OLD_SNAPSHOT_XLSX" 2>/dev/null; then
+        OLD_COMPARE_XLSX="$OLD_SNAPSHOT_XLSX"
+      else
+        OLD_COMPARE_XLSX="$OUT_XLSX"
+      fi
+      "$PYTHON_BIN" scripts/compare_tracker_excel_versions.py \
+        --old "$OLD_COMPARE_XLSX" \
+        --new "$TMP_XLSX" \
+        --output "$DIFF_MD"
+    fi
+
+    if mv -f "$TMP_XLSX" "$OUT_XLSX"; then
+      echo "[excel-v5] 已更新正式文件: $OUT_XLSX"
+      if [[ -f "$DIFF_MD" ]]; then
+        echo "[excel-v5] 旧文件 vs 新文件差异清单: $DIFF_MD"
+      fi
+    else
+      echo "[excel-v5] 正式文件被占用，已保留新文件: $TMP_XLSX"
+      if [[ -f "$DIFF_MD" ]]; then
+        echo "[excel-v5] 旧文件 vs 新文件差异清单: $DIFF_MD"
+      fi
+      echo "[excel-v5] 关闭占用后执行: ./record.sh excel-v5-finalize"
+    fi
+    ;;
+  excel-v5-finalize)
+    OUT_XLSX="data/processed/polymarket_tracker_collection_with_accumulated_shares_v5.xlsx"
+    TMP_XLSX="${OUT_XLSX%.xlsx}_tmp_regen.xlsx"
+    OLD_SNAPSHOT_XLSX="${OUT_XLSX%.xlsx}_old_snapshot.xlsx"
+    DIFF_MD="${OUT_XLSX%.xlsx}_old_vs_new_diff.md"
+    if [[ ! -f "$TMP_XLSX" ]]; then
+      echo "错误: 未找到待落盘的新文件: $TMP_XLSX" >&2
+      exit 1
+    fi
+
+    OLD_COMPARE_XLSX=""
+    if [[ -f "$OUT_XLSX" ]]; then
+      if cp -f "$OUT_XLSX" "$OLD_SNAPSHOT_XLSX" 2>/dev/null; then
+        OLD_COMPARE_XLSX="$OLD_SNAPSHOT_XLSX"
+      else
+        OLD_COMPARE_XLSX="$OUT_XLSX"
+      fi
+      "$PYTHON_BIN" scripts/compare_tracker_excel_versions.py \
+        --old "$OLD_COMPARE_XLSX" \
+        --new "$TMP_XLSX" \
+        --output "$DIFF_MD"
+    fi
+
+    mv -f "$TMP_XLSX" "$OUT_XLSX"
+    echo "[excel-v5-finalize] 已落盘正式文件: $OUT_XLSX"
+    if [[ -f "$DIFF_MD" ]]; then
+      echo "[excel-v5-finalize] 旧文件 vs 新文件差异清单: $DIFF_MD"
+    fi
     ;;
   s|start)
     run_manage start \
@@ -603,9 +892,10 @@ except Exception:
       echo "请创建配置文件，每行一个任务，格式：" >&2
       echo "  类型  周期数  [config路径]  [output_dir]  [starting_cash]  [per_cycle_cash]  [data_stream_dir]" >&2
       echo "" >&2
-      echo "  类型: replay（模拟下单）或 live（实盘验证），未填则默认 replay" >&2
+      echo "  类型: replay（模拟）/ live（实盘 paper）/ real（实盘真单 cycle_review），未填默认 replay" >&2
       echo "  replay 示例: replay  72  configs/strategy_old.yaml  -  100  -  artifacts/live/record_job" >&2
       echo "  live   示例: live    20  configs/strategy.yaml       -  100  -  artifacts/live/record_job" >&2
+      echo "  real   示例: real    3   configs/strategy.yaml       -  200  100  -" >&2
       echo "  兼容旧格式（无类型字段，默认 replay）：72  configs/strategy_old.yaml" >&2
       exit 1
     fi
@@ -613,6 +903,9 @@ except Exception:
     BATCH_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
     BATCH_JOB_INDEX=0
     BATCH_STARTED_COUNT=0
+    BATCH_INCLUDE_PERFORMANCE_REPORT="$DEFAULT_INCLUDE_PERFORMANCE_REPORT"
+    BATCH_INCLUDE_TRADE_PROCESS="$DEFAULT_INCLUDE_TRADE_PROCESS"
+    BATCH_DASHBOARD_REFRESH_EVERY_CYCLES="$DEFAULT_DASHBOARD_REFRESH_EVERY_CYCLES"
     # 清理注册表中已结束的旧条目
     if [[ -f "$BATCH_REGISTRY" ]]; then
       LIVE_ENTRIES=""
@@ -635,6 +928,19 @@ except Exception:
       line="$(trim_trailing_cr "$line")"
       [[ "$line" =~ ^[[:space:]]*# ]] && continue
       [[ -z "${line// }" ]] && continue
+      # 支持在 batch.conf 顶部或任意位置通过 key=value 覆盖批量回放 Excel 开关。
+      if [[ "$line" =~ ^[[:space:]]*RECORD_INCLUDE_PERFORMANCE_REPORT[[:space:]]*=[[:space:]]*([01])[[:space:]]*$ ]]; then
+        BATCH_INCLUDE_PERFORMANCE_REPORT="${BASH_REMATCH[1]}"
+        continue
+      fi
+      if [[ "$line" =~ ^[[:space:]]*RECORD_INCLUDE_TRADE_PROCESS[[:space:]]*=[[:space:]]*([01])[[:space:]]*$ ]]; then
+        BATCH_INCLUDE_TRADE_PROCESS="${BASH_REMATCH[1]}"
+        continue
+      fi
+      if [[ "$line" =~ ^[[:space:]]*RECORD_DASHBOARD_REFRESH_EVERY_CYCLES[[:space:]]*=[[:space:]]*([0-9]+)[[:space:]]*$ ]]; then
+        BATCH_DASHBOARD_REFRESH_EVERY_CYCLES="${BASH_REMATCH[1]}"
+        continue
+      fi
       read -ra fields <<< "$line"
       # 第一列是 replay/live 时为新格式，否则为旧格式（第一列是数字，默认 replay）
       if [[ "${fields[0]}" =~ ^[0-9]+$ ]]; then
@@ -654,6 +960,11 @@ except Exception:
         job_per_cycle="${fields[5]:--}"
         job_data_stream_dir="${fields[6]:--}"
       fi
+      job_type="$(printf '%s' "${job_type:-replay}" | tr '[:upper:]' '[:lower:]')"
+      if [[ "$job_type" != "replay" && "$job_type" != "live" && "$job_type" != "real" ]]; then
+        echo "任务 $((BATCH_JOB_INDEX + 1)): 未知类型 \"$job_type\"，已按 replay 处理"
+        job_type="replay"
+      fi
       job_config="$(normalize_path_separators "$job_config")"
       job_output_dir_spec="$(normalize_path_separators "$job_output_dir_spec")"
       job_data_stream_dir="$(normalize_path_separators "$job_data_stream_dir")"
@@ -664,6 +975,9 @@ except Exception:
       if [[ "$job_type" == "live" ]]; then
         [[ "$job_data_stream_dir" == "-" || -z "$job_data_stream_dir" ]] && job_data_stream_dir="$DEFAULT_OUTPUT_DIR/record_job_market"
         JOB_OUT_SUBDIR="polymarket_live_outputs"
+      elif [[ "$job_type" == "real" ]]; then
+        job_data_stream_dir="-"
+        JOB_OUT_SUBDIR="."
       else
         [[ "$job_data_stream_dir" == "-" || -z "$job_data_stream_dir" ]] && job_data_stream_dir="$DEFAULT_OUTPUT_DIR"
         JOB_OUT_SUBDIR="batch_replay_outputs"
@@ -675,11 +989,19 @@ except Exception:
         job_output_dir="$job_output_dir_spec"
       fi
       JOB_DASHBOARD_DIR="$job_output_dir/$JOB_OUT_SUBDIR"
-      JOB_PID_FILE="$job_output_dir/market_paper.pid"
-      JOB_LOG="$JOB_DASHBOARD_DIR/market_paper.log"
+      if [[ "$job_type" == "real" ]]; then
+        JOB_PID_FILE="$job_output_dir/market_real.pid"
+        JOB_LOG="$job_output_dir/market_real_cycle.log"
+      else
+        JOB_PID_FILE="$job_output_dir/market_paper.pid"
+        JOB_LOG="$JOB_DASHBOARD_DIR/market_paper.log"
+      fi
+      JOB_PROGRESS_FILE="$JOB_DASHBOARD_DIR/streaming_progress.txt"
       mkdir -p "$JOB_DASHBOARD_DIR"
       if [[ "$job_type" == "live" ]]; then
         mkdir -p "$job_data_stream_dir"
+      elif [[ "$job_type" == "real" ]]; then
+        :
       else
         resolved_job_data_stream_dir="$(resolve_replay_data_stream_dir "$job_data_stream_dir" || true)"
         if [[ -z "$resolved_job_data_stream_dir" ]]; then
@@ -702,7 +1024,7 @@ except Exception:
       fi
       if [[ "$job_type" == "live" ]]; then
         # 实盘验证：run_polymarket_live_paper.py
-        nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_polymarket_live_paper.py --robot-mode --slug-prefix "$2" --max-cycles "$3" --config "$4" --output-dir "$5" --record-events-dir "$6" --dashboard-refresh-seconds 1 --starting-cash "$7" --env-file "$8" --account-index "$9"); if [[ -n "${10}" ]]; then cmd+=(--per-cycle-cash "${10}"); fi; exec "${cmd[@]}"' \
+        nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_polymarket_live_paper.py --robot-mode --slug-prefix "$2" --max-cycles "$3" --config "$4" --output-dir "$5" --record-events-dir "$6" --dashboard-refresh-seconds 1 --starting-cash "$7" --env-file "$8" --account-index "$9"); if [[ -n "${10}" ]]; then cmd+=(--per-cycle-cash "${10}"); fi; if [[ "${11}" == "1" ]]; then cmd+=(--record-orderbook-top --orderbook-refresh-seconds "${12}"); fi; exec "${cmd[@]}"' \
           "$JOB_PID_FILE" \
           "$PYTHON_BIN" \
           "$SLUG_PREFIX" \
@@ -714,10 +1036,29 @@ except Exception:
           "$DEFAULT_ENV_FILE" \
           "$DEFAULT_ACCOUNT_INDEX" \
           "$job_per_cycle" \
+          "$DEFAULT_RECORD_ORDERBOOK_TOP" \
+          "$DEFAULT_ORDERBOOK_REFRESH_SECONDS" \
+          > "$JOB_LOG" 2>&1 &
+      elif [[ "$job_type" == "real" ]]; then
+        # 实盘真单：run_polymarket_cycle_review.py（单进程多窗）
+        nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_polymarket_cycle_review.py --real-trading --max-cycles "$2" --config "$3" --output-dir "$4" --slug-prefix "$5" --starting-cash "$6" --env-file "$7" --account-index "$8" --signature-type "$9" --dashboard-refresh-seconds 1); if [[ -n "${10}" && "${10}" != "-" ]]; then cmd+=(--capital-reset-mode fixed --per-cycle-cash "${10}"); fi; if [[ "${11}" == "1" ]]; then cmd+=(--record-orderbook-top --orderbook-refresh-seconds "${12}"); fi; exec "${cmd[@]}"' \
+          "$JOB_PID_FILE" \
+          "$PYTHON_BIN" \
+          "$job_cycles" \
+          "$job_config" \
+          "$job_output_dir" \
+          "$SLUG_PREFIX" \
+          "$job_cash" \
+          "$DEFAULT_ENV_FILE" \
+          "$DEFAULT_ACCOUNT_INDEX" \
+          "$DEFAULT_SIGNATURE_TYPE" \
+          "$job_per_cycle" \
+          "$DEFAULT_RECORD_ORDERBOOK_TOP" \
+          "$DEFAULT_ORDERBOOK_REFRESH_SECONDS" \
           > "$JOB_LOG" 2>&1 &
       else
         # 模拟下单测试：run_recorded_live_paper.py
-        nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_recorded_live_paper.py --input-dir "$2" --cycle-glob "$3" --max-cycles "$4" --config "$5" --output-dir "$6" --pace-factor 1000000 --status-every 100 --dashboard-refresh-seconds 1 --starting-cash "$7" --include-trade-process); if [[ -n "${8}" ]]; then cmd+=(--per-cycle-cash "${8}"); fi; exec "${cmd[@]}"' \
+        nohup bash -lc 'echo $$ > "$0"; cmd=("$1" scripts/run_recorded_live_paper.py --input-dir "$2" --cycle-glob "$3" --max-cycles "$4" --config "$5" --output-dir "$6" --pace-factor 1000000 --status-every 100 --dashboard-refresh-seconds 1 --dashboard-refresh-every-cycles "$7" --starting-cash "$8" --progress-file "$9"); if [[ -n "${10}" ]]; then cmd+=(--per-cycle-cash "${10}"); fi; if [[ "${11}" == "1" ]]; then cmd+=(--include-performance-report); fi; if [[ "${12}" == "1" ]]; then cmd+=(--include-trade-process); fi; exec "${cmd[@]}"' \
           "$JOB_PID_FILE" \
           "$PYTHON_BIN" \
           "$job_data_stream_dir" \
@@ -725,8 +1066,12 @@ except Exception:
           "$job_cycles" \
           "$job_config" \
           "$JOB_DASHBOARD_DIR" \
+          "$BATCH_DASHBOARD_REFRESH_EVERY_CYCLES" \
           "$job_cash" \
+          "$JOB_PROGRESS_FILE" \
           "$job_per_cycle" \
+          "$BATCH_INCLUDE_PERFORMANCE_REPORT" \
+          "$BATCH_INCLUDE_TRADE_PROCESS" \
           > "$JOB_LOG" 2>&1 &
       fi
       disown 2>/dev/null || true
@@ -776,14 +1121,24 @@ except Exception:
       reg_progress_completed="0"
       reg_progress_total="${reg_cycles:-0}"
       reg_progress_dir="$(dirname "$reg_log")"
-      reg_cycles_csv="$reg_progress_dir/cycles.csv"
-      # 流式模式写入 streaming_cycle_results.csv 而非 cycles.csv
-      if [[ ! -f "$reg_cycles_csv" ]]; then
-        reg_cycles_csv="$reg_progress_dir/streaming_cycle_results.csv"
-      fi
-      if [[ -f "$reg_cycles_csv" ]]; then
-        reg_progress_completed="$(tail -n +2 "$reg_cycles_csv" 2>/dev/null | sed '/^[[:space:]]*$/d' | wc -l | tr -d '[:space:]')"
-        [[ -z "$reg_progress_completed" ]] && reg_progress_completed="0"
+      reg_progress_file="$reg_progress_dir/streaming_progress.txt"
+      reg_progress_raw="$(read_progress_from_file "$reg_progress_file" || true)"
+      if [[ -n "$reg_progress_raw" ]]; then
+        reg_progress_completed="${reg_progress_raw%%,*}"
+        reg_progress_total_from_file="${reg_progress_raw##*,}"
+        if [[ "$reg_progress_total_from_file" =~ ^[0-9]+$ ]] && [[ "$reg_progress_total_from_file" -gt 0 ]]; then
+          reg_progress_total="$reg_progress_total_from_file"
+        fi
+      else
+        reg_cycles_csv="$reg_progress_dir/cycles.csv"
+        # 流式模式写入 streaming_cycle_results.csv 而非 cycles.csv
+        if [[ ! -f "$reg_cycles_csv" ]]; then
+          reg_cycles_csv="$reg_progress_dir/streaming_cycle_results.csv"
+        fi
+        if [[ -f "$reg_cycles_csv" ]]; then
+          reg_progress_completed="$(tail -n +2 "$reg_cycles_csv" 2>/dev/null | sed '/^[[:space:]]*$/d' | wc -l | tr -d '[:space:]')"
+          [[ -z "$reg_progress_completed" ]] && reg_progress_completed="0"
+        fi
       fi
       TOTAL=$((TOTAL + 1))
       if is_batch_job_process_alive "$reg_pid" "$reg_job_type"; then
@@ -827,7 +1182,11 @@ except Exception:
       fi
       if [[ "${MS_TAIL_LINES}" -gt 0 ]] && [[ -f "$reg_log" ]]; then
         echo "  --- 最近 $MS_TAIL_LINES 行日志 ---"
-        tail -n "$MS_TAIL_LINES" "$reg_log" 2>/dev/null | sed 's/^/  /'
+        tail -n "$MS_TAIL_LINES" "$reg_log" 2>/dev/null \
+          | sed '/^[[:space:]]*total_cycles[[:space:]]\+total_net_profit[[:space:]]\+average_cycle_profit/,/^[[:space:]]*$/d' \
+          | sed '0,/^[[:space:]]*======================================================================/s//\
+&/' \
+          | sed 's/^/  /'
       fi
       echo ""
     done < "$BATCH_REGISTRY"
@@ -858,13 +1217,14 @@ except Exception:
       elif [[ -n "$reg_pid" ]] && kill -0 "$reg_pid" 2>/dev/null; then
         echo "跳过停止: pid=$reg_pid 当前不是批量任务进程（疑似 PID 已复用）"
       fi
-      rm -f "$reg_output_dir/market_paper.pid" 2>/dev/null || true
+      rm -f "$reg_output_dir/market_paper.pid" "$reg_output_dir/market_real.pid" 2>/dev/null || true
     done < "$BATCH_REGISTRY"
     rm -f "$BATCH_REGISTRY"
     echo "已停止 $STOP_COUNT 个运行中的批量任务，注册表已清除"
     ;;
   x|stop|kill)
-    stop_pid_file "$OUTPUT_DIR/market_paper.pid" "后台实盘验证任务"
+    stop_pid_file "$OUTPUT_DIR/market_paper.pid" "后台实盘验证任务（paper）"
+    stop_pid_file "$OUTPUT_DIR/market_real.pid" "后台实盘真单任务（creb）"
     run_manage stop \
       --output-dir "$OUTPUT_DIR" \
       --dashboard-pid-file "$OUTPUT_DIR/dashboard_console.pid"

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-import os
 
 from polynet_ai.domain.models import DecisionOutcome, FeatureSnapshot, OrderIntent, Outcome
 from polynet_ai.strategy.entry_rules import (
@@ -19,20 +18,15 @@ from polynet_ai.strategy.exit_rules import (
     stop_loss_exits,
     take_profit_exits,
 )
+from polynet_ai.strategy.cycle_windows import (
+    calculate_position_percentage,
+    determine_phase,
+    is_rule_enabled_for_phase,
+)
+from polynet_ai.strategy.dynamic_priority import apply_dynamic_priorities_to_candidates
 from polynet_ai.strategy.features import snapshot_with_effective_price, snapshot_with_effective_quotes
 from polynet_ai.strategy.last_minute import build_last_minute_candidate
 from polynet_ai.strategy.spec import StrategyConfig
-
-
-# 优化 #4：辅助函数用于规则执行（可被序列化）
-def _execute_rule(rule_func, snapshot, config):
-    """执行单个规则并返回结果"""
-    try:
-        return rule_func(snapshot, config)
-    except Exception as e:
-        import sys
-        print(f"警告: 规则 {rule_func.__name__} 执行失败: {e}", file=sys.stderr)
-        return []
 
 
 class StrategyRouter:
@@ -43,9 +37,6 @@ class StrategyRouter:
         self._feed_prices: dict[str, float] = {}
         self._feed_effective_outcomes: dict[str, Outcome | None] = {}
         self._feed_quotes: dict[str, tuple[float, float]] = {}
-        # 优化 #4：从环境变量读取并行配置，默认启用
-        self._enable_parallel = os.environ.get("POLYNET_PARALLEL_RULES", "1") == "1"
-        self._max_workers = int(os.environ.get("POLYNET_MAX_WORKERS", "4"))
 
     def _reset_feed_context(self, features: FeatureSnapshot) -> None:
         ctx = (features.market_id, features.cycle_id)
@@ -105,7 +96,8 @@ class StrategyRouter:
 
     def route(self, features: FeatureSnapshot, strategy_trades: int = 0) -> DecisionOutcome:
         self._reset_feed_context(features)
-
+        phase = determine_phase(features.cycle_elapsed_seconds, self.config)
+        
         # 优化 #4：并行化规则评估，11个规则可独立并行执行
         # 定义所有规则及其对应的路径配置
         rule_specs = [
@@ -121,37 +113,153 @@ class StrategyRouter:
             (mean_reversion_entries, ("entries", "mean_reversion")),
             (trend_entries, ("entries", "trend")),
         ]
-
+        
         candidates: list[OrderIntent] = []
-
-        # 优化 #4：可配置的并行执行（通过环境变量控制）
-        if self._enable_parallel:
-            # 使用线程池并行执行所有规则
-            with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
-                futures = {
-                    executor.submit(
-                        _execute_rule,
-                        rule_func,
-                        self._snapshot_for_rule(features, path),
-                        self.config
-                    ): rule_func
-                    for rule_func, path in rule_specs
-                }
-
-                # 按完成顺序收集结果
-                for future in as_completed(futures):
+        
+        # 使用线程池并行执行所有规则（受GIL影响较小，主要是I/O和数据处理）
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            filtered_specs = [
+                (rule_func, path)
+                for rule_func, path in rule_specs
+                if self._rule_spec_enabled(path, phase)
+            ]
+            futures = {
+                executor.submit(
+                    rule_func,
+                    self._snapshot_for_rule(features, path),
+                    self.config
+                ): path
+                for rule_func, path in filtered_specs
+            }
+            
+            # 按完成顺序收集结果（不一定是提交顺序）
+            for future in as_completed(futures):
+                try:
+                    path = futures[future]
                     result = future.result()
                     if result:
+                        rule_scope = ":".join(path)
+                        for item in result:
+                            item.metadata["_rule_scope"] = rule_scope
                         candidates.extend(result)
-        else:
-            # 顺序执行（用于调试或对比）
-            for rule_func, path in rule_specs:
-                result = _execute_rule(rule_func, self._snapshot_for_rule(features, path), self.config)
-                if result:
-                    candidates.extend(result)
+                except Exception as e:
+                    # 如果规则执行错误，记录但继续处理其他规则
+                    import sys
+                    print(f"警告: 规则执行失败: {e}", file=sys.stderr)
+                    continue
 
         for candidate in candidates:
             candidate.metadata["strategy_trades"] = strategy_trades
         candidates = [candidate for candidate in candidates if candidate.shares > 0]
+        candidates = apply_dynamic_priorities_to_candidates(candidates, features, self.config)
         candidates.sort(key=lambda item: (item.priority, -item.shares))
-        return DecisionOutcome(selected=candidates[0] if candidates else None, candidates=candidates)
+        if not candidates:
+            return DecisionOutcome(selected=None, candidates=[])
+
+        phase3_preferred_buy = self._phase3_prefer_buy_candidate(candidates, features, phase)
+        if phase3_preferred_buy is not None:
+            preferred_candidates = [
+                item
+                for item in candidates
+                if item.action == "buy" and item.category in {"trend", "hedge"}
+            ]
+            preferred_candidates.sort(key=lambda item: (item.priority, -item.shares))
+            return DecisionOutcome(
+                selected=phase3_preferred_buy,
+                candidates=preferred_candidates,
+            )
+
+        guard_fallback = self._fallback_buy_for_low_balance(candidates, features, phase)
+        if guard_fallback is not None:
+            fallback_scope = str(guard_fallback.metadata.get("_rule_scope", ""))
+            fallback_scoped_candidates = [
+                item
+                for item in candidates
+                if str(item.metadata.get("_rule_scope", "")) == fallback_scope
+            ]
+            fallback_scoped_candidates.sort(key=lambda item: (item.priority, -item.shares))
+            return DecisionOutcome(
+                selected=guard_fallback,
+                candidates=fallback_scoped_candidates,
+            )
+
+        # 仅允许“规则内候选”：锁定最优先候选所属规则作用域，
+        # 回退仅在该规则作用域内进行，不跨规则尝试。
+        top_scope = str(candidates[0].metadata.get("_rule_scope", ""))
+        scoped_candidates = [
+            item
+            for item in candidates
+            if str(item.metadata.get("_rule_scope", "")) == top_scope
+        ]
+        scoped_candidates.sort(key=lambda item: (item.priority, -item.shares))
+        return DecisionOutcome(
+            selected=scoped_candidates[0] if scoped_candidates else None,
+            candidates=scoped_candidates,
+        )
+
+    def _phase3_prefer_buy_candidate(
+        self,
+        candidates: list[OrderIntent],
+        features: FeatureSnapshot,
+        phase: int,
+    ) -> OrderIntent | None:
+        """Phase3 在未达目标仓位时，卖出候选可让位给 trend/hedge 买入。"""
+        if phase != 3 or not candidates:
+            return None
+        top = candidates[0]
+        if top.action != "sell":
+            return None
+        # 仅在网格减仓占顶时允许“买入优先”回退，避免压制止盈/止损类风险动作。
+        if top.category != "grid":
+            return None
+        target_thr = float(self.config.get("dynamic_priority.phase_3_position_threshold", 0.75))
+        pos_pct = calculate_position_percentage(features, self.config)
+        if pos_pct >= target_thr:
+            return None
+        preferred_buys = [
+            item
+            for item in candidates
+            if item.action == "buy" and item.category in {"trend", "hedge"}
+        ]
+        if not preferred_buys:
+            return None
+        preferred_buys.sort(key=lambda item: (item.priority, -item.shares))
+        return preferred_buys[0]
+
+    def _fallback_buy_for_low_balance(
+        self,
+        candidates: list[OrderIntent],
+        features: FeatureSnapshot,
+        phase: int,
+    ) -> OrderIntent | None:
+        # 阶段1~3防止方向持仓被卖到 0：低仓位时若首选为卖出，回退到同方向买入规则。
+        if phase < 1 or phase > 3 or not candidates:
+            return None
+        top = candidates[0]
+        if top.action != "sell":
+            return None
+
+        held = features.up_held if top.outcome == "up" else features.down_held
+        if held > 5.0:
+            return None
+
+        for item in candidates[1:]:
+            if item.action == "buy" and item.outcome == top.outcome:
+                return item
+        return None
+
+    def _rule_spec_enabled(self, path: tuple[str, ...], phase: int) -> bool:
+        if path == ("last_minute",):
+            return is_rule_enabled_for_phase(
+                self.config,
+                section="last_minute",
+                rule="last_minute",
+                phase=phase,
+            )
+        section, rule = path[0], path[1]
+        return is_rule_enabled_for_phase(
+            self.config,
+            section=section,
+            rule=rule,
+            phase=phase,
+        )
