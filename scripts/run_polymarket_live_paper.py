@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import shutil
 import sys
 from collections.abc import Callable, Iterable
@@ -449,7 +450,22 @@ def main() -> int:
         old_cycle_dirs = set(d.name for d in cycle_record_dir.glob("btc-updown-5m-*") if d.is_dir())
         if old_cycle_dirs:
             print(f"  ℹ 发现 {len(old_cycle_dirs)} 个历史周期目录（将保留）")
-    
+
+        _crd = cycle_record_dir.resolve()
+
+        def _cleanup_polymarket_record_job_on_exit() -> None:
+            try:
+                from scripts.build_batch_replay_performance_report import (
+                    cleanup_polymarket_live_record_job_artifacts,
+                )
+            except ImportError:
+                from build_batch_replay_performance_report import (  # type: ignore
+                    cleanup_polymarket_live_record_job_artifacts,
+                )
+            cleanup_polymarket_live_record_job_artifacts(_crd)
+
+        atexit.register(_cleanup_polymarket_record_job_on_exit)
+
     stage_3_start = datetime.now()
     print(f"\n[3/7] 建立 Polymarket 实时行情订阅...")
     _strategy_cfg = load_strategy_config(args.config)

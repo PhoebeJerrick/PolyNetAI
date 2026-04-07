@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -1285,6 +1286,51 @@ def _cleanup_batch_replay_markdown(output_path: Path) -> None:
                 p.unlink()
         except OSError:
             pass
+
+
+def _dedupe_newest_xlsx_by_prefix(output_dir: Path, filename_prefix: str) -> int:
+    """``{prefix}_*.xlsx`` 只保留修改时间最新的一份，返回删除文件数。"""
+    paths = [p for p in output_dir.glob(f"{filename_prefix}_*.xlsx") if p.is_file()]
+    if len(paths) <= 1:
+        return 0
+    paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    removed = 0
+    for p in paths[1:]:
+        try:
+            p.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+def cleanup_polymarket_live_record_job_artifacts(
+    cycle_record_dir: str | Path,
+    *,
+    batch_subdir: str = "batch_replay_outputs",
+) -> None:
+    """实盘验证 ``--record-events-dir`` 目录收尾：删 staging、合并重复的分析 Excel。
+
+    - ``replay_new_cycles_*``：批量回放前临时复制的新周期树，与落盘的 ``btc-updown-5m-*`` 重复，可删。
+    - ``batch_subdir`` 下同一前缀的带时间戳 xlsx 多次生成时，各前缀只保留最新一份。
+    """
+    root = Path(cycle_record_dir)
+    if not root.is_dir():
+        return
+    for staging in sorted(root.glob("replay_new_cycles_*")):
+        if staging.is_dir():
+            shutil.rmtree(staging, ignore_errors=True)
+    batch_dir = root / batch_subdir
+    if not batch_dir.is_dir():
+        return
+    for prefix in (
+        "real_batch_replay_performance_report",
+        "simulation_batch_replay_performance_report",
+        "sim_vs_live_comparison_zh",
+        "batch_replay_trade_process_zh",
+        "sim_batch_replay_performance_report",
+    ):
+        _dedupe_newest_xlsx_by_prefix(batch_dir, prefix)
 
 
 def build_report(

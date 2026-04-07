@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime
 
 import pandas as pd
@@ -9,6 +10,7 @@ from scripts.build_batch_replay_performance_report import (
     TRACKER_STYLE_SHEET,
     build_performance_report_zh,
     build_report,
+    cleanup_polymarket_live_record_job_artifacts,
     _compute_max_drawdown,
 )
 
@@ -211,3 +213,30 @@ def test_build_performance_report_fixed_mode_implied_start_cash(tmp_path) -> Non
     assert enriched is not None
     implied = pd.to_numeric(enriched["implied_start_cash"], errors="coerce").dropna().tolist()
     assert implied == [100.0, 100.0, 100.0]
+
+
+def test_cleanup_polymarket_live_record_job_artifacts(tmp_path) -> None:
+    root = tmp_path / "record_job_market"
+    staging = root / "replay_new_cycles_20260101_120000"
+    staging.mkdir(parents=True)
+    (staging / "marker.txt").write_text("x", encoding="utf-8")
+    batch = root / "batch_replay_outputs"
+    batch.mkdir(parents=True)
+    old = batch / "real_batch_replay_performance_report_V9.9.9_20260101_100000.xlsx"
+    new = batch / "real_batch_replay_performance_report_V9.9.9_20260101_200000.xlsx"
+    old.write_bytes(b"a")
+    time.sleep(0.02)
+    new.write_bytes(b"b")
+    other = batch / "sim_vs_live_comparison_zh_V9.9.9_20260101_100000.xlsx"
+    other.write_bytes(b"c")
+    time.sleep(0.02)
+    other2 = batch / "sim_vs_live_comparison_zh_V9.9.9_20260101_200000.xlsx"
+    other2.write_bytes(b"d")
+
+    cleanup_polymarket_live_record_job_artifacts(root)
+
+    assert not staging.exists()
+    assert old.exists() is False
+    assert new.exists() is True
+    assert other.exists() is False
+    assert other2.exists() is True
