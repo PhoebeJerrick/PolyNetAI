@@ -152,6 +152,60 @@ def opening_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[O
     ]
 
 
+def late_opening_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
+    """迟到建仓规则：WS 事件流延迟导致错过 opening 窗口（前 30s）时，
+    允许在 opening_window ~ late_opening_max_seconds 之间进行首次建仓。
+    使用更保守的仓位大小（base_size * scale_factor）。
+    """
+    if not config.get("late_opening.enabled", True):
+        return []
+    if features.is_last_minute or features.strategy_trades != 0:
+        return []
+    opening_window = float(config.get("opening_entry.window_seconds", 30.0))
+    if features.cycle_elapsed_seconds <= opening_window:
+        return []  # 仍在 opening 窗口内，由 opening_entries 处理
+    max_seconds = float(config.get("late_opening.max_seconds", 180.0))
+    if features.cycle_elapsed_seconds > max_seconds:
+        return []
+    use_comp = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
+    weak = _opening_weak_outcome(features, use_comp)
+    if weak is None:
+        return []
+    # 流动性检查
+    min_market_trades = int(config.get("late_opening.min_market_trades",
+                                       config.get("opening_entry.min_market_trades", 2)))
+    if weak == "up" and features.up_market_n < min_market_trades:
+        return []
+    if weak == "down" and features.down_market_n < min_market_trades:
+        return []
+    # 价格时机确认
+    if not _opening_price_timing_ok(
+        weak,
+        features,
+        float(config.get("opening_entry.vwap_epsilon", 0.01)),
+        float(config.get("opening_entry.range_low_fraction", 0.35)),
+        float(config.get("opening_entry.min_range_width", 0.02)),
+    ):
+        return []
+    # 保守仓位：固定最小下单量试单（Polymarket 要求每笔不少于 5 份）
+    size = float(config.get("late_opening.fixed_shares", 5.0))
+    ref = features.up_last_price if weak == "up" else features.down_last_price
+    phase = determine_phase(features.cycle_elapsed_seconds, config)
+    return [
+        OrderIntent(
+            market_id=features.market_id,
+            cycle_id=features.cycle_id,
+            outcome=weak,
+            action="buy",
+            shares=size,
+            reference_price=ref,
+            category="opening",
+            reason=f"迟到建仓（{features.cycle_elapsed_seconds:.0f}s）：买入弱势方（{weak}），最小量试单",
+            priority=int(config.priority_for("opening", phase)),
+        )
+    ]
+
+
 def trend_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
     if features.is_last_minute or not features.trend_bias:
         return []
@@ -229,9 +283,13 @@ def grid_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Orde
         return []
     if features.market_regime != "range":
         return []
-    # 首单由 opening_entries 负责；grid 仅在已有至少一笔策略成交后介入
+    # 首单由 opening_entries / late_opening_entries 负责；
+    # grid 在已有策略成交后介入，或在超过 opening 窗口且仍无成交时允许充当首次入场
     if features.strategy_trades == 0:
-        return []
+        opening_window = float(config.get("opening_entry.window_seconds", 30.0))
+        grid_allow_first = bool(config.get("grid.allow_first_trade_after_opening_window", True))
+        if not grid_allow_first or features.cycle_elapsed_seconds <= opening_window:
+            return []
 
     size = _base_size(config, features)
     infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
@@ -390,6 +448,7 @@ def mean_reversion_entries(features: FeatureSnapshot, config: StrategyConfig) ->
 def build_entry_candidates(features: FeatureSnapshot, config: StrategyConfig) -> list[OrderIntent]:
     candidates: list[OrderIntent] = []
     candidates.extend(opening_entries(features, config))
+    candidates.extend(late_opening_entries(features, config))
     candidates.extend(hedge_entries(features, config))
     candidates.extend(grid_entries(features, config))
     candidates.extend(mean_reversion_entries(features, config))

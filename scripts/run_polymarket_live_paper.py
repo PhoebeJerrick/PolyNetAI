@@ -700,7 +700,7 @@ def main() -> int:
                     post_window_start_delay_seconds=_pwd,
                     env_file=args.env_file,
                     account_index=args.account_index,
-                    paper_execution=args.paper_execution,
+                    paper_execution="legacy",  # 回放历史数据须用 legacy：市场过期后 CLOB 订单簿不存在
                 )
                 report_elapsed = (datetime.now() - report_start).total_seconds()
                 stage_times["6_report"] = report_elapsed
@@ -746,7 +746,7 @@ def main() -> int:
                     processing_mode="per-cycle",
                     env_file=args.env_file,
                     account_index=args.account_index,
-                    paper_execution=args.paper_execution,
+                    paper_execution="legacy",  # 回放历史数据须用 legacy：市场过期后 CLOB 订单簿不存在
                 )
                 if sim_report_path and sim_report_path.exists():
                     print(f"  ✓ 模拟下单(per-cycle)绩效报告: {sim_report_path.name}")

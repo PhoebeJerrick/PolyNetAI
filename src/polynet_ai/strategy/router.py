@@ -7,6 +7,7 @@ from polynet_ai.domain.models import DecisionOutcome, FeatureSnapshot, OrderInte
 from polynet_ai.strategy.entry_rules import (
     grid_entries,
     hedge_entries,
+    late_opening_entries,
     mean_reversion_entries,
     opening_entries,
     trend_entries,
@@ -108,6 +109,7 @@ class StrategyRouter:
             (grid_exits, ("exits", "grid")),
             (mean_reversion_exits, ("exits", "mean_reversion")),
             (opening_entries, ("entries", "opening")),
+            (late_opening_entries, ("entries", "opening")),
             (hedge_entries, ("entries", "hedge")),
             (grid_entries, ("entries", "grid")),
             (mean_reversion_entries, ("entries", "mean_reversion")),

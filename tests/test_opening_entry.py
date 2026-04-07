@@ -103,6 +103,7 @@ def test_opening_entry_defers_until_weak_side_has_market_prints() -> None:
 
 
 def test_opening_entry_not_triggered_after_window() -> None:
+    """late_opening_entries 允许 30~180s 间迟到建仓；超过 180s 后完全不触发。"""
     engine = StateEngine()
     t0 = datetime(2026, 1, 1, 12, 0, 0)
     engine.apply_market_trade(
@@ -111,11 +112,24 @@ def test_opening_entry_not_triggered_after_window() -> None:
     engine.apply_market_trade(
         TradeEvent(market_id="m", cycle_id="c", timestamp=t0, price=0.38, shares=10.0, outcome="down")
     )
+
+    # 45s: 在 late_opening 窗口（30~180s）内 → 允许迟到建仓
     late = t0 + timedelta(seconds=45)
     engine.apply_market_trade(
         TradeEvent(market_id="m", cycle_id="c", timestamp=late, price=0.39, shares=10.0, outcome="down")
     )
     features = build_feature_snapshot(engine, cycle_seconds=300, last_minute_seconds=30)
     assert features.cycle_elapsed_seconds > 30.0
+    decision = StrategyRouter(_router_config()).route(features, strategy_trades=0)
+    assert decision.selected is not None
+    assert decision.selected.category == "opening"
+    assert "迟到建仓" in decision.selected.reason
+
+    # 200s: 超过 late_opening.max_seconds（默认 180s）→ 不触发
+    very_late = t0 + timedelta(seconds=200)
+    engine.apply_market_trade(
+        TradeEvent(market_id="m", cycle_id="c", timestamp=very_late, price=0.39, shares=10.0, outcome="down")
+    )
+    features = build_feature_snapshot(engine, cycle_seconds=300, last_minute_seconds=30)
     decision = StrategyRouter(_router_config()).route(features, strategy_trades=0)
     assert decision.selected is None or decision.selected.category != "opening"

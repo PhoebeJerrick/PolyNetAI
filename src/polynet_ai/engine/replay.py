@@ -590,4 +590,16 @@ class ReplayEngine:
         self.state_engine.state = None
         self.state_engine.market_tape.clear()
         self.state_engine.strategy_fills.clear()
+        # 跨周期节流状态重置：避免上一周期末尾的成交/提交时间戳误拦下一周期的首笔订单
+        self._last_strategy_fill_at = None
+        self._last_strategy_fill_at_up = None
+        self._last_strategy_fill_at_down = None
+        self._last_strategy_fill_price_up = None
+        self._last_strategy_fill_price_down = None
+        self._recent_buy_fill_times_up.clear()
+        self._recent_buy_fill_times_down.clear()
+        self._last_order_submitted_at_up = None
+        self._last_order_submitted_at_down = None
+        self._last_strategy_sell_submitted_at_up = None
+        self._last_strategy_sell_submitted_at_down = None
         return row
