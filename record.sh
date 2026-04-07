@@ -75,6 +75,7 @@ print_help() {
     "  ./record.sh dcre<N>|dcre     dashboard + 实盘真单（--run-subdir current）" \
     "  ./record.sh pm[LINES]        查看后台实盘验证（paper）状态与最近日志（默认 20 行）" \
     "  ./record.sh prm[LINES]       查看后台实盘真单（creb）状态与最近日志" \
+    "  ./record.sh stats            按 configs/batch.conf 运行万能统计机器人" \
     "  ./record.sh chart             打开 artifacts/charts/tracker_position_compare.html" \
     "  ./record.sh excel-v5          生成 data/processed/..._with_accumulated_shares_v5.xlsx（若正式文件被占用则保留 tmp 并生成差异清单）" \
     "  ./record.sh excel-v5-finalize 正式文件解锁后，把 tmp 结果落盘到正式文件并刷新差异清单" \
@@ -96,7 +97,7 @@ print_help() {
     "  -c FILE        自定义 config，默认 configs/strategy.yaml" \
     "  -k CASH        自定义 starting cash（用于模拟下单）" \
     "  -K CASH        自定义每周期固定投注资金（仅 dm/dmb；透传 --per-cycle-cash）" \
-    "  -b FILE        自定义批量任务配置文件（仅 mstart；默认 configs/batch.conf）" \
+    "  -b FILE        自定义配置文件（stats/mstart；默认 configs/batch.conf）" \
     "" \
     "环境变量（可选）:" \
     "  RECORD_OPEN_DASHBOARD_EDGE=0   关闭 record.sh d 后自动用 Edge 打开网页" \
@@ -327,6 +328,60 @@ normalize_path_separators() {
   local s="$1"
   # 兼容 Windows 风格路径，统一使用 / 便于在 Linux 上判定目录存在性。
   printf '%s' "${s//\\//}"
+}
+
+resolve_abs_path() {
+  local raw="$1"
+  raw="$(normalize_path_separators "$(trim_trailing_cr "$raw")")"
+  if [[ -z "$raw" || "$raw" == "-" ]]; then
+    printf '%s\n' "$raw"
+    return 0
+  fi
+  if [[ "$raw" == /* || "$raw" =~ ^[A-Za-z]:/ ]]; then
+    printf '%s\n' "$raw"
+    return 0
+  fi
+  local rel_dir
+  local rel_base
+  rel_dir="$(dirname "$raw")"
+  rel_base="$(basename "$raw")"
+  if abs_dir="$(cd "$ROOT_DIR/$rel_dir" 2>/dev/null && pwd -P)"; then
+    printf '%s/%s\n' "$abs_dir" "$rel_base"
+  else
+    printf '%s/%s\n' "$ROOT_DIR" "$raw"
+  fi
+}
+
+read_registry_workspace_root() {
+  local registry_file="$1"
+  [[ -f "$registry_file" ]] || return 1
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="$(trim_trailing_cr "$line")"
+    if [[ "$line" =~ ^[[:space:]]*#[[:space:]]*workspace_root=(.*)$ ]]; then
+      printf '%s\n' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  done < "$registry_file"
+  return 1
+}
+
+assert_registry_workspace_match() {
+  local registry_file="$1"
+  local cmd_label="$2"
+  [[ -f "$registry_file" ]] || return 0
+  local reg_root
+  reg_root="$(read_registry_workspace_root "$registry_file" || true)"
+  [[ -z "$reg_root" ]] && return 0
+  if [[ "$reg_root" != "$ROOT_DIR" ]]; then
+    echo "错误: 检测到批量注册表属于其他工程，已拒绝执行 $cmd_label。" >&2
+    echo "  当前工程: $ROOT_DIR" >&2
+    echo "  注册表所属工程: $reg_root" >&2
+    echo "  注册表路径: $(resolve_abs_path "$registry_file")" >&2
+    echo "请切换到对应工程执行，或先在对应工程执行 ./record.sh mstop 清理注册表。" >&2
+    return 1
+  fi
+  return 0
 }
 
 is_batch_job_process_alive() {
@@ -777,6 +832,15 @@ except Exception:
     fi
     powershell -NoProfile -Command "Start-Process -FilePath \"$DASHBOARD_CHART_PATH\""
     ;;
+  stats)
+    STATS_FILE="${BATCH_FILE_ARG:-$DEFAULT_BATCH_FILE}"
+    STATS_FILE="$(normalize_path_separators "$STATS_FILE")"
+    if [[ ! -f "$STATS_FILE" ]]; then
+      echo "错误: 统计配置文件不存在: $STATS_FILE" >&2
+      exit 1
+    fi
+    "$PYTHON_BIN" scripts/run_universal_stats.py --config "$STATS_FILE"
+    ;;
   excel-v5)
     OUT_XLSX="data/processed/polymarket_tracker_collection_with_accumulated_shares_v5.xlsx"
     TMP_XLSX="${OUT_XLSX%.xlsx}_tmp_regen.xlsx"
@@ -886,6 +950,7 @@ except Exception:
   mstart|batch-start)
     BATCH_FILE="${BATCH_FILE_ARG:-$DEFAULT_BATCH_FILE}"
     BATCH_FILE="$(normalize_path_separators "$BATCH_FILE")"
+    BATCH_FILE_ABS="$(resolve_abs_path "$BATCH_FILE")"
     if [[ ! -f "$BATCH_FILE" ]]; then
       echo "错误: 批量任务配置文件不存在: $BATCH_FILE" >&2
       echo "" >&2
@@ -906,6 +971,7 @@ except Exception:
     BATCH_INCLUDE_PERFORMANCE_REPORT="$DEFAULT_INCLUDE_PERFORMANCE_REPORT"
     BATCH_INCLUDE_TRADE_PROCESS="$DEFAULT_INCLUDE_TRADE_PROCESS"
     BATCH_DASHBOARD_REFRESH_EVERY_CYCLES="$DEFAULT_DASHBOARD_REFRESH_EVERY_CYCLES"
+    assert_registry_workspace_match "$BATCH_REGISTRY" "mstart" || exit 1
     # 清理注册表中已结束的旧条目
     if [[ -f "$BATCH_REGISTRY" ]]; then
       LIVE_ENTRIES=""
@@ -920,9 +986,16 @@ except Exception:
           LIVE_ENTRIES="${LIVE_ENTRIES}${reg_line}"$'\n'
         fi
       done < "$BATCH_REGISTRY"
-      printf '%s' "$LIVE_ENTRIES" > "$BATCH_REGISTRY"
+      {
+        printf '# workspace_root=%s\n' "$ROOT_DIR"
+        printf '%s' "$LIVE_ENTRIES"
+      } > "$BATCH_REGISTRY"
+    else
+      printf '# workspace_root=%s\n' "$ROOT_DIR" > "$BATCH_REGISTRY"
     fi
     echo "读取批量任务配置: $BATCH_FILE"
+    echo "工程目录: $ROOT_DIR"
+    echo "批量配置(绝对): $BATCH_FILE_ABS"
     echo ""
     while IFS= read -r line || [[ -n "$line" ]]; do
       line="$(trim_trailing_cr "$line")"
@@ -939,6 +1012,10 @@ except Exception:
       fi
       if [[ "$line" =~ ^[[:space:]]*RECORD_DASHBOARD_REFRESH_EVERY_CYCLES[[:space:]]*=[[:space:]]*([0-9]+)[[:space:]]*$ ]]; then
         BATCH_DASHBOARD_REFRESH_EVERY_CYCLES="${BASH_REMATCH[1]}"
+        continue
+      fi
+      if [[ "$line" == *"="* ]]; then
+        # 允许 batch.conf 与 ./record.sh stats 共用；未知 key=value 对 mstart 直接忽略。
         continue
       fi
       read -ra fields <<< "$line"
@@ -1087,8 +1164,11 @@ except Exception:
       BATCH_STARTED_COUNT=$((BATCH_STARTED_COUNT + 1))
       echo "任务 $BATCH_JOB_INDEX 已启动 [${job_type}]: pid=${JOB_MARKET_PID:-未知}, 周期=$job_cycles, 配置=$job_config"
       echo "  日志: $JOB_LOG"
+      echo "  日志(绝对): $(resolve_abs_path "$JOB_LOG")"
       echo "  输出: $job_output_dir"
+      echo "  输出(绝对): $(resolve_abs_path "$job_output_dir")"
       echo "  数据流: $job_data_stream_dir"
+      echo "  数据流(绝对): $(resolve_abs_path "$job_data_stream_dir")"
       echo ""
     done < "$BATCH_FILE"
     echo "共启动 $BATCH_STARTED_COUNT 个批量任务"
@@ -1101,7 +1181,10 @@ except Exception:
       echo "暂无批量任务记录 (注册表: $BATCH_REGISTRY)"
       exit 0
     fi
+    assert_registry_workspace_match "$BATCH_REGISTRY" "ms" || exit 1
     echo "## 批量任务状态 (注册表: $BATCH_REGISTRY)"
+    echo "工程目录: $ROOT_DIR"
+    echo "注册表(绝对): $(resolve_abs_path "$BATCH_REGISTRY")"
     echo ""
     TOTAL=0
     RUNNING=0
@@ -1157,9 +1240,12 @@ except Exception:
       echo "  周期:   $reg_cycles"
       echo "  配置:   $reg_config"
       echo "  输出:   $reg_output_dir"
+      echo "  输出(绝对):   $(resolve_abs_path "$reg_output_dir")"
       echo "  启动:   $reg_time"
       echo "  日志:   $reg_log"
+      echo "  日志(绝对):   $(resolve_abs_path "$reg_log")"
       echo "  数据流: $reg_data_stream_dir"
+      echo "  数据流(绝对): $(resolve_abs_path "$reg_data_stream_dir")"
       # 计算已用时间
       reg_elapsed_str=""
       if [[ -n "$reg_time" ]]; then
@@ -1177,8 +1263,10 @@ except Exception:
       echo "  进度:   ${reg_progress_completed}/${reg_progress_total} (周期)${reg_elapsed_str}"
       if [[ "$reg_job_type" == "live" ]]; then
         echo "  报告目录: $reg_data_stream_dir/batch_replay_outputs"
+        echo "  报告目录(绝对): $(resolve_abs_path "$reg_data_stream_dir/batch_replay_outputs")"
       else
         echo "  报告目录: $reg_output_dir/batch_replay_outputs"
+        echo "  报告目录(绝对): $(resolve_abs_path "$reg_output_dir/batch_replay_outputs")"
       fi
       if [[ "${MS_TAIL_LINES}" -gt 0 ]] && [[ -f "$reg_log" ]]; then
         echo "  --- 最近 $MS_TAIL_LINES 行日志 ---"
@@ -1197,6 +1285,7 @@ except Exception:
       echo "暂无批量任务记录 (注册表: $BATCH_REGISTRY)"
       exit 0
     fi
+    assert_registry_workspace_match "$BATCH_REGISTRY" "mstop" || exit 1
     STOP_COUNT=0
     while IFS= read -r reg_line || [[ -n "$reg_line" ]]; do
       reg_line="$(trim_trailing_cr "$reg_line")"
