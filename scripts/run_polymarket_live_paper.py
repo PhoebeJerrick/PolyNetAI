@@ -589,8 +589,15 @@ def main() -> int:
     
     cycle_count = len(result.replay_result.cycle_df)
     print(f"  ✓ 行情回放完成 (耗时 {run_elapsed:.1f}s)")
-    print(f"  ✓ 已处理周期: {cycle_count} 个")
-    
+    print(f"  ✓ 已处理周期: {cycle_count} 个（回放引擎 metrics/cycles 口径）")
+    if args.robot_mode and int(args.max_cycles) > 0:
+        print(
+            "  ℹ --max-cycles 控制机器人串联的市场窗数量；上式「已处理周期」只统计"
+            "「至少有一条通过策略门控（窗起点+post_window_start_delay）后成交」的窗。"
+            "若下一窗在门控生效前几乎没有 WS 成交、或连接过早结束，入账周期数会少于 max_cycles。",
+            flush=True,
+        )
+
     stage_5_start = datetime.now()
     print(f"\n[5/7] 导出结果数据...")
     export_recorded_trade_events_csv(recorded_events_path, recorded_events_csv_path)
@@ -620,6 +627,12 @@ def main() -> int:
         if new_cycle_files:
             print(f"\n[6/7] 生成实盘验证绩效报告...")
             print(f"  ℹ 发现 {len(new_cycle_files)} 个新周期的实时事件流，正在回放分析...")
+            if len(new_cycle_files) != cycle_count:
+                print(
+                    f"  ℹ 提示: 新落盘子目录数 ({len(new_cycle_files)}) 与引擎入账周期数 ({cycle_count}) 不一致时，"
+                    "多为某一窗无「门控后」引擎事件但仍写入了原始 WS 落盘。",
+                    flush=True,
+                )
             report_start = datetime.now()
             try:
                 # 创建临时目录用于仅放新周期数据

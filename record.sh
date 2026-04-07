@@ -105,7 +105,9 @@ print_help() {
     "  RECORD_PER_CYCLE_CASH=100      dm/dmb 默认每周期固定投注资金" \
     "  RECORD_RECORD_ORDERBOOK_TOP=1  实盘验证/真单默认记录买一卖一快照（1 开启，0 关闭）" \
     "  RECORD_ORDERBOOK_REFRESH_SECONDS=0.5  买一卖一快照最小刷新间隔（秒）" \
-    "  RECORD_OUTPUT_DIR=...          批量任务默认数据流根目录（会拼接 /record_job_market）" \
+    "  RECORD_OUTPUT_DIR=PATH         固定输出根目录（设置后不再自动建 runs/ 子目录）" \
+    "  RECORD_RUN_ISOLATION=1         默认 1：dm/dmb/ds/… 每次写入 artifacts/live/runs/<UTC>_<版本>_<命令周期>；" \
+    "                                 pm/p/x/ms 默认跟「最近一次」该目录；0=旧行为仅用 record_job" \
     "  RECORD_INCLUDE_PERFORMANCE_REPORT=0  mstart replay 是否生成绩效 Excel（sim_batch_replay_performance_report）" \
     "  RECORD_INCLUDE_TRADE_PROCESS=0       mstart replay 是否生成交易过程 Excel（batch_replay_trade_process_zh）" \
     "  RECORD_DASHBOARD_REFRESH_EVERY_CYCLES=6  mstart replay 每 N 个周期刷新一次中途 dashboard（默认 6）" \
@@ -146,6 +148,7 @@ fi
 PM_TAIL_LINES="20"
 BATCH_FILE_ARG=""
 MS_TAIL_LINES="0"
+EXPLICIT_OUTPUT_DIR="0"
 
 if [[ "$COMMAND" =~ ^(rb|runb|run-bg)([0-9]+)$ ]]; then
   COMMAND="rb"
@@ -197,6 +200,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     -o)
       OUTPUT_DIR="$2"
+      EXPLICIT_OUTPUT_DIR="1"
       shift 2
       ;;
     -u)
@@ -246,6 +250,51 @@ if [[ "$COMMAND" == "cre" || "$COMMAND" == "creb" || "$COMMAND" == "dcre" ]]; th
   if [[ "$CRE_CYCLE_ARG_SET" != "true" && "$EXPLICIT_CRE_CYCLES" != "1" ]]; then
     CYCLES="1"
   fi
+fi
+
+# 每次 dm/dmb/ds/… 使用独立目录（UTC 时间 + VERSION + 子命令），避免日志/报表与旧运行混放。
+# 显式 -o 或环境变量 RECORD_OUTPUT_DIR 时不会改写 OUTPUT_DIR。
+# RECORD_RUN_ISOLATION=0 可恢复仅用 artifacts/live/record_job 的旧行为。
+RECORD_RUN_ISOLATION="${RECORD_RUN_ISOLATION:-1}"
+LAST_RECORD_DIR_FILE="$ROOT_DIR/artifacts/live/.last_record_output_dir"
+mkdir -p "$ROOT_DIR/artifacts/live/runs"
+
+_polynet_version_tag() {
+  (
+ cd "$ROOT_DIR" || exit 1
+ PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" -c \
+   "from polynet_ai.reporting.excel_export import get_version_tag as t; print(t())" 2>/dev/null \
+   | tr -d '\r\n'
+ )
+}
+
+_auto_run_output_dir() {
+  local ts ver safe_ver cmd_tag
+  ts="$(date -u +%Y%m%d_%H%M%S)"
+  ver="$(_polynet_version_tag)"
+  if [[ -z "$ver" ]]; then
+    ver="Vunknown"
+  fi
+  safe_ver="$(printf '%s' "$ver" | tr '/\\:*?"<>|' '_')"
+  cmd_tag="${COMMAND}${CYCLES}"
+  printf '%s' "$ROOT_DIR/artifacts/live/runs/${ts}_${safe_ver}_${cmd_tag}"
+}
+
+if [[ "$RECORD_RUN_ISOLATION" == "1" && "$EXPLICIT_OUTPUT_DIR" != "1" && -z "${RECORD_OUTPUT_DIR:-}" ]]; then
+  case "$COMMAND" in
+    dmb|dm|ds|dcre|cre|creb|rb|runb|s|r)
+      OUTPUT_DIR="$(_auto_run_output_dir)"
+      mkdir -p "$OUTPUT_DIR"
+      printf '%s\n' "$OUTPUT_DIR" > "$LAST_RECORD_DIR_FILE"
+      ;;
+    pm|p|x|ms|prm)
+      if [[ -f "$LAST_RECORD_DIR_FILE" ]]; then
+        OUTPUT_DIR="$(tr -d '\r\n' < "$LAST_RECORD_DIR_FILE")"
+      else
+        OUTPUT_DIR="$ROOT_DIR/artifacts/live/record_job"
+      fi
+      ;;
+  esac
 fi
 
 poly_build_cycle_review_real_args() {
@@ -675,6 +724,7 @@ except Exception:
       sleep 0.2
     done
 
+    echo "本次运行根目录: $OUTPUT_DIR"
     echo "Dashboard 控制台已启动: $DASHBOARD_URL"
     echo "后台实盘验证已启动 (pid=${MARKET_PID:-未知})"
     echo "Dashboard 日志: $DASHBOARD_LOG"
