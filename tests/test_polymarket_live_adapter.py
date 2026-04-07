@@ -187,6 +187,74 @@ def test_orderbook_top_snapshot_enricher_caches_books(monkeypatch) -> None:
     assert second["orderbook_snapshot_age_ms"] == 200.0
 
 
+def test_orderbook_top_snapshot_enricher_treats_clob_404_as_empty_side() -> None:
+    """一侧 CLOB 404 时不应拖垮整段快照，也不应再触发 enrich 的失败日志路径。"""
+
+    class Poly404(Exception):
+        status_code = 404
+        error_msg = {"error": "No orderbook exists for the requested token id"}
+
+        def __str__(self) -> str:
+            return (
+                "PolyApiException[status_code=404, "
+                "error_message={'error': 'No orderbook exists for the requested token id'}]"
+            )
+
+    class FakeLevel:
+        def __init__(self, price: str, size: str) -> None:
+            self.price = price
+            self.size = size
+
+    class FakeBook:
+        def __init__(self, bids, asks) -> None:
+            self.bids = bids
+            self.asks = asks
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def get_order_book(self, token_id: str):
+            self.calls.append(token_id)
+            if token_id == "yes-token":
+                raise Poly404()
+            return FakeBook(
+                bids=[FakeLevel("0.52", "11")],
+                asks=[FakeLevel("0.53", "7")],
+            )
+
+    spec = PolymarketMarketSpec(
+        slug="btc-updown-5m-1773826800",
+        series_slug="btc-up-or-down-5m",
+        condition_id="0xabc",
+        yes_token_id="yes-token",
+        no_token_id="no-token",
+        start_time=datetime(2026, 3, 20, 12, 0, 0),
+        end_time=datetime(2026, 3, 20, 12, 5, 0),
+        raw={},
+    )
+
+    logs: list[str] = []
+    enricher = OrderBookTopSnapshotEnricher(FakeClient(), refresh_interval_seconds=0.0, log_fn=logs.append)
+    snap = enricher.enrich(
+        TradeEvent(
+            market_id=spec.series_slug,
+            cycle_id=spec.slug,
+            timestamp=datetime(2026, 3, 20, 12, 0, 1),
+            price=0.5,
+            shares=1.0,
+            outcome="up",
+        ),
+        spec,
+    )
+
+    assert logs == []
+    assert snap["up_bid1_price"] is None
+    assert snap["down_bid1_price"] == 0.52
+    assert snap["down_ask1_price"] == 0.53
+    assert snap.get("orderbook_snapshot_stale") is not True
+
+
 def test_iter_polymarket_trade_events_applies_metadata_enricher(monkeypatch) -> None:
     spec = PolymarketMarketSpec(
         slug="btc-updown-5m-1774012500",

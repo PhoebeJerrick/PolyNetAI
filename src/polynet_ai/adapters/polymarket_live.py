@@ -395,6 +395,48 @@ def _top_of_book_metadata(prefix: str, book: Any) -> dict[str, Any]:
     }
 
 
+def _empty_top_of_book_metadata(prefix: str) -> dict[str, Any]:
+    return {
+        f"{prefix}_bid1_price": None,
+        f"{prefix}_bid1_size": None,
+        f"{prefix}_ask1_price": None,
+        f"{prefix}_ask1_size": None,
+    }
+
+
+def _is_missing_clob_orderbook(exc: BaseException) -> bool:
+    """
+    CLOB `get_order_book` 对部分 token 返回 404，文案常为「No orderbook exists for the requested token id」。
+    这与 WS 上仍有 last_trade_price 并不矛盾（一侧无挂单簿、簿尚未就绪、或 Gamma/CLOB 短暂不一致时可见）。
+    """
+    code = getattr(exc, "status_code", None)
+    if code == 404:
+        return True
+    parts: list[str] = []
+    err = getattr(exc, "error_msg", None)
+    if isinstance(err, dict):
+        parts.append(json.dumps(err, ensure_ascii=False))
+    elif err is not None:
+        parts.append(str(err))
+    parts.append(str(exc))
+    blob = " ".join(parts).lower()
+    if "no orderbook" in blob:
+        return True
+    if "orderbook" in blob and "not exist" in blob:
+        return True
+    return False
+
+
+def _orderbook_top_metadata_safe(client: Any, prefix: str, token_id: str) -> dict[str, Any]:
+    try:
+        book = client.get_order_book(token_id)
+        return _top_of_book_metadata(prefix, book)
+    except Exception as exc:
+        if _is_missing_clob_orderbook(exc):
+            return _empty_top_of_book_metadata(prefix)
+        raise
+
+
 @dataclass(slots=True)
 class OrderBookTopSnapshotEnricher:
     client: Any
@@ -434,8 +476,8 @@ class OrderBookTopSnapshotEnricher:
             "orderbook_snapshot_source": "clob_order_book",
             "orderbook_snapshot_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         }
-        payload.update(_top_of_book_metadata("up", self.client.get_order_book(spec.yes_token_id)))
-        payload.update(_top_of_book_metadata("down", self.client.get_order_book(spec.no_token_id)))
+        payload.update(_orderbook_top_metadata_safe(self.client, "up", spec.yes_token_id))
+        payload.update(_orderbook_top_metadata_safe(self.client, "down", spec.no_token_id))
         return payload
 
 
