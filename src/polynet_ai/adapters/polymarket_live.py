@@ -849,20 +849,17 @@ def iter_polymarket_trade_events(
             if sslopt is not None:
                 ws_kw["sslopt"] = sslopt
             ws_kw.update(_websocket_proxy_kwargs())
-            # DNS 预解析：用缓存 IP 替代主机名，跳过代理 DNS 慢解析
-            resolved_ip = _resolve_host_cached(_MARKET_WS_HOST)
-            ws_url = MARKET_WS_URL
-            if resolved_ip is not None:
-                ws_url = MARKET_WS_URL.replace(_MARKET_WS_HOST, resolved_ip)
-                ws_kw.setdefault("host", _MARKET_WS_HOST)  # SNI / Host 头仍用域名
-                if log_fn is not None and reconnect_attempt == 0:
+            # DNS 预解析仅用于诊断日志；不替换 URL，避免破坏 Cloudflare SNI 握手
+            if log_fn is not None and reconnect_attempt == 0:
+                resolved_ip = _resolve_host_cached(_MARKET_WS_HOST)
+                if resolved_ip is not None:
                     log_fn(f"[ws-diag] DNS 预解析 {_MARKET_WS_HOST} -> {resolved_ip}")
             connection = None
             while True:
                 connect_err: BaseException | None = None
                 t_connect_start = time.monotonic()
                 try:
-                    connection = websocket.create_connection(ws_url, **ws_kw)
+                    connection = websocket.create_connection(MARKET_WS_URL, **ws_kw)
                     t_connect_elapsed = time.monotonic() - t_connect_start
                     connection.settimeout(receive_timeout_seconds)
                     connection.send(
@@ -880,7 +877,6 @@ def iter_polymarket_trade_events(
                         log_fn(
                             f"[ws-diag] 连接建立成功 {spec.slug} "
                             f"耗时={t_connect_elapsed:.2f}s "
-                            f"url={'IP' if resolved_ip else 'host'} "
                             f"proxy={'yes' if ws_kw.get('http_proxy_host') else 'no'}"
                         )
                     break
