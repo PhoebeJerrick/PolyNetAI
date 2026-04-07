@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import ssl
 import time
 from dataclasses import dataclass, field
@@ -25,6 +26,29 @@ from polynet_ai.domain.models import TradeEvent
 
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
 MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+_MARKET_WS_HOST = "ws-subscriptions-clob.polymarket.com"
+
+# ---------------------------------------------------------------------------
+# DNS 预解析缓存 — 避免每次重连都走代理/系统 DNS，减少 60-140s 的重连空窗
+# ---------------------------------------------------------------------------
+_dns_cache: dict[str, tuple[str, float]] = {}  # host -> (ip, expire_monotonic)
+_DNS_CACHE_TTL = 120.0  # 秒
+
+
+def _resolve_host_cached(host: str, port: int = 443) -> str | None:
+    """返回缓存的 IP 地址；缓存失效或解析失败时返回 None（回退到让 websocket-client 自行解析）。"""
+    cached = _dns_cache.get(host)
+    if cached is not None and time.monotonic() < cached[1]:
+        return cached[0]
+    try:
+        infos = socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        if infos:
+            ip = infos[0][4][0]
+            _dns_cache[host] = (ip, time.monotonic() + _DNS_CACHE_TTL)
+            return ip
+    except OSError:
+        pass
+    return None
 
 
 def _ws_error_detail(exc: BaseException, *, max_len: int = 220) -> str:
@@ -751,12 +775,13 @@ def iter_polymarket_trade_events(
     *,
     metadata_enricher: Callable[[TradeEvent, PolymarketMarketSpec], dict[str, Any]] | None = None,
     align_orderbook_with_trade_ws: bool = True,
-    ping_interval_seconds: float = 10.0,
+    ping_interval_seconds: float = 5.0,
     receive_timeout_seconds: float = 1.0,
     cycle_grace_seconds: float = 5.0,
     reconnect_delay_seconds: float = 1.0,
     reconnect_max_delay_seconds: float = 8.0,
     data_silence_timeout_seconds: float = 45.0,
+    connect_timeout_seconds: float = 15.0,
     post_window_start_delay_seconds: float = DEFAULT_POST_WINDOW_START_DELAY_SECONDS,
     log_fn: Callable[[str], None] | None = None,
 ) -> Iterable[TradeEvent]:
@@ -819,16 +844,26 @@ def iter_polymarket_trade_events(
             if close_after is not None and time.monotonic() >= close_after:
                 break
 
-            ws_kw: dict[str, Any] = {"timeout": 10}
+            ws_kw: dict[str, Any] = {"timeout": connect_timeout_seconds}
             sslopt = _ws_ssl_opts()
             if sslopt is not None:
                 ws_kw["sslopt"] = sslopt
             ws_kw.update(_websocket_proxy_kwargs())
+            # DNS 预解析：用缓存 IP 替代主机名，跳过代理 DNS 慢解析
+            resolved_ip = _resolve_host_cached(_MARKET_WS_HOST)
+            ws_url = MARKET_WS_URL
+            if resolved_ip is not None:
+                ws_url = MARKET_WS_URL.replace(_MARKET_WS_HOST, resolved_ip)
+                ws_kw.setdefault("host", _MARKET_WS_HOST)  # SNI / Host 头仍用域名
+                if log_fn is not None and reconnect_attempt == 0:
+                    log_fn(f"[ws-diag] DNS 预解析 {_MARKET_WS_HOST} -> {resolved_ip}")
             connection = None
             while True:
                 connect_err: BaseException | None = None
+                t_connect_start = time.monotonic()
                 try:
-                    connection = websocket.create_connection(MARKET_WS_URL, **ws_kw)
+                    connection = websocket.create_connection(ws_url, **ws_kw)
+                    t_connect_elapsed = time.monotonic() - t_connect_start
                     connection.settimeout(receive_timeout_seconds)
                     connection.send(
                         json.dumps(
@@ -841,6 +876,13 @@ def iter_polymarket_trade_events(
                     )
                     reconnect_attempt = 0
                     last_ping = time.monotonic()
+                    if log_fn is not None:
+                        log_fn(
+                            f"[ws-diag] 连接建立成功 {spec.slug} "
+                            f"耗时={t_connect_elapsed:.2f}s "
+                            f"url={'IP' if resolved_ip else 'host'} "
+                            f"proxy={'yes' if ws_kw.get('http_proxy_host') else 'no'}"
+                        )
                     break
                 except closed_exc as e:
                     connect_err = e
@@ -856,6 +898,7 @@ def iter_polymarket_trade_events(
                             pass
                         connection = None
 
+                t_connect_elapsed = time.monotonic() - t_connect_start
                 if close_after is not None and time.monotonic() >= close_after:
                     break
                 # P2-fix: 指数退避重连
@@ -863,7 +906,8 @@ def iter_polymarket_trade_events(
                 if log_fn is not None:
                     why = f" {_ws_error_detail(connect_err)}" if connect_err is not None else ""
                     log_fn(
-                        f"[polymarket] 连接 {spec.slug} 失败{why}，"
+                        f"[ws-diag] 连接 {spec.slug} 失败{why}，"
+                        f"连接耗时={t_connect_elapsed:.2f}s "
                         f"{backoff_delay:.1f}s 后重试（第 {reconnect_attempt} 次）"
                     )
                 time.sleep(max(0.1, backoff_delay))
@@ -873,6 +917,9 @@ def iter_polymarket_trade_events(
 
             # P0-fix: 数据静默看门狗 — 记录最近一次收到有效 trade 事件的时间
             last_data_at = time.monotonic()
+            session_start = time.monotonic()  # 诊断：本次连接会话起始时间
+            session_events = 0  # 诊断：本次连接会话收到的事件数
+            ping_sent_count = 0  # 诊断：本次会话发送的心跳数
 
             try:
                 while True:
@@ -887,14 +934,19 @@ def iter_polymarket_trade_events(
                             )
                         break
 
-                    # P1-fix: 使用 RFC 6455 协议层 ping 帧代替文本 "PING"
+                    # P3-fix: 改回文本 PING — 代理/CDN 对文本帧透传率远高于二进制 ping 帧
                     if now - last_ping >= ping_interval_seconds:
                         try:
-                            if hasattr(connection, "ping"):
-                                connection.ping()
-                            else:
-                                connection.send("PING")
+                            connection.send("PING")
+                            ping_sent_count += 1
                         except Exception:
+                            if log_fn is not None:
+                                session_dur = now - session_start
+                                log_fn(
+                                    f"[ws-diag] PING 发送失败 {spec.slug} "
+                                    f"session={session_dur:.1f}s events={session_events} "
+                                    f"pings_sent={ping_sent_count}"
+                                )
                             break
                         last_ping = now
 
@@ -961,16 +1013,20 @@ def iter_polymarket_trade_events(
                             if metadata_enricher is not None:
                                 event.metadata.update(metadata_enricher(event, spec) or {})
                             last_data_at = time.monotonic()
+                            session_events += 1
                             if eff_cutoff_naive is not None and event.timestamp < eff_cutoff_naive:
                                 continue
                             yield event
             except closed_exc as e:
                 reconnect_attempt += 1
+                session_dur = time.monotonic() - session_start
                 # P2-fix: 指数退避重连
                 backoff_delay = min(reconnect_max_delay_seconds, reconnect_delay_seconds * (2 ** min(reconnect_attempt - 1, 5)))
                 if log_fn is not None:
                     log_fn(
-                        f"[polymarket] 连接中断 {spec.slug}（{_ws_error_detail(e)}），"
+                        f"[ws-diag] 连接中断 {spec.slug}（{_ws_error_detail(e)}），"
+                        f"session={session_dur:.1f}s events={session_events} "
+                        f"pings_sent={ping_sent_count} "
                         f"{backoff_delay:.1f}s 后重连（第 {reconnect_attempt} 次）"
                     )
                 time.sleep(max(0.1, backoff_delay))
@@ -1021,10 +1077,11 @@ def iter_polymarket_trade_events_robot(
     metadata_enricher: Callable[[TradeEvent, PolymarketMarketSpec], dict[str, Any]] | None = None,
     poll_interval_seconds: float = 1.0,
     discover_limit: int = 12,
-    ping_interval_seconds: float = 10.0,
+    ping_interval_seconds: float = 5.0,
     receive_timeout_seconds: float = 1.0,
     cycle_grace_seconds: float = 5.0,
     data_silence_timeout_seconds: float = 45.0,
+    connect_timeout_seconds: float = 15.0,
     post_window_start_delay_seconds: float = DEFAULT_POST_WINDOW_START_DELAY_SECONDS,
     log_fn: Callable[[str], None] | None = None,
 ) -> Iterable[TradeEvent]:
@@ -1069,6 +1126,7 @@ def iter_polymarket_trade_events_robot(
                 receive_timeout_seconds=receive_timeout_seconds,
                 cycle_grace_seconds=cycle_grace_seconds,
                 data_silence_timeout_seconds=data_silence_timeout_seconds,
+                connect_timeout_seconds=connect_timeout_seconds,
                 post_window_start_delay_seconds=post_window_start_delay_seconds,
                 log_fn=log_fn,
             )
