@@ -6,7 +6,7 @@ import re
 import ssl
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import quote, urlencode, urlparse
@@ -681,13 +681,31 @@ def iter_polymarket_trade_events(
         ):
             # Gamma 与 slug 时间戳异常不一致时，优先以实时市场 start_time 作为窗口起点，避免误判超窗。
             cycle_window_start = spec.start_time
+        # 时间桶市场以 slug 为准：window_start + cycle_seconds 才是硬结束时刻。
+        # 对于这类市场，不依赖 Gamma end_time 触发切窗，避免旧窗流拖延导致错过新窗前段。
+        effective_cycle_end = (
+            cycle_window_start + timedelta(seconds=float(cycle_seconds))
+            if cycle_window_start is not None
+            else spec.end_time
+        )
         late_event_stop_logged = False
+        hard_end_stop_logged = False
         reconnect_attempt = 0
 
         while True:
             utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
-            if spec.end_time is not None and utc_now >= spec.end_time:
+            if effective_cycle_end is not None and utc_now >= effective_cycle_end:
                 close_after = close_after or (time.monotonic() + cycle_grace_seconds)
+                if log_fn is not None and not hard_end_stop_logged:
+                    log_fn(
+                        "### [窗口到期切换] "
+                        f"cycle={spec.slug} reason=hard_window_end "
+                        f"window_start={cycle_window_start.isoformat() if cycle_window_start is not None else '-'} "
+                        f"effective_end={effective_cycle_end.isoformat()} "
+                        f"now_utc={utc_now.isoformat()} "
+                        "action=switch_to_next_cycle ###"
+                    )
+                    hard_end_stop_logged = True
             if close_after is not None and time.monotonic() >= close_after:
                 break
 
@@ -777,8 +795,18 @@ def iter_polymarket_trade_events(
 
                     if raw is None:
                         utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
-                        if spec.end_time is not None and utc_now >= spec.end_time:
+                        if effective_cycle_end is not None and utc_now >= effective_cycle_end:
                             close_after = close_after or (time.monotonic() + cycle_grace_seconds)
+                            if log_fn is not None and not hard_end_stop_logged:
+                                log_fn(
+                                    "### [窗口到期切换] "
+                                    f"cycle={spec.slug} reason=hard_window_end "
+                                    f"window_start={cycle_window_start.isoformat() if cycle_window_start is not None else '-'} "
+                                    f"effective_end={effective_cycle_end.isoformat()} "
+                                    f"now_utc={utc_now.isoformat()} "
+                                    "action=switch_to_next_cycle ###"
+                                )
+                                hard_end_stop_logged = True
                         if close_after is not None and time.monotonic() >= close_after:
                             break
                         continue
@@ -831,8 +859,22 @@ def iter_polymarket_trade_events(
 
             if close_after is not None and time.monotonic() >= close_after:
                 break
-            if spec.end_time is not None and datetime.now(timezone.utc).replace(tzinfo=None) >= spec.end_time:
+            if (
+                effective_cycle_end is not None
+                and datetime.now(timezone.utc).replace(tzinfo=None) >= effective_cycle_end
+            ):
                 close_after = close_after or (time.monotonic() + cycle_grace_seconds)
+                if log_fn is not None and not hard_end_stop_logged:
+                    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+                    log_fn(
+                        "### [窗口到期切换] "
+                        f"cycle={spec.slug} reason=hard_window_end "
+                        f"window_start={cycle_window_start.isoformat() if cycle_window_start is not None else '-'} "
+                        f"effective_end={effective_cycle_end.isoformat()} "
+                        f"now_utc={now_utc.isoformat()} "
+                        "action=switch_to_next_cycle ###"
+                    )
+                    hard_end_stop_logged = True
                 if close_after is not None and time.monotonic() >= close_after:
                     break
             if close_after is None:
