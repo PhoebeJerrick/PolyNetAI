@@ -13,10 +13,13 @@ from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from polynet_ai.adapters.cycle_window_timing import (
+    DEFAULT_CYCLE_SECONDS,
+    cycle_seconds_from_market_slug,
     DEFAULT_POST_WINDOW_START_DELAY_SECONDS,
     effective_strategy_start_naive_utc,
     naive_utc_to_aware_utc,
     sleep_until_utc_instant,
+    window_start_naive_utc_from_slug,
 )
 from polynet_ai.domain.models import TradeEvent
 
@@ -668,6 +671,17 @@ def iter_polymarket_trade_events(
                     )
                 sleep_until_utc_instant(eff_aware)
         close_after = None
+        cycle_seconds = cycle_seconds_from_market_slug(spec.slug) or DEFAULT_CYCLE_SECONDS
+        slug_window_start = window_start_naive_utc_from_slug(spec.slug)
+        cycle_window_start = spec.start_time or slug_window_start
+        if (
+            spec.start_time is not None
+            and slug_window_start is not None
+            and abs((spec.start_time - slug_window_start).total_seconds()) > float(cycle_seconds)
+        ):
+            # Gamma 与 slug 时间戳异常不一致时，优先以实时市场 start_time 作为窗口起点，避免误判超窗。
+            cycle_window_start = spec.start_time
+        late_event_stop_logged = False
         reconnect_attempt = 0
 
         while True:
@@ -779,6 +793,19 @@ def iter_polymarket_trade_events(
 
                         event = ws_message_to_trade_event(message, spec)
                         if event is not None:
+                            if cycle_window_start is not None:
+                                elapsed = (event.timestamp - cycle_window_start).total_seconds()
+                                if elapsed > float(cycle_seconds):
+                                    # 硬边界：超过周期长度后不再消费旧窗事件，尽快切换到新周期。
+                                    close_after = time.monotonic()
+                                    if log_fn is not None and not late_event_stop_logged:
+                                        log_fn(
+                                            "### [超窗强制切换] "
+                                            f"cycle={spec.slug} elapsed={elapsed:.3f}s "
+                                            f"limit={cycle_seconds}s action=switch_to_next_cycle ###"
+                                        )
+                                        late_event_stop_logged = True
+                                    continue
                             if metadata_enricher is not None:
                                 event.metadata.update(metadata_enricher(event, spec) or {})
                             last_data_at = time.monotonic()

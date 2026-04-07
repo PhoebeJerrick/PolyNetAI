@@ -14,6 +14,7 @@ from typing import Callable, TypeVar
 from polynet_ai.domain.models import TradeEvent
 
 DEFAULT_POST_WINDOW_START_DELAY_SECONDS = 10.0
+DEFAULT_CYCLE_SECONDS = 300
 
 _SLUG_EPOCH_SUFFIX = re.compile(r"-updown-\d+m-(\d+)$")
 
@@ -148,14 +149,17 @@ def poll_until_success(
 
 
 def trade_event_passes_post_window_delay(event: TradeEvent, post_window_start_delay_seconds: float) -> bool:
-    """是否已到达「窗绝对起点 + delay」之后（用于逐条流式门控，与 ``filter_trade_events_*`` 一致）。"""
-    if post_window_start_delay_seconds <= 0:
-        return True
+    """事件是否在有效窗口内：``[window_start + delay, window_start + cycle_seconds]``。"""
     ws = window_start_naive_utc_from_slug(event.cycle_id)
     if ws is None:
         return True
-    cutoff = ws + timedelta(seconds=post_window_start_delay_seconds)
-    return event.timestamp >= cutoff
+    cycle_seconds = cycle_seconds_from_market_slug(event.cycle_id) or DEFAULT_CYCLE_SECONDS
+    elapsed = (event.timestamp - ws).total_seconds()
+    if elapsed > float(cycle_seconds):
+        return False
+    if post_window_start_delay_seconds <= 0:
+        return True
+    return elapsed >= float(post_window_start_delay_seconds)
 
 
 def filter_trade_events_after_post_window_delay(
@@ -163,7 +167,7 @@ def filter_trade_events_after_post_window_delay(
     *,
     post_window_start_delay_seconds: float,
 ) -> list[TradeEvent]:
-    """丢弃时间戳早于「窗绝对起点 + delay」的事件（与 WebSocket 路径策略生效时刻对齐）。"""
-    if post_window_start_delay_seconds <= 0 or not events:
+    """仅保留有效窗口内事件：``[window_start + delay, window_start + cycle_seconds]``。"""
+    if not events:
         return events
     return [e for e in events if trade_event_passes_post_window_delay(e, post_window_start_delay_seconds)]

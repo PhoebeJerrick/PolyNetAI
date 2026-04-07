@@ -434,6 +434,22 @@ path_display_repo_rel() {
   printf '%s\n' "$raw"
 }
 
+# 终端摘要展示用：仅显示路径末级标签（如 ../Input/04071459 -> 04071459）。
+path_display_tail_label() {
+  local raw="$1"
+  raw="$(normalize_path_separators "$(trim_trailing_cr "$raw")")"
+  if [[ -z "$raw" || "$raw" == "-" ]]; then
+    printf '%s\n' "$raw"
+    return 0
+  fi
+  local no_trailing="${raw%/}"
+  if [[ -z "$no_trailing" ]]; then
+    printf '%s\n' "$raw"
+    return 0
+  fi
+  printf '%s\n' "$(basename "$no_trailing")"
+}
+
 read_registry_workspace_root() {
   local registry_file="$1"
   [[ -f "$registry_file" ]] || return 1
@@ -1306,7 +1322,7 @@ except Exception:
       echo "  输出:   $(path_display_repo_rel "$reg_output_dir")"
       echo "  启动:   $reg_time"
       echo "  日志:   $(path_display_repo_rel "$reg_log")"
-      echo "  数据流: $(path_display_repo_rel "$reg_data_stream_dir")"
+      echo "  数据流: $(path_display_tail_label "$reg_data_stream_dir")"
       # 计算已用时间
       reg_elapsed_str=""
       if [[ -n "$reg_time" ]]; then

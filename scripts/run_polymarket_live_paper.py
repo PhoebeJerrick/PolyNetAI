@@ -628,6 +628,28 @@ def main() -> int:
         write_excel=True,
         redeem_audit_df=redeem_audit_df,
     )
+    # 额外生成实盘验证绩效报告（performance Excel），便于直接在当前输出目录查看。
+    live_perf_path: Path | None = None
+    summary_df_live, cycle_df_live, decision_df_live = _build_summary_from_live_result(
+        result.replay_result,
+        new_cycle_slugs=[],
+    )
+    if not summary_df_live.empty:
+        live_perf_path = build_performance_report_zh(
+            resolved_batch_dir=Path(args.output_dir),
+            summary_df=summary_df_live,
+            cycle_df=cycle_df_live,
+            decision_df=decision_df_live,
+            output_path=Path(args.output_dir),
+            display_batch_dir=Path(args.output_dir),
+            report_source="实盘行情验证",
+            report_name_prefix="real",
+            capital_reset_mode=args.capital_reset_mode,
+            starting_cash=args.starting_cash,
+        )
+        print(f"  ✓ 实盘验证绩效报告 (Excel): {live_perf_path}")
+    else:
+        print("  ℹ 本次无有效周期，跳过实盘验证绩效报告生成")
     print(f"  ✓ 数据已导出")
     stage_times["5_export"] = (datetime.now() - stage_5_start).total_seconds()
 
