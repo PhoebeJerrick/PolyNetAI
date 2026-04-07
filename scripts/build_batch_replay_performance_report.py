@@ -54,6 +54,14 @@ DEFAULT_POSITION_VALUE_DENOMINATOR = 85.0
 DEFAULT_PHASE_END_SECONDS: tuple[float, float, float] = (70.0, 160.0, 240.0)
 
 
+def _normalize_cycle_slug(value: object) -> str:
+    """cycle_slug 仅保留周期目录名，避免在报表中出现绝对路径。"""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text.replace("\\", "/").rstrip("/").split("/")[-1]
+
+
 def _cycle_starts_from_full_decision_frame(full: pd.DataFrame) -> pd.DataFrame:
     """``full`` 须含 ``market_id``、``_pid``、``timestamp``（已 ``to_datetime(..., utc=True)``）。
 
@@ -198,6 +206,8 @@ def _load_summary(batch_dir: Path, cycle_dirs: list[Path]) -> pd.DataFrame:
     if summary_csv.exists():
         summary_df = pd.read_csv(summary_csv)
         if not summary_df.empty:
+            if "cycle_slug" in summary_df.columns:
+                summary_df["cycle_slug"] = summary_df["cycle_slug"].map(_normalize_cycle_slug)
             return summary_df.sort_values("cycle_slug").reset_index(drop=True)
 
     rows: list[dict[str, object]] = []
@@ -236,6 +246,15 @@ def _load_cycle_frames(cycle_dirs: list[Path]) -> tuple[pd.DataFrame, pd.DataFra
         decision_rows.append(decisions_df)
     cycle_df = pd.concat(cycle_rows, ignore_index=True) if cycle_rows else pd.DataFrame()
     decision_df = pd.concat(decision_rows, ignore_index=True) if decision_rows else pd.DataFrame()
+    if not cycle_df.empty and "cycle_slug" in cycle_df.columns:
+        cycle_df["cycle_slug"] = cycle_df["cycle_slug"].map(_normalize_cycle_slug)
+    if not cycle_df.empty and "cycle_id" in cycle_df.columns:
+        cycle_df["cycle_id"] = cycle_df["cycle_id"].map(_normalize_cycle_slug)
+    if not decision_df.empty:
+        if "cycle_slug" in decision_df.columns:
+            decision_df["cycle_slug"] = decision_df["cycle_slug"].map(_normalize_cycle_slug)
+        if "cycle_id" in decision_df.columns:
+            decision_df["cycle_id"] = decision_df["cycle_id"].map(_normalize_cycle_slug)
     return cycle_df, decision_df
 
 
@@ -837,6 +856,7 @@ def _append_tracker_style_sheet(
 ) -> None:
     """调用 analyze_polymarket_tracker.compute + format_ws，生成与 v5 一致的累计持仓表。"""
     import analyze_polymarket_tracker as apt
+    from openpyxl.styles import Alignment
 
     name = TRACKER_STYLE_SHEET
     if raw_input.empty:
@@ -852,7 +872,18 @@ def _append_tracker_style_sheet(
     if "市场标题" in proc.columns:
         proc = proc.drop(columns=["市场标题"])
     proc.to_excel(writer, sheet_name=name, index=False)
-    apt.format_ws(writer.sheets[name], meta.get("marker_col"))
+    ws = writer.sheets[name]
+    apt.format_ws(ws, meta.get("marker_col"))
+    # 可读性：将“阶段”列按值居中。
+    phase_col_idx = None
+    for idx, cell in enumerate(ws[1], start=1):
+        if str(cell.value or "").strip() == "阶段":
+            phase_col_idx = idx
+            break
+    if phase_col_idx is not None and ws.max_row >= 2:
+        for row in range(2, ws.max_row + 1):
+            c = ws.cell(row=row, column=phase_col_idx)
+            c.alignment = Alignment(horizontal="center", vertical="center")
 
 
 def _finalize_xlsx_workbook(path: Path, *, skip_sheet_titles: frozenset[str] | None = None) -> None:

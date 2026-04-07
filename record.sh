@@ -400,6 +400,40 @@ resolve_abs_path() {
   fi
 }
 
+# 终端展示用：尽量输出相对工程根（ROOT_DIR）的路径，避免冗长绝对路径。
+path_display_repo_rel() {
+  local raw="$1"
+  raw="$(normalize_path_separators "$(trim_trailing_cr "$raw")")"
+  if [[ -z "$raw" || "$raw" == "-" ]]; then
+    printf '%s\n' "$raw"
+    return 0
+  fi
+  local abs
+  abs="$(resolve_abs_path "$raw")"
+  if [[ -z "$abs" || "$abs" == "-" ]]; then
+    printf '%s\n' "$raw"
+    return 0
+  fi
+  local root="${ROOT_DIR%/}"
+  if [[ "$abs" == "$root" ]]; then
+    printf '.\n'
+    return 0
+  fi
+  if [[ "$abs" == "$root/"* ]]; then
+    printf '%s\n' "${abs#"$root"/}"
+    return 0
+  fi
+  if command -v realpath >/dev/null 2>&1; then
+    local rel
+    rel="$(realpath -s --relative-to="$root" "$abs" 2>/dev/null || true)"
+    if [[ -n "$rel" ]]; then
+      printf '%s\n' "$rel"
+      return 0
+    fi
+  fi
+  printf '%s\n' "$raw"
+}
+
 read_registry_workspace_root() {
   local registry_file="$1"
   [[ -f "$registry_file" ]] || return 1
@@ -990,7 +1024,6 @@ except Exception:
   mstart|batch-start)
     BATCH_FILE="${BATCH_FILE_ARG:-$DEFAULT_BATCH_FILE}"
     BATCH_FILE="$(normalize_path_separators "$BATCH_FILE")"
-    BATCH_FILE_ABS="$(resolve_abs_path "$BATCH_FILE")"
     if [[ ! -f "$BATCH_FILE" ]]; then
       echo "错误: 批量任务配置文件不存在: $BATCH_FILE" >&2
       echo "" >&2
@@ -1034,8 +1067,7 @@ except Exception:
       printf '# workspace_root=%s\n' "$ROOT_DIR" > "$BATCH_REGISTRY"
     fi
     echo "读取批量任务配置: $BATCH_FILE"
-    echo "工程目录: $ROOT_DIR"
-    echo "批量配置(绝对): $BATCH_FILE_ABS"
+    echo "工程目录: ."
     echo ""
     while IFS= read -r line || [[ -n "$line" ]]; do
       line="$(trim_trailing_cr "$line")"
@@ -1199,12 +1231,9 @@ except Exception:
       echo "${JOB_MARKET_PID:-}  $job_output_dir  $job_cycles  $job_config  $JOB_LOG  $BATCH_TIMESTAMP  $job_data_stream_dir  $job_type" >> "$BATCH_REGISTRY"
       BATCH_STARTED_COUNT=$((BATCH_STARTED_COUNT + 1))
       echo "任务 $BATCH_JOB_INDEX 已启动 [${job_type}]: pid=${JOB_MARKET_PID:-未知}, 周期=$job_cycles, 配置=$job_config"
-      echo "  日志: $JOB_LOG"
-      echo "  日志(绝对): $(resolve_abs_path "$JOB_LOG")"
-      echo "  输出: $job_output_dir"
-      echo "  输出(绝对): $(resolve_abs_path "$job_output_dir")"
-      echo "  数据流: $job_data_stream_dir"
-      echo "  数据流(绝对): $(resolve_abs_path "$job_data_stream_dir")"
+      echo "  日志: $(path_display_repo_rel "$JOB_LOG")"
+      echo "  输出: $(path_display_repo_rel "$job_output_dir")"
+      echo "  数据流: $(path_display_repo_rel "$job_data_stream_dir")"
       echo ""
     done < "$BATCH_FILE"
     echo "共启动 $BATCH_STARTED_COUNT 个批量任务"
@@ -1219,8 +1248,7 @@ except Exception:
     fi
     assert_registry_workspace_match "$BATCH_REGISTRY" "ms" || exit 1
     echo "## 批量任务状态 (注册表: $BATCH_REGISTRY)"
-    echo "工程目录: $ROOT_DIR"
-    echo "注册表(绝对): $(resolve_abs_path "$BATCH_REGISTRY")"
+    echo "工程目录: ."
     echo ""
     TOTAL=0
     RUNNING=0
@@ -1275,13 +1303,10 @@ except Exception:
       echo "  状态:   $status_str"
       echo "  周期:   $reg_cycles"
       echo "  配置:   $reg_config"
-      echo "  输出:   $reg_output_dir"
-      echo "  输出(绝对):   $(resolve_abs_path "$reg_output_dir")"
+      echo "  输出:   $(path_display_repo_rel "$reg_output_dir")"
       echo "  启动:   $reg_time"
-      echo "  日志:   $reg_log"
-      echo "  日志(绝对):   $(resolve_abs_path "$reg_log")"
-      echo "  数据流: $reg_data_stream_dir"
-      echo "  数据流(绝对): $(resolve_abs_path "$reg_data_stream_dir")"
+      echo "  日志:   $(path_display_repo_rel "$reg_log")"
+      echo "  数据流: $(path_display_repo_rel "$reg_data_stream_dir")"
       # 计算已用时间
       reg_elapsed_str=""
       if [[ -n "$reg_time" ]]; then
@@ -1298,11 +1323,9 @@ except Exception:
       fi
       echo "  进度:   ${reg_progress_completed}/${reg_progress_total} (周期)${reg_elapsed_str}"
       if [[ "$reg_job_type" == "live" ]]; then
-        echo "  报告目录: $reg_data_stream_dir/batch_replay_outputs"
-        echo "  报告目录(绝对): $(resolve_abs_path "$reg_data_stream_dir/batch_replay_outputs")"
+        echo "  报告目录: $(path_display_repo_rel "$reg_data_stream_dir/batch_replay_outputs")"
       else
-        echo "  报告目录: $reg_output_dir/batch_replay_outputs"
-        echo "  报告目录(绝对): $(resolve_abs_path "$reg_output_dir/batch_replay_outputs")"
+        echo "  报告目录: $(path_display_repo_rel "$reg_output_dir/batch_replay_outputs")"
       fi
       if [[ "${MS_TAIL_LINES}" -gt 0 ]] && [[ -f "$reg_log" ]]; then
         echo "  --- 最近 $MS_TAIL_LINES 行日志 ---"
