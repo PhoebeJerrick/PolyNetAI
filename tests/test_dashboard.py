@@ -26,6 +26,7 @@ def build_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFra
                 "total_cycles": 2,
                 "total_net_profit": 12.5,
                 "average_cycle_profit": 6.25,
+                "sharpe_ratio": 1.23,
                 "win_rate": 0.5,
                 "max_drawdown": 3.2,
                 "total_fees": 0.4,
@@ -43,7 +44,7 @@ def build_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFra
     )
     cycles_df = pd.DataFrame(
         [
-            {"market_id": "BTC", "cycle_id": "c1", "cycle_net_profit": 10.0},
+            {"market_id": "BTC", "cycle_id": r"D:\PassiveIncome\Quantification\Projects\PolyMkt\Input\04071459\btc-updown-5m-1775345100", "cycle_net_profit": 10.0},
             {"market_id": "BTC", "cycle_id": "c2", "cycle_net_profit": 2.5},
         ]
     )
@@ -55,7 +56,7 @@ def build_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFra
     )
     snapshots_df = pd.DataFrame(
         [
-            {"timestamp": "2026-01-01 00:00:01", "market_id": "BTC", "cycle_id": "c1", "net_position": 3.0, "cycle_net_profit": 1.0, "account_cash": 1001.0, "up_last_price": 0.52, "down_last_price": 0.48},
+            {"timestamp": "2026-01-01 00:00:01", "market_id": "BTC", "cycle_id": r"D:\PassiveIncome\Quantification\Projects\PolyMkt\Input\04071459\btc-updown-5m-1775345100", "net_position": 3.0, "cycle_net_profit": 1.0, "account_cash": 1001.0, "up_last_price": 0.52, "down_last_price": 0.48},
             {"timestamp": "2026-01-01 00:00:02", "market_id": "BTC", "cycle_id": "c2", "net_position": 1.0, "cycle_net_profit": 12.5, "account_cash": 1012.5, "up_last_price": 0.55, "down_last_price": 0.45, "up_bid1_price": 0.54, "up_bid1_size": 18.0, "up_ask1_price": 0.55, "up_ask1_size": 9.0, "down_bid1_price": 0.44, "down_bid1_size": 15.0, "down_ask1_price": 0.45, "down_ask1_size": 7.0, "orderbook_snapshot_at": "2026-01-01T00:00:02", "orderbook_snapshot_age_ms": 0.0},
         ]
     )
@@ -88,6 +89,7 @@ def test_generate_dashboard_bundle_writes_expected_files(tmp_path: Path) -> None
     assert "config-field-error" in html_text
     assert "config-invalid" in html_text
     assert "Up / Down 实时价格曲线" in html_text
+    assert "夏普率" in html_text
     assert "最近盘口快照" in html_text
     assert "运行控制台" in html_text
     assert "launcher-profiles" in html_text
@@ -103,7 +105,10 @@ def test_generate_dashboard_bundle_writes_expected_files(tmp_path: Path) -> None
     assert "type=\"range\"" in html_text
     assert "<select class=\"config-select\"" in html_text
     assert "window.__POLYNET_DASHBOARD_STATE__" in artifacts.state_script_path.read_text(encoding="utf-8")
+    assert "btc-updown-5m-1775345100" in html_text
+    assert r"D:\PassiveIncome\Quantification\Projects\PolyMkt\Input\04071459\btc-updown-5m-1775345100" not in html_text
     assert "核心指标" in artifacts.markdown_path.read_text(encoding="utf-8")
+    assert "夏普率" in artifacts.markdown_path.read_text(encoding="utf-8")
     assert "最近盘口快照" in artifacts.markdown_path.read_text(encoding="utf-8")
     summary_text = artifacts.summary_csv_path.read_text(encoding="utf-8-sig")
     assert "alert_count" in summary_text

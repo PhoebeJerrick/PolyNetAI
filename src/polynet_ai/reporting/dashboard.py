@@ -61,6 +61,31 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _display_cycle_slug(value: Any) -> str:
+    """展示用途：周期标识若是路径，仅保留最后一段目录名。"""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text.replace("\\", "/").rstrip("/").split("/")[-1]
+
+
+def _resolve_sharpe_ratio(metrics: dict[str, Any], cycles_df: pd.DataFrame) -> float:
+    for key in ("sharpe_ratio", "sharpe", "strategy_sharpe_ratio", "strategy_sharpe"):
+        if key in metrics:
+            value = _to_float(metrics.get(key), default=float("nan"))
+            if pd.notna(value):
+                return float(value)
+    if cycles_df.empty or "cycle_net_profit" not in cycles_df.columns:
+        return 0.0
+    profits = pd.to_numeric(cycles_df["cycle_net_profit"], errors="coerce").dropna().astype(float)
+    if len(profits) < 2:
+        return 0.0
+    std = float(profits.std(ddof=1))
+    if std <= 0:
+        return 0.0
+    return float(profits.mean() / std)
+
+
 def _line_svg(values: list[float], width: int = 640, height: int = 180, color: str = "#4f8cff") -> str:
     if not values:
         return '<svg viewBox="0 0 640 180" class="chart"><text x="20" y="90">No data</text></svg>'
@@ -217,8 +242,13 @@ def _build_orderbook_snapshot_html(snapshots_df: pd.DataFrame) -> str:
 
 def _build_summary_frame(metrics_df: pd.DataFrame, cycles_df: pd.DataFrame, decisions_df: pd.DataFrame, snapshots_df: pd.DataFrame) -> pd.DataFrame:
     metrics = metrics_df.iloc[0].to_dict() if not metrics_df.empty else {}
+    sharpe_ratio = _resolve_sharpe_ratio(metrics, cycles_df)
     latest_cash = float(pd.to_numeric(snapshots_df.get("account_cash", pd.Series(dtype=float)), errors="coerce").fillna(0).iloc[-1]) if not snapshots_df.empty and "account_cash" in snapshots_df.columns else 0.0
-    latest_cycle = str(snapshots_df.iloc[-1]["cycle_id"]) if not snapshots_df.empty and "cycle_id" in snapshots_df.columns else ""
+    latest_cycle = (
+        _display_cycle_slug(snapshots_df.iloc[-1]["cycle_id"])
+        if not snapshots_df.empty and "cycle_id" in snapshots_df.columns
+        else ""
+    )
     latest_market = str(snapshots_df.iloc[-1]["market_id"]) if not snapshots_df.empty and "market_id" in snapshots_df.columns else ""
     latest_net = float(pd.to_numeric(snapshots_df.get("net_position", pd.Series(dtype=float)), errors="coerce").fillna(0).iloc[-1]) if not snapshots_df.empty and "net_position" in snapshots_df.columns else 0.0
     latest_cycle_net_profit = float(pd.to_numeric(snapshots_df.get("cycle_net_profit", pd.Series(dtype=float)), errors="coerce").fillna(0).iloc[-1]) if not snapshots_df.empty and "cycle_net_profit" in snapshots_df.columns else 0.0
@@ -238,6 +268,7 @@ def _build_summary_frame(metrics_df: pd.DataFrame, cycles_df: pd.DataFrame, deci
         "total_cycles": metrics.get("total_cycles", 0),
         "total_net_profit": metrics.get("total_net_profit", 0.0),
         "average_cycle_profit": metrics.get("average_cycle_profit", 0.0),
+        "sharpe_ratio": sharpe_ratio,
         "win_rate": metrics.get("win_rate", 0.0),
         "max_drawdown": metrics.get("max_drawdown", 0.0),
         "total_fees": metrics.get("total_fees", 0.0),
@@ -330,6 +361,9 @@ def build_dashboard_state(
 
     recent_decisions = decisions_df.tail(12).copy()
     if not recent_decisions.empty:
+        for cycle_col in ("cycle_slug", "cycle_id"):
+            if cycle_col in recent_decisions.columns:
+                recent_decisions[cycle_col] = recent_decisions[cycle_col].map(_display_cycle_slug)
         for column in ("timestamp", "market_price", "selected_rule", "selected_action", "selected_outcome", "risk_status", "executed", "fill_price", "cycle_net_profit"):
             if column not in recent_decisions.columns:
                 recent_decisions[column] = ""
@@ -342,6 +376,10 @@ def build_dashboard_state(
     ) if not recent_decisions.empty else "<p>No recent decisions.</p>"
 
     recent_cycles = cycles_df.tail(8).copy()
+    if not recent_cycles.empty:
+        for cycle_col in ("cycle_slug", "cycle_id"):
+            if cycle_col in recent_cycles.columns:
+                recent_cycles[cycle_col] = recent_cycles[cycle_col].map(_display_cycle_slug)
     cycle_html = _render_table(
         recent_cycles,
         row_class_fn=lambda row: "row-danger" if _to_float(row.get("cycle_net_profit", 0.0)) < 0 else "",
@@ -349,6 +387,7 @@ def build_dashboard_state(
     orderbook_snapshot_html = _build_orderbook_snapshot_html(snapshots_df)
 
     cards = [
+        ("夏普率", _format_value(summary.get("sharpe_ratio", 0.0))),
         ("净利润", _format_value(summary.get("total_net_profit", 0.0))),
         ("最大回撤", _format_value(summary.get("max_drawdown", 0.0))),
         ("胜率", _format_value(float(summary.get("win_rate", 0.0)) * 100, 2) + "%"),
@@ -1832,14 +1871,21 @@ def build_daily_markdown_report(
     best_cycle = ""
     if not cycles_df.empty and "cycle_net_profit" in cycles_df.columns:
         ordered = cycles_df.sort_values(by="cycle_net_profit", ascending=False)
-        best_cycle = f"{ordered.iloc[0].get('cycle_id', '')}: {_format_value(ordered.iloc[0].get('cycle_net_profit', 0.0))}"
-        worst_cycle = f"{ordered.iloc[-1].get('cycle_id', '')}: {_format_value(ordered.iloc[-1].get('cycle_net_profit', 0.0))}"
+        best_cycle = (
+            f"{_display_cycle_slug(ordered.iloc[0].get('cycle_id', ''))}: "
+            f"{_format_value(ordered.iloc[0].get('cycle_net_profit', 0.0))}"
+        )
+        worst_cycle = (
+            f"{_display_cycle_slug(ordered.iloc[-1].get('cycle_id', ''))}: "
+            f"{_format_value(ordered.iloc[-1].get('cycle_net_profit', 0.0))}"
+        )
     selected_rules = _extract_rule_counts(metrics_df, "selected_rule_")[:5]
     executed_rules = _extract_rule_counts(metrics_df, "executed_rule_")[:5]
     lines = [
         f"# {title}",
         "",
         "## 核心指标",
+        f"- 夏普率: {_format_value(summary.get('sharpe_ratio', 0.0))}",
         f"- 总净利润: {_format_value(summary.get('total_net_profit', 0.0))}",
         f"- 最大回撤: {_format_value(summary.get('max_drawdown', 0.0))}",
         f"- 胜率: {_format_value(float(summary.get('win_rate', 0.0)) * 100, 2)}%",
