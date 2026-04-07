@@ -75,7 +75,6 @@ print_help() {
     "  ./record.sh dcre<N>|dcre     dashboard + 实盘真单（--run-subdir current）" \
     "  ./record.sh pm[LINES]        查看后台实盘验证（paper）状态与最近日志（默认 20 行）" \
     "  ./record.sh prm[LINES]       查看后台实盘真单（creb）状态与最近日志" \
-    "  ./record.sh stats            按 configs/batch.conf 运行万能统计机器人" \
     "  ./record.sh chart             打开 artifacts/charts/tracker_position_compare.html" \
     "  ./record.sh excel-v5          生成 data/processed/..._with_accumulated_shares_v5.xlsx（若正式文件被占用则保留 tmp 并生成差异清单）" \
     "  ./record.sh excel-v5-finalize 正式文件解锁后，把 tmp 结果落盘到正式文件并刷新差异清单" \
@@ -97,7 +96,7 @@ print_help() {
     "  -c FILE        自定义 config，默认 configs/strategy.yaml" \
     "  -k CASH        自定义 starting cash（用于模拟下单）" \
     "  -K CASH        自定义每周期固定投注资金（仅 dm/dmb；透传 --per-cycle-cash）" \
-    "  -b FILE        自定义配置文件（stats/mstart；默认 configs/batch.conf）" \
+    "  -b FILE        自定义批量任务配置文件（仅 mstart；默认 configs/batch.conf）" \
     "" \
     "环境变量（可选）:" \
     "  RECORD_OPEN_DASHBOARD_EDGE=0   关闭 record.sh d 后自动用 Edge 打开网页" \
@@ -832,15 +831,6 @@ except Exception:
     fi
     powershell -NoProfile -Command "Start-Process -FilePath \"$DASHBOARD_CHART_PATH\""
     ;;
-  stats)
-    STATS_FILE="${BATCH_FILE_ARG:-$DEFAULT_BATCH_FILE}"
-    STATS_FILE="$(normalize_path_separators "$STATS_FILE")"
-    if [[ ! -f "$STATS_FILE" ]]; then
-      echo "错误: 统计配置文件不存在: $STATS_FILE" >&2
-      exit 1
-    fi
-    "$PYTHON_BIN" scripts/run_universal_stats.py --config "$STATS_FILE"
-    ;;
   excel-v5)
     OUT_XLSX="data/processed/polymarket_tracker_collection_with_accumulated_shares_v5.xlsx"
     TMP_XLSX="${OUT_XLSX%.xlsx}_tmp_regen.xlsx"
@@ -1012,10 +1002,6 @@ except Exception:
       fi
       if [[ "$line" =~ ^[[:space:]]*RECORD_DASHBOARD_REFRESH_EVERY_CYCLES[[:space:]]*=[[:space:]]*([0-9]+)[[:space:]]*$ ]]; then
         BATCH_DASHBOARD_REFRESH_EVERY_CYCLES="${BASH_REMATCH[1]}"
-        continue
-      fi
-      if [[ "$line" == *"="* ]]; then
-        # 允许 batch.conf 与 ./record.sh stats 共用；未知 key=value 对 mstart 直接忽略。
         continue
       fi
       read -ra fields <<< "$line"

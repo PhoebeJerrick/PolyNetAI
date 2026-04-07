@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from polynet_ai.reporting.universal_stats import load_stats_config, run_universal_stats
+from universal_stats_bot.core import load_stats_config, run_universal_stats
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
