@@ -692,11 +692,15 @@ def main() -> int:
                     output_dir=cycle_record_dir / "batch_replay_outputs",
                     starting_cash=args.starting_cash,
                     capital_reset_mode=args.capital_reset_mode,
+                    per_cycle_cash=args.per_cycle_cash,
                     include_trade_process=False,
                     cycle_count=len(new_cycle_files),
                     report_source="实盘行情验证",
                     report_name_prefix="real",
                     post_window_start_delay_seconds=_pwd,
+                    env_file=args.env_file,
+                    account_index=args.account_index,
+                    paper_execution=args.paper_execution,
                 )
                 report_elapsed = (datetime.now() - report_start).total_seconds()
                 stage_times["6_report"] = report_elapsed
@@ -740,6 +744,9 @@ def main() -> int:
                     report_name_prefix="simulation",
                     post_window_start_delay_seconds=_pwd,
                     processing_mode="per-cycle",
+                    env_file=args.env_file,
+                    account_index=args.account_index,
+                    paper_execution=args.paper_execution,
                 )
                 if sim_report_path and sim_report_path.exists():
                     print(f"  ✓ 模拟下单(per-cycle)绩效报告: {sim_report_path.name}")

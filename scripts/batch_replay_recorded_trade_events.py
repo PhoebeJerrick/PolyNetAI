@@ -17,8 +17,10 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from polynet_ai.adapters.cycle_window_timing import filter_trade_events_after_post_window_delay  # noqa: E402
+from polynet_ai.adapters.polymarket_live import load_api_env, select_account_env  # noqa: E402
 from polynet_ai.adapters.trade_event_store import load_recorded_trade_events  # noqa: E402
 from polynet_ai.engine.replay import ReplayEngine  # noqa: E402
+from polynet_ai.execution.paper_broker import paper_broker_for_config  # noqa: E402
 from polynet_ai.strategy.spec import (  # noqa: E402
     load_strategy_config,
     resolve_post_window_start_delay_seconds,
@@ -31,6 +33,7 @@ from scripts.build_batch_replay_performance_report import (  # noqa: E402
 )
 from scripts.run_recorded_live_paper import (  # noqa: E402
     _append_dataframe_to_csv,
+    _read_streaming_decision_csv,
     clear_streaming_csv_cache,
     recording_slug_for_path,
 )
@@ -111,6 +114,15 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="若指定则覆盖 strategy.yaml 的 cycle.post_window_start_delay_seconds。",
+    )
+    parser.add_argument("--env-file", default="", help="可选：API 环境配置文件，用于复用与实盘一致的 paper 成交逻辑。")
+    parser.add_argument("--account-index", type=int, default=2, help="账号编号（默认 2）。")
+    parser.add_argument(
+        "--paper-execution",
+        type=str,
+        choices=["auto", "orderbook", "legacy"],
+        default="auto",
+        help="auto=有凭证则订单簿 FOK；orderbook=必须凭证；legacy=参考价滑点。",
     )
     return parser.parse_args()
 
@@ -229,6 +241,9 @@ def run_batch_replay(
     use_streaming: bool = True,  # 新增参数：默认使用流式处理
     post_window_start_delay_seconds: float | None = None,
     processing_mode: str | None = None,
+    env_file: str | Path | None = None,
+    account_index: int = 2,
+    paper_execution: str = "auto",
 ) -> Path | None:
     """核心 batch replay 逻辑，可被外部脚本调用。返回 Excel 绩效报告路径。
 
@@ -256,12 +271,25 @@ def run_batch_replay(
 
     stream = _effective_use_streaming(use_streaming=use_streaming, processing_mode=processing_mode)
 
+    broker_env: dict[str, str] | None = None
+    if env_file:
+        env_path = _resolve_existing_path("环境配置文件", env_file)
+        broker_env = select_account_env(load_api_env(str(env_path)), account_index=account_index)
+    broker = paper_broker_for_config(
+        config,
+        env_values=broker_env,
+        account_index=account_index,
+        force_legacy_slippage=paper_execution == "legacy",
+        require_orderbook_client=paper_execution == "orderbook",
+    )
+
     # 引擎内部根据 capital_reset_mode 处理周期资金
     engine = ReplayEngine(
         config,
         starting_cash=starting_cash,
         capital_reset_mode=capital_reset_mode,
         per_cycle_cash=per_cycle_cash,
+        broker=broker,
     )
 
     if stream:
@@ -348,7 +376,7 @@ def run_batch_replay(
 
         if cycle_csv.exists():
             cycle_df = pd.read_csv(cycle_csv)
-            decision_df = pd.read_csv(decision_csv) if decision_csv.exists() else pd.DataFrame()
+            decision_df = _read_streaming_decision_csv(decision_csv)
 
             # 构建汇总数据
             summary_rows = []
@@ -516,6 +544,9 @@ def main() -> int:
         per_cycle_cash=args.per_cycle_cash,
         include_trade_process=args.include_trade_process,
         post_window_start_delay_seconds=args.post_window_start_delay_seconds,
+        env_file=args.env_file or None,
+        account_index=args.account_index,
+        paper_execution=args.paper_execution,
     )
     return 0
 

@@ -333,6 +333,28 @@ def _append_dataframe_to_csv(path: Path, df: pd.DataFrame) -> None:
     aligned.to_csv(path, mode="a", header=False, index=False)
 
 
+_DECISION_TEXT_COLUMNS: tuple[str, ...] = (
+    "selected_rule",
+    "selected_action",
+    "selected_outcome",
+    "risk_reason",
+    "broker_status",
+    "fill_source",
+)
+
+
+def _read_streaming_decision_csv(decision_csv: Path) -> pd.DataFrame:
+    """读取 streaming 决策表并固定文本列类型，避免 read_csv 分块推断触发 DtypeWarning。"""
+    if not decision_csv.exists():
+        return pd.DataFrame()
+    dtype_map = {col: "string" for col in _DECISION_TEXT_COLUMNS}
+    try:
+        return pd.read_csv(decision_csv, dtype=dtype_map, low_memory=False)
+    except ValueError:
+        # 兼容历史文件（极端情况下列内容异常），退回普通读取但关闭分块推断。
+        return pd.read_csv(decision_csv, low_memory=False)
+
+
 def _repair_duplicate_streaming_slugs(
     cycle_df: pd.DataFrame, decision_df: pd.DataFrame
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -564,7 +586,7 @@ def _export_dashboard_from_streaming(
     cycle_df = pd.read_csv(cycle_csv)
     if cycle_df.empty:
         return False
-    decision_df = pd.read_csv(decision_csv) if decision_csv.exists() else pd.DataFrame()
+    decision_df = _read_streaming_decision_csv(decision_csv)
 
     if not cycle_df.empty and "cycle_slug" not in cycle_df.columns and "cycle_id" in cycle_df.columns:
         cycle_df = cycle_df.copy()
@@ -782,7 +804,7 @@ def main_streaming(args: argparse.Namespace | None = None) -> int:
 
     if cycle_csv.exists():
         cycle_df = pd.read_csv(cycle_csv)
-        decision_df = pd.read_csv(decision_csv) if decision_csv.exists() else pd.DataFrame()
+        decision_df = _read_streaming_decision_csv(decision_csv)
 
         # 兼容旧版流式输出：若缺失 cycle_slug，则从 cycle_id 补齐。
         if not cycle_df.empty and "cycle_slug" not in cycle_df.columns and "cycle_id" in cycle_df.columns:

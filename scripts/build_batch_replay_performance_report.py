@@ -1180,6 +1180,101 @@ def build_comparison_report_zh(
 
     comparison_df = pd.DataFrame(comparison_rows)
 
+    # --- 相对真实性评分（以实盘验证报告为基准）---
+    # 评分思路：模拟报告与实盘报告在关键指标上的偏差越小，分数越高；实盘侧固定为 100 作为基准。
+    def _as_float(value: object) -> float | None:
+        try:
+            return float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+
+    metric_specs: list[tuple[str, float, str]] = [
+        ("总净利润", 0.35, "relative"),
+        ("胜率", 0.20, "absolute"),
+        ("最大回撤", 0.20, "relative"),
+        ("总执行成交数", 0.15, "relative"),
+        ("总手续费", 0.10, "relative"),
+    ]
+    weighted_penalty = 0.0
+    weight_sum = 0.0
+    metric_detail_rows: list[dict[str, object]] = []
+    for key, weight, mode in metric_specs:
+        sim_v = _as_float(sim_map.get(key))
+        live_v = _as_float(live_map.get(key))
+        if sim_v is None or live_v is None:
+            metric_detail_rows.append(
+                {
+                    "指标": key,
+                    "模拟值": sim_map.get(key, "—"),
+                    "实盘值": live_map.get(key, "—"),
+                    "偏差": "—",
+                    "加权惩罚": "—",
+                    "说明": "缺少可数值化字段，未纳入评分",
+                }
+            )
+            continue
+        if mode == "absolute":
+            penalty = min(1.0, abs(sim_v - live_v))
+            diff_text = f"{sim_v - live_v:+.6f}"
+        else:
+            denom = max(abs(live_v), 1.0)
+            penalty = min(1.0, abs(sim_v - live_v) / denom)
+            diff_text = f"{sim_v - live_v:+.6f} (相对 {abs(sim_v - live_v) / denom:.2%})"
+        weighted_penalty += weight * penalty
+        weight_sum += weight
+        metric_detail_rows.append(
+            {
+                "指标": key,
+                "模拟值": sim_v,
+                "实盘值": live_v,
+                "偏差": diff_text,
+                "加权惩罚": round(weight * penalty, 6),
+                "说明": f"权重={weight:.2f}，惩罚∈[0,1]",
+            }
+        )
+    if weight_sum > 0:
+        sim_auth_score = max(0.0, min(100.0, 100.0 * (1.0 - weighted_penalty / weight_sum)))
+        coverage = weight_sum / sum(weight for _, weight, _ in metric_specs)
+    else:
+        sim_auth_score = 0.0
+        coverage = 0.0
+    authenticity_df = pd.DataFrame(
+        [
+            {
+                "对象": "实盘验证报告",
+                "真实性评分": 100.0,
+                "指标覆盖率": "100%",
+                "评分说明": "作为对比基准（reference）",
+            },
+            {
+                "对象": "模拟下单报告",
+                "真实性评分": round(sim_auth_score, 2),
+                "指标覆盖率": f"{coverage:.0%}",
+                "评分说明": "基于关键指标相对偏差的加权评分（越接近实盘越高）",
+            },
+        ]
+    )
+    metric_detail_df = pd.DataFrame(metric_detail_rows)
+
+    # 将评分结果同步附加到「对比概览」末尾，便于一页查看核心结论。
+    score_rows = pd.DataFrame(
+        [
+            {
+                "指标": "真实性评分（实盘基准）",
+                "模拟下单": "—",
+                "实盘验证": 100.0,
+                "差异 (实盘-模拟)": "基准",
+            },
+            {
+                "指标": "真实性评分（模拟贴近度）",
+                "模拟下单": round(sim_auth_score, 2),
+                "实盘验证": 100.0,
+                "差异 (实盘-模拟)": f"{100.0 - round(sim_auth_score, 2):+.2f}",
+            },
+        ]
+    )
+    comparison_df = pd.concat([comparison_df, score_rows], ignore_index=True)
+
     # --- 元信息 ---
     meta_rows = [
         ("生成时间", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
@@ -1204,6 +1299,8 @@ def build_comparison_report_zh(
     with pd.ExcelWriter(report_xlsx, engine="openpyxl") as writer:
         meta_df.to_excel(writer, sheet_name="报告信息", index=False)
         comparison_df.to_excel(writer, sheet_name="对比概览", index=False)
+        authenticity_df.to_excel(writer, sheet_name="真实性评分", index=False)
+        metric_detail_df.to_excel(writer, sheet_name="真实性评分明细", index=False)
         if not sim_cycles.empty:
             sim_cycles.to_excel(writer, sheet_name="模拟下单_分周期", index=False)
         if not live_cycles.empty:
