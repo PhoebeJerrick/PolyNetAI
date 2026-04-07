@@ -338,6 +338,89 @@ def test_iter_polymarket_trade_events_applies_metadata_enricher(monkeypatch) -> 
     assert events[0].metadata["up_bid1_price"] == 0.51
 
 
+def test_iter_polymarket_trade_events_aligns_ws_orderbook_to_trade(monkeypatch) -> None:
+    spec = PolymarketMarketSpec(
+        slug="btc-updown-5m-1774012500",
+        series_slug="btc-up-or-down-5m",
+        condition_id="0x1",
+        yes_token_id="yes-1",
+        no_token_id="no-1",
+        start_time=datetime(2099, 1, 1, 12, 0, 0),
+        end_time=datetime(2099, 1, 1, 12, 5, 0),
+        raw={},
+    )
+
+    class ClosedExc(Exception):
+        pass
+
+    class TimeoutExc(Exception):
+        pass
+
+    class FakeConnection:
+        def __init__(self, replies):
+            self.replies = list(replies)
+
+        def settimeout(self, timeout):
+            return None
+
+        def send(self, payload):
+            return None
+
+        def ping(self):
+            return None
+
+        def recv(self):
+            item = self.replies.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        def close(self):
+            return None
+
+    class FakeWebSocketModule:
+        WebSocketTimeoutException = TimeoutExc
+        WebSocketConnectionClosedException = ClosedExc
+
+        def create_connection(self, url, **kwargs):
+            return FakeConnection(
+                [
+                    '[{"event_type":"book","asset_id":"yes-1","best_bid":"0.61","best_ask":"0.62","timestamp":"4070952000000"}]',
+                    '[{"event_type":"book","asset_id":"no-1","best_bid":"0.38","best_ask":"0.39","timestamp":"4070952000000"}]',
+                    '[{"event_type":"last_trade_price","asset_id":"yes-1","price":"0.62","size":"3","side":"BUY","timestamp":"4070952001000"}]',
+                    '{"event_type":"market_resolved","assets_ids":["yes-1","no-1"]}',
+                    TimeoutExc(),
+                ]
+            )
+
+    class FakeTime:
+        @staticmethod
+        def monotonic() -> float:
+            return 100.0
+
+        @staticmethod
+        def sleep(_: float) -> None:
+            return None
+
+    monkeypatch.setattr(polymarket_live, "_import_websocket_module", lambda: FakeWebSocketModule())
+    monkeypatch.setattr(polymarket_live, "time", FakeTime)
+
+    events = list(
+        iter_polymarket_trade_events(
+            [spec],
+            receive_timeout_seconds=0.01,
+            cycle_grace_seconds=0.0,
+            post_window_start_delay_seconds=0.0,
+            align_orderbook_with_trade_ws=True,
+        )
+    )
+
+    assert len(events) == 1
+    assert events[0].metadata["orderbook_snapshot_source"] == "ws_orderbook_aligned"
+    assert events[0].metadata["up_bid1_price"] == 0.61
+    assert events[0].metadata["down_ask1_price"] == 0.39
+
+
 def test_apply_proxy_env_from_dict_strips_quotes_and_sets_lowercase(monkeypatch) -> None:
     monkeypatch.delenv("HTTPS_PROXY", raising=False)
     monkeypatch.delenv("https_proxy", raising=False)

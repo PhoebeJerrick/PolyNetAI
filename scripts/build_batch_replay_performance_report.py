@@ -904,6 +904,107 @@ def _finalize_xlsx_workbook(path: Path, *, skip_sheet_titles: frozenset[str] | N
     wb.save(path)
 
 
+def _interval_stats_payload(series: pd.Series) -> dict[str, float | int | None]:
+    ts = pd.to_datetime(series, errors="coerce", utc=True).dropna().sort_values()
+    if len(ts) < 2:
+        return {
+            "event_count": int(len(ts)),
+            "interval_min_ms": None,
+            "interval_avg_ms": None,
+            "interval_max_ms": None,
+        }
+    delta_ms = ts.diff().dt.total_seconds().dropna() * 1000.0
+    if delta_ms.empty:
+        return {
+            "event_count": int(len(ts)),
+            "interval_min_ms": None,
+            "interval_avg_ms": None,
+            "interval_max_ms": None,
+        }
+    return {
+        "event_count": int(len(ts)),
+        "interval_min_ms": float(delta_ms.min()),
+        "interval_avg_ms": float(delta_ms.mean()),
+        "interval_max_ms": float(delta_ms.max()),
+    }
+
+
+def _collect_ws_cycle_interval_stats(
+    base_dir: Path,
+) -> tuple[list[tuple[str, object]], pd.DataFrame | None]:
+    """按周期统计 WS 价格/盘口事件间隔，并返回概览汇总行与明细表。"""
+    csv_path = base_dir / "ws_trade_events.csv"
+    if not csv_path.exists():
+        return [("WS间隔统计", f"未找到文件: {csv_path.name}")], None
+    try:
+        df = pd.read_csv(csv_path, low_memory=False)
+    except Exception as exc:
+        return [("WS间隔统计", f"读取失败: {exc}")], None
+    if df.empty or "timestamp" not in df.columns or "cycle_id" not in df.columns:
+        return [("WS间隔统计", "无可用事件数据或缺少 cycle_id/timestamp 列")], None
+
+    detail_rows: list[dict[str, object]] = []
+    work = df.copy()
+    work["cycle_id"] = work["cycle_id"].fillna("").astype(str)
+    for cycle_id, g in work.groupby("cycle_id", dropna=False):
+        price_stats = _interval_stats_payload(g["timestamp"])
+        if "orderbook_snapshot_at" in g.columns:
+            ob_series = (
+                g["orderbook_snapshot_at"]
+                .dropna()
+                .astype(str)
+                .replace("", pd.NA)
+                .dropna()
+                .drop_duplicates()
+            )
+            ob_stats = _interval_stats_payload(ob_series)
+        else:
+            ob_stats = {
+                "event_count": 0,
+                "interval_min_ms": None,
+                "interval_avg_ms": None,
+                "interval_max_ms": None,
+            }
+        detail_rows.append(
+            {
+                "cycle_id": cycle_id,
+                "WS实时价格事件数": price_stats["event_count"],
+                "WS实时价格最小间隔(ms)": price_stats["interval_min_ms"],
+                "WS实时价格平均间隔(ms)": price_stats["interval_avg_ms"],
+                "WS实时价格最大间隔(ms)": price_stats["interval_max_ms"],
+                "WS实时OrderBook事件数": ob_stats["event_count"],
+                "WS实时OrderBook最小间隔(ms)": ob_stats["interval_min_ms"],
+                "WS实时OrderBook平均间隔(ms)": ob_stats["interval_avg_ms"],
+                "WS实时OrderBook最大间隔(ms)": ob_stats["interval_max_ms"],
+            }
+        )
+
+    detail_df = pd.DataFrame(detail_rows).sort_values("cycle_id").reset_index(drop=True)
+    if detail_df.empty:
+        return [("WS间隔统计", "无可用周期数据")], None
+
+    def _summary(metric_col: str, label: str) -> list[tuple[str, object]]:
+        s = pd.to_numeric(detail_df[metric_col], errors="coerce").dropna()
+        if s.empty:
+            return [(label, "样本不足(<1周期)")]
+        return [
+            (f"{label}-最小", float(s.min())),
+            (f"{label}-平均", float(s.mean())),
+            (f"{label}-最大", float(s.max())),
+        ]
+
+    rows: list[tuple[str, object]] = [("WS分周期统计周期数", int(len(detail_df)))]
+    rows.extend(_summary("WS实时价格事件数", "WS实时价格事件数"))
+    rows.extend(_summary("WS实时价格最小间隔(ms)", "WS实时价格最小间隔(ms)"))
+    rows.extend(_summary("WS实时价格平均间隔(ms)", "WS实时价格平均间隔(ms)"))
+    rows.extend(_summary("WS实时价格最大间隔(ms)", "WS实时价格最大间隔(ms)"))
+    rows.extend(_summary("WS实时OrderBook事件数", "WS实时OrderBook事件数"))
+    rows.extend(_summary("WS实时OrderBook最小间隔(ms)", "WS实时OrderBook最小间隔(ms)"))
+    rows.extend(_summary("WS实时OrderBook平均间隔(ms)", "WS实时OrderBook平均间隔(ms)"))
+    rows.extend(_summary("WS实时OrderBook最大间隔(ms)", "WS实时OrderBook最大间隔(ms)"))
+    return rows, detail_df
+
+
 def _write_performance_report_xlsx(
     xlsx_path: Path,
     *,
@@ -925,6 +1026,8 @@ def _write_performance_report_xlsx(
     decision_df: pd.DataFrame,
     tail_per_cycle_df: pd.DataFrame | None = None,
     tail_overview_rows: list[tuple[str, object]] | None = None,
+    ws_interval_rows: list[tuple[str, object]] | None = None,
+    ws_cycle_interval_df: pd.DataFrame | None = None,
     report_source: str = "",
     position_value_denominator: float = DEFAULT_POSITION_VALUE_DENOMINATOR,
     phase_end_seconds: tuple[float, float, float] = DEFAULT_PHASE_END_SECONDS,
@@ -987,6 +1090,11 @@ def _write_performance_report_xlsx(
             [overview_df, pd.DataFrame(tail_overview_rows, columns=["项目", "值"])],
             ignore_index=True,
         )
+    if ws_interval_rows:
+        overview_df = pd.concat(
+            [overview_df, pd.DataFrame(ws_interval_rows, columns=["项目", "值"])],
+            ignore_index=True,
+        )
 
     xlsx_path.parent.mkdir(parents=True, exist_ok=True)
     tracker_raw = _batch_replay_decisions_to_tracker_input(
@@ -1009,6 +1117,8 @@ def _write_performance_report_xlsx(
         )
         if tail_per_cycle_df is not None and not tail_per_cycle_df.empty:
             tail_per_cycle_df.to_excel(writer, sheet_name="尾盘窗口成交汇总", index=False)
+        if ws_cycle_interval_df is not None and not ws_cycle_interval_df.empty:
+            ws_cycle_interval_df.to_excel(writer, sheet_name="WS分周期间隔统计", index=False)
         _append_tracker_style_sheet(
             writer,
             tracker_raw,
@@ -1097,6 +1207,7 @@ def build_performance_report_zh(
     tail_per_cycle, tail_overview = summarize_tail_window_executions(
         decision_df, cycle_df, last_minute_seconds=30
     )
+    ws_interval_rows, ws_cycle_interval_df = _collect_ws_cycle_interval_stats(resolved_batch_dir)
 
     _write_performance_report_xlsx(
         report_xlsx,
@@ -1118,6 +1229,8 @@ def build_performance_report_zh(
         decision_df=decision_df,
         tail_per_cycle_df=tail_per_cycle,
         tail_overview_rows=tail_overview,
+        ws_interval_rows=ws_interval_rows,
+        ws_cycle_interval_df=ws_cycle_interval_df,
         report_source=report_source,
         position_value_denominator=position_value_denominator,
         phase_end_seconds=phase_end_seconds,
@@ -1293,6 +1406,113 @@ def build_comparison_report_zh(
     except Exception:
         live_cycles = pd.DataFrame()
 
+    # --- 异常诊断（固定三类）---
+    def _to_float(value: object) -> float | None:
+        try:
+            return float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+
+    def _best_worst_label(df: pd.DataFrame) -> tuple[str, float | None, str, float | None]:
+        if df.empty or "cycle_slug" not in df.columns or "total_net_profit" not in df.columns:
+            return ("", None, "", None)
+        work = df.copy()
+        work["_profit"] = pd.to_numeric(work["total_net_profit"], errors="coerce")
+        work = work[work["_profit"].notna()]
+        if work.empty:
+            return ("", None, "", None)
+        best = work.sort_values("_profit", ascending=False).iloc[0]
+        worst = work.sort_values("_profit", ascending=True).iloc[0]
+        return (
+            str(best.get("cycle_slug", "")),
+            float(best["_profit"]),
+            str(worst.get("cycle_slug", "")),
+            float(worst["_profit"]),
+        )
+
+    sim_total_profit = _to_float(sim_map.get("总净利润"))
+    live_total_profit = _to_float(live_map.get("总净利润"))
+    sim_exec = _to_float(sim_map.get("总执行成交数"))
+    live_exec = _to_float(live_map.get("总执行成交数"))
+
+    profit_reversal_flag = False
+    profit_reversal_detail = "缺少可比数值"
+    if sim_total_profit is not None and live_total_profit is not None:
+        profit_reversal_flag = (sim_total_profit * live_total_profit) < 0
+        profit_reversal_detail = (
+            f"模拟={sim_total_profit:+.6f}，实盘={live_total_profit:+.6f}，"
+            f"{'发生正负反转' if profit_reversal_flag else '同号'}"
+        )
+
+    exec_deviation_ratio: float | None = None
+    exec_deviation_detail = "缺少可比数值"
+    if sim_exec is not None and live_exec is not None:
+        denom = max(abs(live_exec), 1.0)
+        exec_deviation_ratio = abs(sim_exec - live_exec) / denom
+        exec_deviation_detail = (
+            f"模拟={int(round(sim_exec))}，实盘={int(round(live_exec))}，"
+            f"偏差={int(round(sim_exec - live_exec)):+d}（相对 {exec_deviation_ratio:.2%}）"
+        )
+
+    sim_best_slug, sim_best_pnl, sim_worst_slug, sim_worst_pnl = _best_worst_label(sim_cycles)
+    live_best_slug, live_best_pnl, live_worst_slug, live_worst_pnl = _best_worst_label(live_cycles)
+    best_drift = bool(sim_best_slug and live_best_slug and sim_best_slug != live_best_slug)
+    worst_drift = bool(sim_worst_slug and live_worst_slug and sim_worst_slug != live_worst_slug)
+    cycle_rank_drift = best_drift or worst_drift
+    cycle_rank_detail = (
+        f"冠军: 模拟={sim_best_slug or '—'} ({sim_best_pnl if sim_best_pnl is not None else '—'}) | "
+        f"实盘={live_best_slug or '—'} ({live_best_pnl if live_best_pnl is not None else '—'}); "
+        f"垫底: 模拟={sim_worst_slug or '—'} ({sim_worst_pnl if sim_worst_pnl is not None else '—'}) | "
+        f"实盘={live_worst_slug or '—'} ({live_worst_pnl if live_worst_pnl is not None else '—'})"
+    )
+
+    anomaly_rows = [
+        {
+            "检查项": "利润反转",
+            "是否异常": "是" if profit_reversal_flag else "否",
+            "判定阈值": "模拟与实盘总净利润异号",
+            "诊断详情": profit_reversal_detail,
+        },
+        {
+            "检查项": "成交笔数偏差",
+            "是否异常": "是" if (exec_deviation_ratio is not None and exec_deviation_ratio >= 0.05) else "否",
+            "判定阈值": "相对偏差 >= 5%",
+            "诊断详情": exec_deviation_detail,
+        },
+        {
+            "检查项": "周期冠军/垫底漂移",
+            "是否异常": "是" if cycle_rank_drift else "否",
+            "判定阈值": "冠军或垫底周期 slug 不一致",
+            "诊断详情": cycle_rank_detail,
+        },
+    ]
+    anomaly_df = pd.DataFrame(anomaly_rows)
+    anomaly_overview_rows = pd.DataFrame(
+        [
+            {
+                "指标": f"异常诊断-利润反转",
+                "模拟下单": "是" if profit_reversal_flag else "否",
+                "实盘验证": "基准",
+                "差异 (实盘-模拟)": "异号" if profit_reversal_flag else "同号",
+            },
+            {
+                "指标": f"异常诊断-成交笔数偏差",
+                "模拟下单": exec_deviation_detail,
+                "实盘验证": "基准",
+                "差异 (实盘-模拟)": (
+                    f"{exec_deviation_ratio:.2%}" if exec_deviation_ratio is not None else "—"
+                ),
+            },
+            {
+                "指标": f"异常诊断-冠军/垫底漂移",
+                "模拟下单": "是" if cycle_rank_drift else "否",
+                "实盘验证": "基准",
+                "差异 (实盘-模拟)": "发生漂移" if cycle_rank_drift else "一致",
+            },
+        ]
+    )
+    comparison_df = pd.concat([comparison_df, anomaly_overview_rows], ignore_index=True)
+
     # --- 写出 ---
     report_name = f"sim_vs_live_comparison_zh_{get_version_tag()}_{_today_suffix()}.xlsx"
     report_xlsx = output_path / report_name
@@ -1301,6 +1521,7 @@ def build_comparison_report_zh(
         comparison_df.to_excel(writer, sheet_name="对比概览", index=False)
         authenticity_df.to_excel(writer, sheet_name="真实性评分", index=False)
         metric_detail_df.to_excel(writer, sheet_name="真实性评分明细", index=False)
+        anomaly_df.to_excel(writer, sheet_name="异常诊断", index=False)
         if not sim_cycles.empty:
             sim_cycles.to_excel(writer, sheet_name="模拟下单_分周期", index=False)
         if not live_cycles.empty:

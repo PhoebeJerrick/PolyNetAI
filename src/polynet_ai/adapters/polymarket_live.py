@@ -600,6 +600,114 @@ def _iter_message_objects(raw: str) -> list[dict[str, Any]]:
     return []
 
 
+def _parse_ws_timestamp_naive_utc(value: object) -> datetime | None:
+    try:
+        ts_ms = int(str(value or "0"))
+    except (TypeError, ValueError):
+        return None
+    if ts_ms <= 0:
+        return None
+    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).replace(tzinfo=None)
+
+
+def _parse_float_or_none(value: object) -> float | None:
+    try:
+        f = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if f <= 0:
+        return None
+    return f
+
+
+def _extract_book_level_from_ws_message(
+    message: dict[str, Any],
+    spec: PolymarketMarketSpec,
+) -> tuple[str, datetime, dict[str, float | None]] | None:
+    """从 WS 消息中提取某一 outcome 的买一卖一（若消息携带盘口）。"""
+    asset_id = str(message.get("asset_id") or "")
+    outcome = spec.token_to_outcome.get(asset_id)
+    if outcome is None:
+        return None
+    ts = _parse_ws_timestamp_naive_utc(message.get("timestamp"))
+    if ts is None:
+        return None
+
+    # 兼容不同消息字段命名（best_bid / bid / bids[0] 等）。
+    bid = (
+        _parse_float_or_none(message.get("best_bid"))
+        or _parse_float_or_none(message.get("bid"))
+        or _parse_float_or_none(message.get("bestBid"))
+    )
+    ask = (
+        _parse_float_or_none(message.get("best_ask"))
+        or _parse_float_or_none(message.get("ask"))
+        or _parse_float_or_none(message.get("bestAsk"))
+    )
+    bid_size = (
+        _parse_float_or_none(message.get("best_bid_size"))
+        or _parse_float_or_none(message.get("bid_size"))
+        or _parse_float_or_none(message.get("bestBidSize"))
+    )
+    ask_size = (
+        _parse_float_or_none(message.get("best_ask_size"))
+        or _parse_float_or_none(message.get("ask_size"))
+        or _parse_float_or_none(message.get("bestAskSize"))
+    )
+    if bid is None and ask is None:
+        bids = message.get("bids")
+        asks = message.get("asks")
+        if isinstance(bids, list) and bids:
+            topb = bids[0]
+            if isinstance(topb, dict):
+                bid = _parse_float_or_none(topb.get("price")) or bid
+                bid_size = _parse_float_or_none(topb.get("size")) or bid_size
+        if isinstance(asks, list) and asks:
+            topa = asks[0]
+            if isinstance(topa, dict):
+                ask = _parse_float_or_none(topa.get("price")) or ask
+                ask_size = _parse_float_or_none(topa.get("size")) or ask_size
+    if bid is None and ask is None:
+        return None
+    return outcome, ts, {
+        "bid1_price": bid,
+        "bid1_size": bid_size,
+        "ask1_price": ask,
+        "ask1_size": ask_size,
+    }
+
+
+def _aligned_orderbook_metadata_for_trade(
+    event: TradeEvent,
+    *,
+    book_cache: dict[str, tuple[datetime, dict[str, float | None]]],
+) -> dict[str, Any]:
+    """取不晚于 trade 时间的 up/down 最新盘口，写入事件 metadata。"""
+    up = book_cache.get("up")
+    down = book_cache.get("down")
+    if up is None or down is None:
+        return {}
+    up_ts, up_lv = up
+    down_ts, down_lv = down
+    if up_ts > event.timestamp or down_ts > event.timestamp:
+        return {}
+    aligned_at = max(up_ts, down_ts)
+    lag_ms = (event.timestamp - aligned_at).total_seconds() * 1000.0
+    return {
+        "orderbook_snapshot_source": "ws_orderbook_aligned",
+        "orderbook_snapshot_at": aligned_at.isoformat(),
+        "orderbook_snapshot_age_ms": round(max(0.0, lag_ms), 3),
+        "up_bid1_price": up_lv.get("bid1_price"),
+        "up_bid1_size": up_lv.get("bid1_size"),
+        "up_ask1_price": up_lv.get("ask1_price"),
+        "up_ask1_size": up_lv.get("ask1_size"),
+        "down_bid1_price": down_lv.get("bid1_price"),
+        "down_bid1_size": down_lv.get("bid1_size"),
+        "down_ask1_price": down_lv.get("ask1_price"),
+        "down_ask1_size": down_lv.get("ask1_size"),
+    }
+
+
 def ws_message_to_trade_event(message: dict[str, Any], spec: PolymarketMarketSpec) -> TradeEvent | None:
     if str(message.get("event_type") or "") != "last_trade_price":
         return None
@@ -642,6 +750,7 @@ def iter_polymarket_trade_events(
     market_specs: Iterable[PolymarketMarketSpec],
     *,
     metadata_enricher: Callable[[TradeEvent, PolymarketMarketSpec], dict[str, Any]] | None = None,
+    align_orderbook_with_trade_ws: bool = True,
     ping_interval_seconds: float = 10.0,
     receive_timeout_seconds: float = 1.0,
     cycle_grace_seconds: float = 20.0,
@@ -656,6 +765,7 @@ def iter_polymarket_trade_events(
     closed_exc = websocket.WebSocketConnectionClosedException
 
     for spec in market_specs:
+        ws_book_cache: dict[str, tuple[datetime, dict[str, float | None]]] = {}
         if log_fn is not None:
             log_fn(f"[polymarket] 订阅周期 {spec.slug}")
         eff_cutoff_naive = effective_strategy_start_naive_utc(
@@ -812,6 +922,13 @@ def iter_polymarket_trade_events(
                         continue
 
                     for message in _iter_message_objects(raw):
+                        if align_orderbook_with_trade_ws:
+                            parsed_book = _extract_book_level_from_ws_message(message, spec)
+                            if parsed_book is not None:
+                                ob_outcome, ob_ts, ob_level = parsed_book
+                                prev = ws_book_cache.get(ob_outcome)
+                                if prev is None or ob_ts >= prev[0]:
+                                    ws_book_cache[ob_outcome] = (ob_ts, ob_level)
                         asset_ids = [str(item) for item in message.get("assets_ids", [])]
                         if (
                             str(message.get("event_type") or "") == "market_resolved"
@@ -821,6 +938,13 @@ def iter_polymarket_trade_events(
 
                         event = ws_message_to_trade_event(message, spec)
                         if event is not None:
+                            if align_orderbook_with_trade_ws:
+                                event.metadata.update(
+                                    _aligned_orderbook_metadata_for_trade(
+                                        event,
+                                        book_cache=ws_book_cache,
+                                    )
+                                )
                             if cycle_window_start is not None:
                                 elapsed = (event.timestamp - cycle_window_start).total_seconds()
                                 if elapsed > float(cycle_seconds):
