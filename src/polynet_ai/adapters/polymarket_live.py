@@ -472,33 +472,62 @@ class OrderBookTopSnapshotEnricher:
     refresh_interval_seconds: float = 0.5
     log_fn: Callable[[str], None] | None = None
     _cache: dict[str, tuple[float, dict[str, Any]]] = field(default_factory=dict, init=False)
+    _bg_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+    _bg_thread: threading.Thread | None = field(default=None, init=False)
 
     def enrich(self, event: TradeEvent, spec: PolymarketMarketSpec) -> dict[str, Any]:
+        """非阻塞：总是立即返回缓存数据；缓存过期时在后台线程刷新。"""
         del event
         now = time.monotonic()
         refresh_interval = max(0.0, float(self.refresh_interval_seconds))
         cached = self._cache.get(spec.slug)
+
+        # 缓存未过期 → 直接返回
         if cached is not None and now - cached[0] < refresh_interval:
             snapshot = dict(cached[1])
             snapshot["orderbook_snapshot_age_ms"] = round((now - cached[0]) * 1000.0, 3)
             return snapshot
 
+        # 首次无缓存 → 同步拉取一次（仅冷启动，不启动后台线程）
+        if cached is None:
+            try:
+                payload = self._fetch_snapshot(spec)
+                self._cache[spec.slug] = (time.monotonic(), payload)
+                snapshot = dict(payload)
+                snapshot["orderbook_snapshot_age_ms"] = 0.0
+                return snapshot
+            except Exception as exc:
+                if self.log_fn is not None:
+                    self.log_fn(f"[polymarket] 拉取盘口快照失败 {spec.slug}: {_ws_error_detail(exc)}")
+                return {}
+
+        # 有过期缓存 → 返回 stale 数据，后台线程会更新
+        if self._bg_lock.acquire(blocking=False):
+            try:
+                if self._bg_thread is None or not self._bg_thread.is_alive():
+                    self._bg_thread = threading.Thread(
+                        target=self._bg_refresh,
+                        args=(spec,),
+                        daemon=True,
+                        name=f"ob-enricher-{spec.slug}",
+                    )
+                    self._bg_thread.start()
+            finally:
+                self._bg_lock.release()
+
+        snapshot = dict(cached[1])
+        snapshot["orderbook_snapshot_age_ms"] = round((now - cached[0]) * 1000.0, 3)
+        snapshot["orderbook_snapshot_stale"] = True
+        return snapshot
+
+    def _bg_refresh(self, spec: PolymarketMarketSpec) -> None:
+        """后台线程：拉取盘口快照并更新缓存。"""
         try:
             payload = self._fetch_snapshot(spec)
+            self._cache[spec.slug] = (time.monotonic(), payload)
         except Exception as exc:
             if self.log_fn is not None:
-                self.log_fn(f"[polymarket] 拉取盘口快照失败 {spec.slug}: {_ws_error_detail(exc)}")
-            if cached is None:
-                return {}
-            snapshot = dict(cached[1])
-            snapshot["orderbook_snapshot_age_ms"] = round((now - cached[0]) * 1000.0, 3)
-            snapshot["orderbook_snapshot_stale"] = True
-            return snapshot
-
-        self._cache[spec.slug] = (now, payload)
-        snapshot = dict(payload)
-        snapshot["orderbook_snapshot_age_ms"] = 0.0
-        return snapshot
+                self.log_fn(f"[polymarket] 后台盘口刷新失败 {spec.slug}: {_ws_error_detail(exc)}")
 
     def _fetch_snapshot(self, spec: PolymarketMarketSpec) -> dict[str, Any]:
         payload = {
@@ -786,6 +815,7 @@ def ws_message_to_trade_event(message: dict[str, Any], spec: PolymarketMarketSpe
 # ---------------------------------------------------------------------------
 
 _WS_READER_DONE = object()  # sentinel: 读线程结束
+_WS_CYCLE_EXPIRED = object()  # sentinel: 窗口已过期，消费者应快速排空队列
 
 
 def _ws_reader_target(  # noqa: C901, PLR0912, PLR0913, PLR0915
@@ -821,11 +851,20 @@ def _ws_reader_target(  # noqa: C901, PLR0912, PLR0913, PLR0915
     late_event_stop_logged = False
     hard_end_stop_logged = False
     reconnect_attempt = 0
+    _cycle_expired_sent = False
+
+    def _send_cycle_expired() -> None:
+        nonlocal _cycle_expired_sent
+        if not _cycle_expired_sent:
+            event_queue.put(_WS_CYCLE_EXPIRED)
+            _cycle_expired_sent = True
 
     try:  # outer try — guarantee sentinel
         while not stop_event.is_set():
             utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
             if effective_cycle_end is not None and utc_now >= effective_cycle_end:
+                if close_after is None:
+                    _send_cycle_expired()
                 close_after = close_after or (time.monotonic() + cycle_grace_seconds)
                 if log_fn is not None and not hard_end_stop_logged:
                     log_fn(
@@ -891,6 +930,12 @@ def _ws_reader_target(  # noqa: C901, PLR0912, PLR0913, PLR0915
                         connection = None
 
                 t_connect_elapsed = time.monotonic() - t_connect_start
+                # Fix: 连接重试循环也检查窗口是否已过期，避免窗口结束后仍被困在重连退避中
+                if effective_cycle_end is not None and close_after is None:
+                    utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
+                    if utc_now >= effective_cycle_end:
+                        _send_cycle_expired()
+                        close_after = time.monotonic() + cycle_grace_seconds
                 if close_after is not None and time.monotonic() >= close_after:
                     break
                 backoff_delay = min(reconnect_max_delay_seconds, reconnect_delay_seconds * (2 ** min(reconnect_attempt - 1, 5)))
@@ -921,6 +966,7 @@ def _ws_reader_target(  # noqa: C901, PLR0912, PLR0913, PLR0915
                     if effective_cycle_end is not None and close_after is None:
                         utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
                         if utc_now >= effective_cycle_end:
+                            _send_cycle_expired()
                             close_after = now + cycle_grace_seconds
                             if log_fn is not None and not hard_end_stop_logged:
                                 log_fn(
@@ -964,6 +1010,8 @@ def _ws_reader_target(  # noqa: C901, PLR0912, PLR0913, PLR0915
                     if raw is None:
                         utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
                         if effective_cycle_end is not None and utc_now >= effective_cycle_end:
+                            if close_after is None:
+                                _send_cycle_expired()
                             close_after = close_after or (time.monotonic() + cycle_grace_seconds)
                             if log_fn is not None and not hard_end_stop_logged:
                                 log_fn(
@@ -997,6 +1045,7 @@ def _ws_reader_target(  # noqa: C901, PLR0912, PLR0913, PLR0915
                             str(message.get("event_type") or "") == "market_resolved"
                             and (str(message.get("winning_asset_id") or "") in spec.token_to_outcome or any(item in spec.token_to_outcome for item in asset_ids))
                         ):
+                            _send_cycle_expired()
                             close_after = time.monotonic()
 
                         event = ws_message_to_trade_event(message, spec)
@@ -1011,6 +1060,7 @@ def _ws_reader_target(  # noqa: C901, PLR0912, PLR0913, PLR0915
                             if cycle_window_start is not None:
                                 elapsed = (event.timestamp - cycle_window_start).total_seconds()
                                 if elapsed > float(cycle_seconds):
+                                    _send_cycle_expired()
                                     close_after = time.monotonic()
                                     if log_fn is not None and not late_event_stop_logged:
                                         log_fn(
@@ -1053,6 +1103,8 @@ def _ws_reader_target(  # noqa: C901, PLR0912, PLR0913, PLR0915
                 effective_cycle_end is not None
                 and datetime.now(timezone.utc).replace(tzinfo=None) >= effective_cycle_end
             ):
+                if close_after is None:
+                    _send_cycle_expired()
                 close_after = close_after or (time.monotonic() + cycle_grace_seconds)
                 if log_fn is not None and not hard_end_stop_logged:
                     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -1156,15 +1208,52 @@ def iter_polymarket_trade_events(
         reader.start()
 
         try:
+            _draining = False
+            _drain_wall_clock_deadline = (
+                effective_cycle_end + timedelta(seconds=cycle_grace_seconds + 10.0)
+                if effective_cycle_end is not None
+                else None
+            )
             while True:
                 try:
                     item = event_queue.get(timeout=1.0)
                 except _queue_mod.Empty:
                     if not reader.is_alive():
                         break
+                    # 即使队列暂空，也检查 wall-clock 是否已超期
+                    if _drain_wall_clock_deadline is not None:
+                        utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
+                        if utc_now >= _drain_wall_clock_deadline and not _draining:
+                            _draining = True
+                            if log_fn is not None:
+                                log_fn(
+                                    f"[polymarket] {spec.slug} 消费侧 wall-clock 已超过窗口截止+缓冲，"
+                                    "对剩余队列进入快速排空模式"
+                                )
                     continue
                 if item is _WS_READER_DONE:
                     break
+                if item is _WS_CYCLE_EXPIRED:
+                    _draining = True
+                    if log_fn is not None:
+                        log_fn(
+                            f"[polymarket] {spec.slug} 收到窗口过期信号，"
+                            f"对剩余队列事件进入快速排空模式（跳过 enricher/策略处理）"
+                        )
+                    continue
+                if _draining:
+                    continue  # 快速排空：跳过 enricher 和 yield，仅从队列移除
+                # 补充 wall-clock 检测（防止 sentinel 丢失或延迟太久）
+                if _drain_wall_clock_deadline is not None:
+                    utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
+                    if utc_now >= _drain_wall_clock_deadline:
+                        _draining = True
+                        if log_fn is not None:
+                            log_fn(
+                                f"[polymarket] {spec.slug} 消费侧 wall-clock 已超过窗口截止+缓冲，"
+                                "对剩余队列进入快速排空模式"
+                            )
+                        continue
                 if metadata_enricher is not None:
                     item.metadata.update(metadata_enricher(item, spec) or {})
                 yield item

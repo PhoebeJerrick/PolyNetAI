@@ -4,6 +4,7 @@ import argparse
 import atexit
 import shutil
 import sys
+import time
 from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from datetime import datetime, timezone
@@ -242,8 +243,12 @@ def _wrap_event_stream_with_config_reload(
 ) :
     cfg_path = Path(config_path)
     last_mtime = cfg_path.stat().st_mtime if cfg_path.exists() else None
+    _last_stat_check = time.monotonic()
+    _STAT_CHECK_INTERVAL = 5.0  # 降低 stat 频率：每 5 秒检测一次而非每事件
     for event in events:
-        if cfg_path.exists():
+        _now_mono = time.monotonic()
+        if _now_mono - _last_stat_check >= _STAT_CHECK_INTERVAL and cfg_path.exists():
+            _last_stat_check = _now_mono
             current_mtime = cfg_path.stat().st_mtime
             if last_mtime is None:
                 last_mtime = current_mtime

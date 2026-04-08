@@ -180,7 +180,8 @@ class LivePaperRunner:
                 and progress_interval_seconds > 0
                 and time.monotonic() - last_progress_flush >= progress_interval_seconds
             ):
-                on_progress(self._build_live_result(cycle_rows, decision_rows, snapshot_rows))
+                # 轻量刷新：仅用 cycle_rows（几行）构建 metrics+cycles，跳过 3000 行的 decision/snapshot
+                on_progress(self._build_live_result_lightweight(cycle_rows))
                 last_progress_flush = time.monotonic()
 
             if (
@@ -209,6 +210,29 @@ class LivePaperRunner:
         return LiveRunnerResult(
             replay_result=replay_result,
             snapshot_df=pd.DataFrame(list(snapshot_rows)),
+        )
+
+    def _build_live_result_lightweight(
+        self,
+        cycle_rows: list[dict[str, object]],
+    ) -> LiveRunnerResult:
+        """仅构建 dashboard 刷新所需的 metrics + cycles，跳过 decision/snapshot DataFrame。"""
+        cycle_df = pd.DataFrame(list(cycle_rows))
+        from polynet_ai.reporting.performance import summarize_cycles, DecisionSummary
+        performance = summarize_cycles(cycle_df, total_fees=self.engine.account.fees_paid)
+        from dataclasses import asdict
+        metrics_row = asdict(performance) | asdict(DecisionSummary(0, 0, 0, 0, 0.0))
+        metrics_df = pd.DataFrame([metrics_row])
+        from polynet_ai.engine.replay import ReplayResult
+        replay_result = ReplayResult(
+            cycle_df=cycle_df,
+            decision_df=pd.DataFrame(),
+            metrics_df=metrics_df,
+            performance=performance,
+        )
+        return LiveRunnerResult(
+            replay_result=replay_result,
+            snapshot_df=pd.DataFrame(),
         )
 
 

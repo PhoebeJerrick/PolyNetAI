@@ -64,17 +64,27 @@ def trade_event_from_record(record: dict[str, Any]) -> TradeEvent:
 
 
 class TradeEventRecorder:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, flush_interval_seconds: float = 1.0) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._fh = self.path.open("w", encoding="utf-8")
+        self._flush_interval = max(0.1, flush_interval_seconds)
+        self._last_flush = 0.0  # monotonic timestamp
+        self._pending_writes = 0
 
     def record(self, event: TradeEvent) -> None:
         self._fh.write(json.dumps(trade_event_to_record(event), ensure_ascii=False) + "\n")
-        self._fh.flush()
+        self._pending_writes += 1
+        import time as _time_mod
+        now = _time_mod.monotonic()
+        if now - self._last_flush >= self._flush_interval or self._pending_writes >= 50:
+            self._fh.flush()
+            self._last_flush = now
+            self._pending_writes = 0
 
     def close(self) -> None:
         if not self._fh.closed:
+            self._fh.flush()
             self._fh.close()
 
     def __enter__(self) -> "TradeEventRecorder":
