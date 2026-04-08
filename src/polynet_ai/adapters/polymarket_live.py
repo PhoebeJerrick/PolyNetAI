@@ -531,6 +531,10 @@ def _discover_time_bucket_markets(slug_prefix: str, limit: int) -> list[Polymark
             spec = fetch_market_spec(slug)
         except Exception:
             continue
+        # 优先使用 slug 推导的时间窗判定是否已过期，避免 Gamma endDate 滞后导致旧窗被再次选中。
+        slug_start = window_start_naive_utc_from_slug(spec.slug)
+        if slug_start is not None and now >= slug_start + timedelta(seconds=cycle_seconds):
+            continue
         if spec.end_time is not None and spec.end_time <= now:
             continue
         if spec.raw.get("acceptingOrders") is False:
@@ -579,6 +583,11 @@ def discover_active_markets(slug_prefix: str, limit: int, page_size: int = 100) 
             try:
                 spec = PolymarketMarketSpec.from_market_json(market)
             except ValueError:
+                continue
+            cycle_seconds = cycle_seconds_from_market_slug(spec.slug) or DEFAULT_CYCLE_SECONDS
+            slug_start = window_start_naive_utc_from_slug(spec.slug)
+            # 对分页接口同样做 slug 时窗过滤，避免 API 活跃标记延迟把旧窗带进来。
+            if slug_start is not None and now >= slug_start + timedelta(seconds=float(cycle_seconds)):
                 continue
             # Gamma 有时仍返回「活跃」但 5 分钟窗已结束的市场；旧窗几乎不会有 last_trade_price，会导致 0 事件、0 周期。
             if spec.end_time is not None and spec.end_time <= now:
@@ -970,7 +979,12 @@ def _ws_reader_target(  # noqa: C901, PLR0912, PLR0913, PLR0915
                             break
                         continue
 
+                    stop_message_batch = False
                     for message in _iter_message_objects(raw):
+                        # 单批消息内也要检查硬截止，避免一次 recv 返回大量积压数据时拖延切窗。
+                        if close_after is not None and time.monotonic() >= close_after:
+                            stop_message_batch = True
+                            break
                         if align_orderbook_with_trade_ws:
                             parsed_book = _extract_book_level_from_ws_message(message, spec)
                             if parsed_book is not None:
@@ -1005,12 +1019,15 @@ def _ws_reader_target(  # noqa: C901, PLR0912, PLR0913, PLR0915
                                             f"limit={cycle_seconds}s action=switch_to_next_cycle ###"
                                         )
                                         late_event_stop_logged = True
-                                    continue
+                                    stop_message_batch = True
+                                    break
                             last_data_at = time.monotonic()
                             session_events += 1
                             if eff_cutoff_naive is not None and event.timestamp < eff_cutoff_naive:
                                 continue
                             event_queue.put(event)
+                    if stop_message_batch:
+                        break
             except closed_exc as e:
                 reconnect_attempt += 1
                 session_dur = time.monotonic() - session_start

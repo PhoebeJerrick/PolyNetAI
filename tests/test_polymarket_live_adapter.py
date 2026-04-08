@@ -476,9 +476,10 @@ def test_account_env_keys_for_index_suffixes_keys() -> None:
 
 
 def test_discover_active_markets_filters_by_slug_prefix(monkeypatch) -> None:
+    future_slug = "btc-updown-5m-4070952000"  # 2099-01-01 12:00:00 UTC
     payload = [
         {
-            "slug": "btc-updown-5m-1773826800",
+            "slug": future_slug,
             "conditionId": "0x1",
             "outcomes": "[\"Up\", \"Down\"]",
             "clobTokenIds": "[\"yes-1\", \"no-1\"]",
@@ -503,7 +504,7 @@ def test_discover_active_markets_filters_by_slug_prefix(monkeypatch) -> None:
     specs = discover_active_markets("btc-updown-5m-", limit=10, page_size=100)
 
     assert len(specs) == 1
-    assert specs[0].slug == "btc-updown-5m-1773826800"
+    assert specs[0].slug == future_slug
 
 
 def test_discover_time_bucket_markets_derives_nearby_5m_slugs(monkeypatch) -> None:
