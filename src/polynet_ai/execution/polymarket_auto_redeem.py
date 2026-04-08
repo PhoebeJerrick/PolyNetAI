@@ -278,14 +278,17 @@ def run_auto_redeem_scan(
     *,
     priority_condition_ids: list[str] | None = None,
     log_fn: Callable[[str], None] | None = None,
+    deadline_seconds: float = 5.0,
 ) -> RedeemScanReport:
     """
     扫描 Data API 可赎回项并逐个尝试 Relayer redeem。
     `priority_condition_ids` 非空时优先尝试这些 condition（例如刚结束的周期）。
+    `deadline_seconds` — 整次扫描的时间上限（秒），超时后停止处理剩余 condition。
     返回 `RedeemScanReport`（含每条 condition 处理结果，便于写入 Excel）。
     """
     log = log_fn or (lambda m: print(m, flush=True))
     audit: list[dict[str, Any]] = []
+    scan_start = time.time()
     try:
         items = fetch_redeemable_positions_aggregated(settings.purse_address)
     except Exception as exc:  # noqa: BLE001 — 网络抖动不应拖垮整段 live paper 主流程
@@ -331,6 +334,17 @@ def run_auto_redeem_scan(
     now = time.time()
     success = 0
     for entry in items:
+        if deadline_seconds > 0 and (time.time() - scan_start) >= deadline_seconds:
+            log(f"[redeem] 扫描已达 {deadline_seconds:g}s deadline，跳过剩余 condition")
+            audit.append(
+                {
+                    "condition_id": "",
+                    "slug": "",
+                    "outcome": "deadline_exceeded",
+                    "detail": f"elapsed>{deadline_seconds:g}s",
+                }
+            )
+            break
         cid = str(entry.get("condition_id") or "")
         slug = str(entry.get("slug") or "")
         if not cid:

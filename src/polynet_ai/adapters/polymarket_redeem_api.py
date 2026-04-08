@@ -6,15 +6,11 @@ Polymarket Data API：可赎回持仓（redeemable positions）。
 from __future__ import annotations
 
 import json
-import time
 from typing import Any
 
 import requests
 
 DATA_API_BASE = "https://data-api.polymarket.com"
-
-# 与 Gamma `_fetch_json` 类似：应对偶发 TCP 重置 / 中间设备断连（如 Windows 10054）。
-_REDEEM_POSITIONS_RETRY_DELAYS_SEC = (0.0, 0.6, 1.2, 2.4)
 
 
 def fetch_redeemable_positions_aggregated(
@@ -22,12 +18,13 @@ def fetch_redeemable_positions_aggregated(
     *,
     limit: int = 500,
     session: requests.Session | None = None,
-    timeout: tuple[float, float] = (15.0, 60.0),
+    timeout: tuple[float, float] = (3.0, 4.0),
 ) -> list[dict[str, Any]]:
     """
     拉取用户当前可 redeem 的持仓，并按 `condition_id` 聚合。
 
     每项含：condition_id, slug, expected_payout, size, positions（原始行列表）。
+    不做重试：由调用方 ``run_auto_redeem_scan`` 统一控制 deadline。
     """
     addr = (user_address or "").strip()
     if not addr.startswith("0x"):
@@ -35,38 +32,16 @@ def fetch_redeemable_positions_aggregated(
     sess = session or requests.Session()
     sess.headers.setdefault("User-Agent", "PolyNetAI/1.0 (+redeem)")
 
-    last_exc: BaseException | None = None
-    data: Any | None = None
-    for attempt, delay_sec in enumerate(_REDEEM_POSITIONS_RETRY_DELAYS_SEC):
-        if delay_sec:
-            time.sleep(delay_sec)
-        try:
-            resp = sess.get(
-                f"{DATA_API_BASE}/positions",
-                params={"user": addr, "redeemable": "true", "limit": int(limit)},
-                timeout=timeout,
-            )
-            resp.raise_for_status()
-            raw = resp.json()
-        except (
-            requests.exceptions.RequestException,
-            json.JSONDecodeError,
-            TypeError,
-            ValueError,
-        ) as exc:
-            last_exc = exc
-            if attempt == len(_REDEEM_POSITIONS_RETRY_DELAYS_SEC) - 1:
-                raise
-            continue
-        if not isinstance(raw, list):
-            return []
-        data = raw
-        break
-
-    if data is None:
-        if last_exc is not None:
-            raise last_exc
+    resp = sess.get(
+        f"{DATA_API_BASE}/positions",
+        params={"user": addr, "redeemable": "true", "limit": int(limit)},
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    raw = resp.json()
+    if not isinstance(raw, list):
         return []
+    data = raw
 
     by_cond: dict[str, dict[str, Any]] = {}
     for p in data:

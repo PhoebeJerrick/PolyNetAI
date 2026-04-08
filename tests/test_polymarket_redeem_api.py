@@ -11,18 +11,17 @@ def test_fetch_redeemable_empty_address() -> None:
     assert fetch_redeemable_positions_aggregated("not_hex") == []
 
 
-@patch("polynet_ai.adapters.polymarket_redeem_api.time.sleep", lambda *_: None)
-def test_fetch_redeemable_retries_on_connection_error() -> None:
-    ok = MagicMock()
-    ok.json.return_value = []
-    ok.raise_for_status = MagicMock()
+def test_fetch_redeemable_raises_on_connection_error() -> None:
+    """重试已移除；ConnectionError 直接传播给调用方。"""
     session = MagicMock()
-    session.get.side_effect = [
-        requests.exceptions.ConnectionError("reset"),
-        ok,
-    ]
-    assert fetch_redeemable_positions_aggregated("0xabc", session=session) == []
-    assert session.get.call_count == 2
+    session.get.side_effect = requests.exceptions.ConnectionError("reset")
+    try:
+        fetch_redeemable_positions_aggregated("0xabc", session=session)
+    except requests.exceptions.ConnectionError:
+        pass
+    else:
+        raise AssertionError("expected ConnectionError")
+    assert session.get.call_count == 1
 
 
 def test_fetch_redeemable_aggregates_by_condition() -> None:

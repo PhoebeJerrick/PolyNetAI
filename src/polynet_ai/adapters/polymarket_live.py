@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import queue as _queue_mod
 import re
 import socket
 import ssl
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -770,64 +772,49 @@ def ws_message_to_trade_event(message: dict[str, Any], spec: PolymarketMarketSpe
     )
 
 
-def iter_polymarket_trade_events(
-    market_specs: Iterable[PolymarketMarketSpec],
+# ---------------------------------------------------------------------------
+# WS reader thread — 独立线程执行 recv + ping，与消费者解耦
+# ---------------------------------------------------------------------------
+
+_WS_READER_DONE = object()  # sentinel: 读线程结束
+
+
+def _ws_reader_target(  # noqa: C901, PLR0912, PLR0913, PLR0915
     *,
-    metadata_enricher: Callable[[TradeEvent, PolymarketMarketSpec], dict[str, Any]] | None = None,
-    align_orderbook_with_trade_ws: bool = True,
-    ping_interval_seconds: float = 5.0,
-    receive_timeout_seconds: float = 1.0,
-    cycle_grace_seconds: float = 5.0,
-    reconnect_delay_seconds: float = 1.0,
-    reconnect_max_delay_seconds: float = 8.0,
-    data_silence_timeout_seconds: float = 45.0,
-    connect_timeout_seconds: float = 15.0,
-    post_window_start_delay_seconds: float = DEFAULT_POST_WINDOW_START_DELAY_SECONDS,
-    log_fn: Callable[[str], None] | None = None,
-) -> Iterable[TradeEvent]:
-    websocket = _import_websocket_module()
-    timeout_exc = websocket.WebSocketTimeoutException
-    closed_exc = websocket.WebSocketConnectionClosedException
+    spec: PolymarketMarketSpec,
+    event_queue: _queue_mod.Queue,
+    stop_event: threading.Event,
+    websocket_module: Any,
+    align_orderbook_with_trade_ws: bool,
+    ping_interval_seconds: float,
+    receive_timeout_seconds: float,
+    cycle_grace_seconds: float,
+    reconnect_delay_seconds: float,
+    reconnect_max_delay_seconds: float,
+    data_silence_timeout_seconds: float,
+    connect_timeout_seconds: float,
+    cycle_seconds: float,
+    cycle_window_start: datetime | None,
+    effective_cycle_end: datetime | None,
+    eff_cutoff_naive: datetime | None,
+    log_fn: Callable[[str], None] | None,
+) -> None:
+    """Background WS reader: recv + ping + parse, feeds TradeEvent to *event_queue*.
 
-    for spec in market_specs:
-        ws_book_cache: dict[str, tuple[datetime, dict[str, float | None]]] = {}
-        if log_fn is not None:
-            log_fn(f"[polymarket] 订阅周期 {spec.slug}")
-        eff_cutoff_naive = effective_strategy_start_naive_utc(
-            spec.slug, spec.start_time, post_window_start_delay_seconds
-        )
-        if post_window_start_delay_seconds > 0 and eff_cutoff_naive is not None:
-            eff_aware = naive_utc_to_aware_utc(eff_cutoff_naive)
-            if datetime.now(timezone.utc) < eff_aware:
-                if log_fn is not None:
-                    log_fn(
-                        f"[polymarket] {spec.slug} 策略生效时刻 "
-                        f"{eff_aware.strftime('%Y-%m-%d %H:%M:%S')}Z（窗起点+{post_window_start_delay_seconds:g}s），等待中..."
-                    )
-                sleep_until_utc_instant(eff_aware)
-        close_after = None
-        cycle_seconds = cycle_seconds_from_market_slug(spec.slug) or DEFAULT_CYCLE_SECONDS
-        slug_window_start = window_start_naive_utc_from_slug(spec.slug)
-        cycle_window_start = spec.start_time or slug_window_start
-        if (
-            spec.start_time is not None
-            and slug_window_start is not None
-            and abs((spec.start_time - slug_window_start).total_seconds()) > float(cycle_seconds)
-        ):
-            # Gamma 与 slug 时间戳异常不一致时，优先以实时市场 start_time 作为窗口起点，避免误判超窗。
-            cycle_window_start = spec.start_time
-        # 时间桶市场以 slug 为准：window_start + cycle_seconds 才是硬结束时刻。
-        # 对于这类市场，不依赖 Gamma end_time 触发切窗，避免旧窗流拖延导致错过新窗前段。
-        effective_cycle_end = (
-            cycle_window_start + timedelta(seconds=float(cycle_seconds))
-            if cycle_window_start is not None
-            else spec.end_time
-        )
-        late_event_stop_logged = False
-        hard_end_stop_logged = False
-        reconnect_attempt = 0
+    当所有事件发送完毕（或 stop_event 被置位）后，向 queue 放入
+    ``_WS_READER_DONE`` 哨兵，通知消费者退出。
+    """
+    timeout_exc = websocket_module.WebSocketTimeoutException
+    closed_exc = websocket_module.WebSocketConnectionClosedException
 
-        while True:
+    ws_book_cache: dict[str, tuple[datetime, dict[str, float | None]]] = {}
+    close_after: float | None = None
+    late_event_stop_logged = False
+    hard_end_stop_logged = False
+    reconnect_attempt = 0
+
+    try:  # outer try — guarantee sentinel
+        while not stop_event.is_set():
             utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
             if effective_cycle_end is not None and utc_now >= effective_cycle_end:
                 close_after = close_after or (time.monotonic() + cycle_grace_seconds)
@@ -849,17 +836,17 @@ def iter_polymarket_trade_events(
             if sslopt is not None:
                 ws_kw["sslopt"] = sslopt
             ws_kw.update(_websocket_proxy_kwargs())
-            # DNS 预解析仅用于诊断日志；不替换 URL，避免破坏 Cloudflare SNI 握手
             if log_fn is not None and reconnect_attempt == 0:
                 resolved_ip = _resolve_host_cached(_MARKET_WS_HOST)
                 if resolved_ip is not None:
                     log_fn(f"[ws-diag] DNS 预解析 {_MARKET_WS_HOST} -> {resolved_ip}")
+
             connection = None
-            while True:
+            while not stop_event.is_set():
                 connect_err: BaseException | None = None
                 t_connect_start = time.monotonic()
                 try:
-                    connection = websocket.create_connection(MARKET_WS_URL, **ws_kw)
+                    connection = websocket_module.create_connection(MARKET_WS_URL, **ws_kw)
                     t_connect_elapsed = time.monotonic() - t_connect_start
                     connection.settimeout(receive_timeout_seconds)
                     connection.send(
@@ -897,7 +884,6 @@ def iter_polymarket_trade_events(
                 t_connect_elapsed = time.monotonic() - t_connect_start
                 if close_after is not None and time.monotonic() >= close_after:
                     break
-                # P2-fix: 指数退避重连
                 backoff_delay = min(reconnect_max_delay_seconds, reconnect_delay_seconds * (2 ** min(reconnect_attempt - 1, 5)))
                 if log_fn is not None:
                     why = f" {_ws_error_detail(connect_err)}" if connect_err is not None else ""
@@ -911,17 +897,15 @@ def iter_polymarket_trade_events(
             if connection is None:
                 break
 
-            # P0-fix: 数据静默看门狗 — 记录最近一次收到有效 trade 事件的时间
             last_data_at = time.monotonic()
-            session_start = time.monotonic()  # 诊断：本次连接会话起始时间
-            session_events = 0  # 诊断：本次连接会话收到的事件数
-            ping_sent_count = 0  # 诊断：本次会话发送的心跳数
+            session_start = time.monotonic()
+            session_events = 0
+            ping_sent_count = 0
 
             try:
-                while True:
+                while not stop_event.is_set():
                     now = time.monotonic()
 
-                    # P0-fix: 数据静默超时 — 连接存活但长时间无有效事件，强制断开重连
                     if data_silence_timeout_seconds > 0 and now - last_data_at >= data_silence_timeout_seconds:
                         if log_fn is not None:
                             log_fn(
@@ -930,7 +914,6 @@ def iter_polymarket_trade_events(
                             )
                         break
 
-                    # P3-fix: 改回文本 PING — 代理/CDN 对文本帧透传率远高于二进制 ping 帧
                     if now - last_ping >= ping_interval_seconds:
                         try:
                             connection.send("PING")
@@ -996,7 +979,6 @@ def iter_polymarket_trade_events(
                             if cycle_window_start is not None:
                                 elapsed = (event.timestamp - cycle_window_start).total_seconds()
                                 if elapsed > float(cycle_seconds):
-                                    # 硬边界：超过周期长度后不再消费旧窗事件，尽快切换到新周期。
                                     close_after = time.monotonic()
                                     if log_fn is not None and not late_event_stop_logged:
                                         log_fn(
@@ -1006,17 +988,14 @@ def iter_polymarket_trade_events(
                                         )
                                         late_event_stop_logged = True
                                     continue
-                            if metadata_enricher is not None:
-                                event.metadata.update(metadata_enricher(event, spec) or {})
                             last_data_at = time.monotonic()
                             session_events += 1
                             if eff_cutoff_naive is not None and event.timestamp < eff_cutoff_naive:
                                 continue
-                            yield event
+                            event_queue.put(event)
             except closed_exc as e:
                 reconnect_attempt += 1
                 session_dur = time.monotonic() - session_start
-                # P2-fix: 指数退避重连
                 backoff_delay = min(reconnect_max_delay_seconds, reconnect_delay_seconds * (2 ** min(reconnect_attempt - 1, 5)))
                 if log_fn is not None:
                     log_fn(
@@ -1030,7 +1009,7 @@ def iter_polymarket_trade_events(
             finally:
                 try:
                     connection.close()
-                except Exception:  # pragma: no cover - defensive cleanup
+                except Exception:
                     pass
 
             if close_after is not None and time.monotonic() >= close_after:
@@ -1055,7 +1034,6 @@ def iter_polymarket_trade_events(
                     break
             if close_after is None:
                 reconnect_attempt += 1
-                # P2-fix: 指数退避重连
                 backoff_delay = min(reconnect_max_delay_seconds, reconnect_delay_seconds * (2 ** min(reconnect_attempt - 1, 5)))
                 if log_fn is not None:
                     log_fn(f"[polymarket] 连接结束但窗口未完结，{backoff_delay:.1f}s 后重连 {spec.slug}")
@@ -1064,6 +1042,100 @@ def iter_polymarket_trade_events(
 
             if close_after is not None and time.monotonic() >= close_after:
                 break
+    finally:
+        event_queue.put(_WS_READER_DONE)
+
+
+def iter_polymarket_trade_events(
+    market_specs: Iterable[PolymarketMarketSpec],
+    *,
+    metadata_enricher: Callable[[TradeEvent, PolymarketMarketSpec], dict[str, Any]] | None = None,
+    align_orderbook_with_trade_ws: bool = True,
+    ping_interval_seconds: float = 5.0,
+    receive_timeout_seconds: float = 1.0,
+    cycle_grace_seconds: float = 5.0,
+    reconnect_delay_seconds: float = 1.0,
+    reconnect_max_delay_seconds: float = 8.0,
+    data_silence_timeout_seconds: float = 45.0,
+    connect_timeout_seconds: float = 15.0,
+    post_window_start_delay_seconds: float = DEFAULT_POST_WINDOW_START_DELAY_SECONDS,
+    log_fn: Callable[[str], None] | None = None,
+) -> Iterable[TradeEvent]:
+    websocket = _import_websocket_module()
+
+    for spec in market_specs:
+        if log_fn is not None:
+            log_fn(f"[polymarket] 订阅周期 {spec.slug}")
+        eff_cutoff_naive = effective_strategy_start_naive_utc(
+            spec.slug, spec.start_time, post_window_start_delay_seconds
+        )
+        if post_window_start_delay_seconds > 0 and eff_cutoff_naive is not None:
+            eff_aware = naive_utc_to_aware_utc(eff_cutoff_naive)
+            if datetime.now(timezone.utc) < eff_aware:
+                if log_fn is not None:
+                    log_fn(
+                        f"[polymarket] {spec.slug} 策略生效时刻 "
+                        f"{eff_aware.strftime('%Y-%m-%d %H:%M:%S')}Z（窗起点+{post_window_start_delay_seconds:g}s），等待中..."
+                    )
+                sleep_until_utc_instant(eff_aware)
+        _cycle_seconds = cycle_seconds_from_market_slug(spec.slug) or DEFAULT_CYCLE_SECONDS
+        slug_window_start = window_start_naive_utc_from_slug(spec.slug)
+        cycle_window_start = spec.start_time or slug_window_start
+        if (
+            spec.start_time is not None
+            and slug_window_start is not None
+            and abs((spec.start_time - slug_window_start).total_seconds()) > float(_cycle_seconds)
+        ):
+            cycle_window_start = spec.start_time
+        effective_cycle_end = (
+            cycle_window_start + timedelta(seconds=float(_cycle_seconds))
+            if cycle_window_start is not None
+            else spec.end_time
+        )
+        event_queue: _queue_mod.Queue = _queue_mod.Queue()
+        stop_event = threading.Event()
+        reader = threading.Thread(
+            target=_ws_reader_target,
+            kwargs=dict(
+                spec=spec,
+                event_queue=event_queue,
+                stop_event=stop_event,
+                websocket_module=websocket,
+                align_orderbook_with_trade_ws=align_orderbook_with_trade_ws,
+                ping_interval_seconds=ping_interval_seconds,
+                receive_timeout_seconds=receive_timeout_seconds,
+                cycle_grace_seconds=cycle_grace_seconds,
+                reconnect_delay_seconds=reconnect_delay_seconds,
+                reconnect_max_delay_seconds=reconnect_max_delay_seconds,
+                data_silence_timeout_seconds=data_silence_timeout_seconds,
+                connect_timeout_seconds=connect_timeout_seconds,
+                cycle_seconds=_cycle_seconds,
+                cycle_window_start=cycle_window_start,
+                effective_cycle_end=effective_cycle_end,
+                eff_cutoff_naive=eff_cutoff_naive,
+                log_fn=log_fn,
+            ),
+            daemon=True,
+            name=f"ws-reader-{spec.slug}",
+        )
+        reader.start()
+
+        try:
+            while True:
+                try:
+                    item = event_queue.get(timeout=1.0)
+                except _queue_mod.Empty:
+                    if not reader.is_alive():
+                        break
+                    continue
+                if item is _WS_READER_DONE:
+                    break
+                if metadata_enricher is not None:
+                    item.metadata.update(metadata_enricher(item, spec) or {})
+                yield item
+        finally:
+            stop_event.set()
+            reader.join(timeout=5.0)
 
 
 def iter_polymarket_trade_events_robot(
