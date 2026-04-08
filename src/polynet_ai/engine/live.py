@@ -214,19 +214,24 @@ def export_live_result(
     title: str = "Polynet AI Live Monitoring Dashboard",
     refresh_seconds: float = 1.0,
     write_excel: bool = True,
+    lightweight: bool = False,
     position_value_denominator: float | None = None,
     redeem_audit_df: pd.DataFrame | None = None,
 ) -> Path:
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
-    result.replay_result.cycle_df.to_csv(directory / "cycles.csv", index=False, encoding="utf-8-sig")
-    result.replay_result.decision_df.to_csv(directory / "decisions.csv", index=False, encoding="utf-8-sig")
+
     result.replay_result.metrics_df.to_csv(directory / "metrics.csv", index=False, encoding="utf-8-sig")
+    result.replay_result.cycle_df.to_csv(directory / "cycles.csv", index=False, encoding="utf-8-sig")
+
+    if lightweight:
+        return directory
+
+    result.replay_result.decision_df.to_csv(directory / "decisions.csv", index=False, encoding="utf-8-sig")
     result.snapshot_df.to_csv(directory / "snapshots.csv", index=False, encoding="utf-8-sig")
     _vtag = get_version_tag()
     if redeem_audit_df is not None and not redeem_audit_df.empty:
         redeem_audit_df.to_csv(directory / "redeem_audit.csv", index=False, encoding="utf-8-sig")
-    # Heavy xlsx exports are optional in streaming progress flushes.
     if write_excel:
         export_trade_ledger_to_excel(
             decision_df=result.replay_result.decision_df,

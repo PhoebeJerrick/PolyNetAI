@@ -64,6 +64,7 @@ def main() -> int:
                 args.output_dir,
                 refresh_seconds=args.dashboard_refresh_seconds,
                 write_excel=False,
+                lightweight=True,
             )
 
         progress_callback = _flush_progress

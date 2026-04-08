@@ -576,6 +576,7 @@ def _execute_one_polymarket_cycle(
                 title=f"PolyNet AI {spec.slug}",
                 refresh_seconds=args.dashboard_refresh_seconds,
                 write_excel=False,
+                lightweight=True,
             )
 
         progress_callback = _flush_progress

@@ -909,6 +909,21 @@ def _ws_reader_target(  # noqa: C901, PLR0912, PLR0913, PLR0915
                     if close_after is not None and now >= close_after:
                         break
 
+                    if effective_cycle_end is not None and close_after is None:
+                        utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
+                        if utc_now >= effective_cycle_end:
+                            close_after = now + cycle_grace_seconds
+                            if log_fn is not None and not hard_end_stop_logged:
+                                log_fn(
+                                    "### [窗口到期切换] "
+                                    f"cycle={spec.slug} reason=hard_window_end "
+                                    f"window_start={cycle_window_start.isoformat() if cycle_window_start is not None else '-'} "
+                                    f"effective_end={effective_cycle_end.isoformat()} "
+                                    f"now_utc={utc_now.isoformat()} "
+                                    "action=switch_to_next_cycle ###"
+                                )
+                                hard_end_stop_logged = True
+
                     if data_silence_timeout_seconds > 0 and now - last_data_at >= data_silence_timeout_seconds:
                         if log_fn is not None:
                             log_fn(

@@ -946,6 +946,7 @@ def main(args: argparse.Namespace | None = None) -> int:
                 args.output_dir,
                 refresh_seconds=args.dashboard_refresh_seconds,
                 write_excel=False,
+                lightweight=True,
                 position_value_denominator=position_value_denominator,
             )
 
