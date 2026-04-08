@@ -36,6 +36,11 @@ def _format_time_since_cycle_start(cycle_id: str, event_time: datetime) -> str:
     return f"t_rel={minutes}m{seconds:04.1f}s"
 
 
+def _format_log_time_now() -> str:
+    """返回当前本地时间（HH:MM:SS），用于 live 状态日志。"""
+    return datetime.now().strftime("%H:%M:%S")
+
+
 class LivePaperRunner:
     def __init__(self, engine: ReplayEngine) -> None:
         self.engine = engine
@@ -163,7 +168,7 @@ class LivePaperRunner:
             if status_every > 0 and index % status_every == 0:
                 t_rel = _format_time_since_cycle_start(event.cycle_id, event.timestamp)
                 print(
-                    f"[live] events={index} cycle={step.snapshot.cycle_id} {t_rel} "
+                    f"[{_format_log_time_now()}] [live] events={index} cycle={step.snapshot.cycle_id} {t_rel} "
                     f"ws_idx={ws_idx} "
                     f"net={step.snapshot.net_position:.3f} pnl={step.snapshot.cycle_net_profit:.3f} "
                     f"up={step.snapshot.up_last_price:.3f} down={step.snapshot.down_last_price:.3f} "
