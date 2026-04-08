@@ -85,7 +85,8 @@ def test_compute_adds_cost_and_position_value_change_columns_in_expected_order()
     cols = list(proc.columns)
 
     price_idx = cols.index("成交价格")
-    assert cols[price_idx + 1 : price_idx + 10] == [
+    assert cols[price_idx + 1 : price_idx + 11] == [
+        "同向成交均价",
         "同向成交价波动幅度(%)",
         "相对于加权均价的价格波动百分比",
         "Up积累份数",
@@ -98,18 +99,23 @@ def test_compute_adds_cost_and_position_value_change_columns_in_expected_order()
     ]
 
     assert rows.loc[0, "Up持仓成本"] == 1
+    assert rows.loc[0, "同向成交均价"] == 0.5
     assert rows.loc[0, "相对于加权均价的价格波动百分比"] == 0
     assert rows.loc[1, "Up持仓成本"] == 1.6
+    assert rows.loc[1, "同向成交均价"] == 0.533
     assert rows.loc[1, "同向成交价波动幅度(%)"] == 0.2
     assert rows.loc[1, "相对于加权均价的价格波动百分比"] == 0.125
     assert rows.loc[1, "持仓价值加/减仓百分比"] == 0.6
     assert rows.loc[2, "Up持仓成本"] == 1.067
+    assert rows.loc[2, "同向成交均价"] == 0.575
     assert rows.loc[2, "相对于加权均价的价格波动百分比"] == 0.312
     assert rows.loc[2, "持仓价值加/减仓百分比"] == -0.333
     assert rows.loc[3, "Down持仓成本"] == 1
+    assert rows.loc[3, "同向成交均价"] == 0.25
     assert rows.loc[3, "相对于加权均价的价格波动百分比"] == 0
     assert rows.loc[3, "持仓价值加/减仓百分比"] == ""
     assert rows.loc[4, "Down持仓成本"] == 1.4
+    assert rows.loc[4, "同向成交均价"] == 0.233
     assert rows.loc[4, "同向成交价波动幅度(%)"] == -0.2
     assert rows.loc[4, "相对于加权均价的价格波动百分比"] == -0.143
     assert rows.loc[4, "持仓价值加/减仓百分比"] == 0.4

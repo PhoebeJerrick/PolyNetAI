@@ -3,6 +3,7 @@
 Polymarket 交易明细 Excel 持仓分析 + 盈亏汇总。
 
 插入到"成交价格"后的列（若输入中存在）：
+    同向成交均价 — 表示本方向（Up/Down）到当前行为止所有成交的份数加权均价（含买入和卖出），首笔即为当前成交价；
     同向成交价波动幅度(%) — 表示相对本周期内上一次同结果代币成交价的涨跌幅百分比，首笔为空；
     相对于加权均价的价格波动百分比 — 表示当前行成交价相对该方向当前加权均价的涨跌幅百分比；
     其后为 Up积累份数 / Up持仓成本 / Up的加权均价 / Down积累份数 / Down持仓成本 / Down加权均价 /
@@ -72,7 +73,7 @@ DOWN_KEYWORDS = ("down", "no", "跌", "看跌", "做空", "空")
 
 # ── column groups ────────────────────────────────────────────────────
 # 可选；由批量回放等上游提供，insert_columns 会紧挨「成交价格」插入，再插入 INSERTED_COLUMNS
-EXTRA_COLUMNS_AFTER_PRICE = ("同向成交价波动幅度(%)", "相对于加权均价的价格波动百分比")
+EXTRA_COLUMNS_AFTER_PRICE = ("同向成交均价", "同向成交价波动幅度(%)", "相对于加权均价的价格波动百分比")
 
 INSERTED_COLUMNS = (
     "Up积累份数",
@@ -337,8 +338,10 @@ def new_bucket() -> dict[str, float]:
     return {
         "up_held": 0.0, "up_cost": 0.0, "up_avg": 0.0,
         "up_realized": 0.0,
+        "up_fill_cost": 0.0, "up_fill_shares": 0.0,
         "dn_held": 0.0, "dn_cost": 0.0, "dn_avg": 0.0,
         "dn_realized": 0.0,
+        "dn_fill_cost": 0.0, "dn_fill_shares": 0.0,
         "anomaly_count": 0.0,
         "last_up": 0.0, "last_dn": 0.0,
     }
@@ -497,6 +500,7 @@ def compute(
     anomaly_v: list[str] = []
     same_outcome_move_v: list[object] = []
     weighted_avg_move_v: list[object] = []
+    same_dir_avg_v: list[object] = []
     up_pnl_v: list[object] = []
     dn_pnl_v: list[object] = []
     float_pnl_v: list[object] = []
@@ -565,6 +569,8 @@ def compute(
                 if excess > 1e-10:
                     b["anomaly_count"] += 1.0
                     row_anomalies.append(format_position_anomaly("Up", excess))
+            b["up_fill_cost"] += shares * price
+            b["up_fill_shares"] += shares
             b["last_up"] = price
         else:
             same_outcome_move = same_outcome_price_move_pct(price, pre_last_dn)
@@ -597,10 +603,18 @@ def compute(
                 if excess > 1e-10:
                     b["anomaly_count"] += 1.0
                     row_anomalies.append(format_position_anomaly("Down", excess))
+            b["dn_fill_cost"] += shares * price
+            b["dn_fill_shares"] += shares
             b["last_dn"] = price
 
         up_held = b["up_held"]
         dn_held = b["dn_held"]
+
+        if outcome == "up":
+            same_dir_avg = f3(b["up_fill_cost"] / b["up_fill_shares"]) if b["up_fill_shares"] > 1e-10 else ""
+        else:
+            same_dir_avg = f3(b["dn_fill_cost"] / b["dn_fill_shares"]) if b["dn_fill_shares"] > 1e-10 else ""
+        same_dir_avg_v.append(same_dir_avg)
 
         up_v.append(f3(up_held))
         up_cost_v.append(f3(b["up_cost"]))
@@ -648,6 +662,7 @@ def compute(
         net_val_v.append(net_position_cost_gap(up_held, dn_held, b["up_avg"], b["dn_avg"]))
 
     res = df.copy()
+    res["同向成交均价"] = same_dir_avg_v
     res["同向成交价波动幅度(%)"] = same_outcome_move_v
     res["相对于加权均价的价格波动百分比"] = weighted_avg_move_v
     res["Up积累份数"] = up_v
