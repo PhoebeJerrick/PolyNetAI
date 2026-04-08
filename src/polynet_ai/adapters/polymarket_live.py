@@ -906,6 +906,9 @@ def _ws_reader_target(  # noqa: C901, PLR0912, PLR0913, PLR0915
                 while not stop_event.is_set():
                     now = time.monotonic()
 
+                    if close_after is not None and now >= close_after:
+                        break
+
                     if data_silence_timeout_seconds > 0 and now - last_data_at >= data_silence_timeout_seconds:
                         if log_fn is not None:
                             log_fn(
