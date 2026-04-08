@@ -259,6 +259,41 @@ def hedge_entries(features: FeatureSnapshot, config: StrategyConfig) -> list[Ord
     size = _base_size(config, features) + excess * float(config.get("exposure.hedge_scale", 0.15))
     infer_missing = bool(config.get("opening_entry.infer_missing_with_binary_complement", True))
     ref = outcome_reference_price(features, opposite, infer_missing_with_binary_complement=infer_missing)
+
+    # P2-fix: 成本口径上限 — 防止价格极端不对称时对冲反而推高净敞口
+    # 计算本次对冲在成本口径上能增加的最大值，确保对冲后净敞口不超过 max_abs_exposure_value
+    max_exposure = float(config.get("exposure.max_abs_exposure_value", 200.0))
+    up_cost = features.up_held * features.up_avg_price
+    down_cost = features.down_held * features.down_avg_price
+    if ref > 1e-12:
+        projected_cost_delta = ref * size
+        if opposite == "up":
+            projected_net = abs((up_cost + projected_cost_delta) - down_cost)
+        else:
+            projected_net = abs(up_cost - (down_cost + projected_cost_delta))
+        # 如果对冲后净敞口反而变大且超限，裁剪份数使其不超限
+        current_net = abs(up_cost - down_cost)
+        if projected_net > max_exposure and projected_net > current_net:
+            # 计算使净敞口恰好等于 max_exposure 的最大份数
+            if opposite == "up":
+                # 买 UP: projected = |(up_cost + ref*shares) - down_cost|
+                # 目标: up_cost + ref*shares - down_cost <= max_exposure (当 up 侧更大时)
+                # 或: down_cost - (up_cost + ref*shares) <= max_exposure (当 down 侧更大时)
+                if up_cost >= down_cost:
+                    max_add = max(0.0, max_exposure - (up_cost - down_cost))
+                else:
+                    max_add = max(0.0, (down_cost - up_cost) + max_exposure)
+            else:
+                if down_cost >= up_cost:
+                    max_add = max(0.0, max_exposure - (down_cost - up_cost))
+                else:
+                    max_add = max(0.0, (up_cost - down_cost) + max_exposure)
+            max_shares = max_add / ref
+            if max_shares < size:
+                size = max(0.0, max_shares)
+        if size < 1e-12:
+            return []
+
     phase = determine_phase(features.cycle_elapsed_seconds, config)
     return [
         OrderIntent(

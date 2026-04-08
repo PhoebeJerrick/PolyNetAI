@@ -284,7 +284,7 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
         else:
             projected_exposure = abs(_up_cost_val - max(0.0, _down_cost_val - projected_delta))
 
-    if projected_exposure > max_exposure and clipped.category not in {"hedge", "last_minute"}:
+    if projected_exposure > max_exposure and clipped.category not in {"hedge", "last_minute", "stop_loss"}:
         return RiskDecision(False, None, "下单后净敞口超过风控阈值（含pending）")
 
     if clipped.action == "buy":
@@ -356,8 +356,9 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
                         return RiskDecision(False, None, "超过最大仓位红线(position.max_position_value)")
     else:
         # P1-fix: 卖出最低价格保护 — 防止在极低价位（如 0.01）挂卖导致巨额亏损
+        # P2-fix: 尾盘(last_minute)豁免最低价检查 — 避免亏损侧代币在结算时归零却无法提前止损
         min_sell_price = float(config.get("execution.min_sell_price", 0.05))
-        if min_sell_price > 0 and clipped.reference_price < min_sell_price:
+        if min_sell_price > 0 and clipped.reference_price < min_sell_price and clipped.category != "last_minute":
             return RiskDecision(
                 False,
                 None,
