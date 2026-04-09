@@ -253,7 +253,12 @@ execution:
   slippage_bps: 5                               # 滑点bps，默认5bps
   min_seconds_between_orders: 2.0               # 两次下单至少间隔2秒（按UP/DOWN方向独立计时）
   max_same_direction_buy_fills_per_second: 0    # 同1秒内同方向买入成交次数上限（UP/DOWN分别统计），为0，不限制
-  min_same_outcome_price_move_ratio: 0.005      # 同一方向连续下单的价格必须移动至少0.5%，避免超频下单
+  min_same_outcome_price_move_ratio: 0.005      # 同一方向连续下单的价格必须移动至少0.5%，避免超频下单（全局兜底值）
+  phase_min_price_move_ratio:                   # 每阶段独立的同向开仓最小价格波动（覆盖全局兜底）
+    phase_1: 0.015                              # Phase 1 (0–70s)：最小波动1.5%
+    phase_2: 0.015                              # Phase 2 (70–160s)：最小波动1.5%
+    phase_3: 0.015                              # Phase 3 (160–240s)：最小波动1.5%
+    phase_4: 0.015                              # Phase 4 (240s+)：最小波动1.5%
 
 # 【新增】每日风险管理参数
 daily_limits:

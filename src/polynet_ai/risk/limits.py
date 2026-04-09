@@ -216,44 +216,46 @@ def apply_risk_limits(features: FeatureSnapshot, intent: OrderIntent, config: St
                 f"同方向pending订单已达上限{max_pending_per_direction}笔（{clipped.outcome} {clipped.action}）",
             )
 
-    # 价格波动检查：仅对买入单生效；卖出单（止盈/止损/减仓）不受此约束
-    min_move = float(config.get("execution.min_same_outcome_price_move_ratio", 0.005))
+    # 价格波动检查：仅对买入单生效；卖出单（止盈/止损/减仓）不受此约束。
+    # 使用实时市场价（喂价前价格）判断市场移动幅度，每阶段可独立配置阈值（execution.phase_min_price_move_ratio.phase_N）。
     phase = determine_phase(features.cycle_elapsed_seconds, config)
-    # 第一阶段以建仓为主，放宽同向买入价格波动约束，避免连续加仓被“同价位”拦截。
-    phase1_relaxed_categories = {"trend", "grid", "mean_reversion", "hedge"}
-    skip_min_move_check = phase == 1 and clipped.category in phase1_relaxed_categories
+    global_min_move = float(config.get("execution.min_same_outcome_price_move_ratio", 0.015))
+    phase_key = f"execution.phase_min_price_move_ratio.phase_{phase}"
+    min_move = float(config.get(phase_key, global_min_move))
     if (
         clipped.action == "buy"
         and min_move > 0
-        and clipped.reference_price > 1e-12
-        and not skip_min_move_check
     ):
         key = "last_strategy_fill_price_up" if clipped.outcome == "up" else "last_strategy_fill_price_down"
         raw_last = clipped.metadata.get(key)
         if raw_last is not None:
             last_px = float(raw_last)
             if last_px > 1e-12:
-                move = abs(clipped.reference_price - last_px) / last_px
-                if move <= min_move:
-                    pct = min_move * 100.0
-                    # region agent log
-                    _debug_log(
-                        hypothesis_id="H3",
-                        location="limits.py:apply_risk_limits:min_move_block",
-                        message="Blocked by same-outcome price move rule",
-                        data={
-                            "cycle_id": str(clipped.cycle_id),
-                            "outcome": clipped.outcome,
-                            "reference_price": float(clipped.reference_price),
-                            "last_fill_price": float(last_px),
-                            "move_ratio": float(move),
-                            "threshold": float(min_move),
-                            "phase": int(phase),
-                            "elapsed": round(float(features.cycle_elapsed_seconds), 6),
-                        },
-                    )
-                    # endregion
-                    return RiskDecision(False, None, f"同方向买入价格相对上次成交价波动不足{pct:g}%")
+                # 用实时市场价（喂价前）衡量市场移动幅度，避免喂价缓存导致误判
+                live_price = features.up_last_price if clipped.outcome == "up" else features.down_last_price
+                if live_price > 1e-12:
+                    move = abs(live_price - last_px) / last_px
+                    if move <= min_move:
+                        pct = min_move * 100.0
+                        # region agent log
+                        _debug_log(
+                            hypothesis_id="H3",
+                            location="limits.py:apply_risk_limits:min_move_block",
+                            message="Blocked by same-outcome price move rule",
+                            data={
+                                "cycle_id": str(clipped.cycle_id),
+                                "outcome": clipped.outcome,
+                                "live_price": float(live_price),
+                                "reference_price": float(clipped.reference_price),
+                                "last_fill_price": float(last_px),
+                                "move_ratio": float(move),
+                                "threshold": float(min_move),
+                                "phase": int(phase),
+                                "elapsed": round(float(features.cycle_elapsed_seconds), 6),
+                            },
+                        )
+                        # endregion
+                        return RiskDecision(False, None, f"同方向开仓实时价相对上次成交价波动不足{pct:g}%（Phase {phase}）")
 
     # P0-fix: 预取 pending buy 仓位价值，用于敞口与仓位红线检查
     _pending_buy_up_val = float(clipped.metadata.get("pending_buy_up_value", 0.0))
